@@ -692,7 +692,11 @@ impl Startup {
 
         // ARCHITECTURE.md prompt (spawn_blocking via async helper)
         #[cfg(feature = "archmd")]
-        let arch_created = if !self.cli.resolve_no_context_files(&self.cfg) {
+        let ask_architecture = !self.cli.resolve_no_context_files(&self.cfg);
+        #[cfg(all(feature = "archmd", feature = "desktop"))]
+        let ask_architecture = ask_architecture && !self.cli.desktop;
+        #[cfg(feature = "archmd")]
+        let arch_created = if ask_architecture {
             let cwd = std::env::current_dir().ok();
             if let Some(cwd) = cwd {
                 crate::extras::archmd::ask_and_create_async(cwd)

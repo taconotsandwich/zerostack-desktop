@@ -1,4 +1,4 @@
-use iced::widget::{button, container, svg, text_editor};
+use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor, text_input};
 use iced::{Border, Color, Theme};
 
 pub(super) const PAPER: Color = Color::from_rgb8(25, 25, 25);
@@ -59,6 +59,55 @@ pub(super) fn editor(_theme: &Theme, _status: text_editor::Status) -> text_edito
         placeholder: MUTED,
         value: INK,
         selection: SELECTED,
+    }
+}
+
+pub(super) fn input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: SELECTED.into(),
+        border: Border {
+            radius: 8.0.into(),
+            ..Border::default()
+        },
+        icon: MUTED,
+        placeholder: MUTED,
+        value: INK,
+        selection: PAPER,
+    }
+}
+
+pub(super) fn picker(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    pick_list::Style {
+        text_color: INK,
+        placeholder_color: MUTED,
+        handle_color: MUTED,
+        background: if matches!(
+            status,
+            pick_list::Status::Hovered | pick_list::Status::Opened { .. }
+        ) {
+            SELECTED
+        } else {
+            Color::TRANSPARENT
+        }
+        .into(),
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+    }
+}
+
+pub(super) fn menu(_theme: &Theme) -> menu::Style {
+    menu::Style {
+        background: RAISED.into(),
+        border: Border {
+            radius: 8.0.into(),
+            ..Border::default()
+        },
+        text_color: INK,
+        selected_text_color: INK,
+        selected_background: SELECTED.into(),
+        shadow: Default::default(),
     }
 }
 

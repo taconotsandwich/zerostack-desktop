@@ -79,6 +79,7 @@ pub(super) enum Message {
     SlashMove(i32),
     RenameSelected,
     Close(window::Id),
+    Quit,
     RetryStartup,
     Project(String),
 }
@@ -192,6 +193,17 @@ impl App {
                         if let Some(Operation::Delete(id)) = &pending {
                             self.deleted.insert(id.clone());
                             self.panel = None;
+                            self.drafts.remove(id);
+                            if snapshot.session.id.as_str() == id {
+                                if let Some(next) = snapshot.sessions.first() {
+                                    return self.dispatch(Operation::Load(next.id.to_string()));
+                                }
+                                self.worker = None;
+                                self.snapshot = None;
+                                self.content = text_editor::Content::new();
+                                self.markdown.clear();
+                                return Task::none();
+                            }
                         }
                         if matches!(pending, Some(Operation::Rename { .. })) {
                             self.rename = None;
@@ -227,7 +239,12 @@ impl App {
                                     self.content = text_editor::Content::new();
                                 }
                                 if !new_messages && !output.text.trim().is_empty() {
-                                    show_result = Some(output.text.clone());
+                                    let inline = matches!(&pending, Some(Operation::Run(input)) if matches!(input.split_whitespace().next(), Some("/undo" | "/redo" | "/clear" | "/new" | "/rename" | "/add" | "/drop" | "/drop-all" | "/model" | "/provider" | "/prompt" | "/reasoning" | "/mode" | "/editsys")));
+                                    if inline {
+                                        self.status = output.text.clone();
+                                    } else {
+                                        show_result = Some(output.text.clone());
+                                    }
                                 }
                             }
                         }
@@ -269,12 +286,14 @@ impl App {
                 if input.is_empty() {
                     return Task::none();
                 }
-                if let Some(command) =
-                    commands::find(&input).filter(|command| command.confirmation.is_some())
-                {
-                    return self.choose(command);
-                }
                 self.submitted = Some(self.content.text());
+                if let Some((command, arguments)) = commands::confirmation(&input) {
+                    let task = self.choose(command);
+                    if self.fields.len() == 1 {
+                        self.fields[0] = arguments.to_string();
+                    }
+                    return task;
+                }
                 return self.dispatch(Operation::Run(input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
@@ -400,6 +419,8 @@ impl App {
             Message::Commands => {
                 if self.content.text().trim().is_empty() {
                     self.content = text_editor::Content::with_text("/");
+                    self.content
+                        .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
                 }
                 self.slash_dismissed = false;
                 self.panel = None;
@@ -425,6 +446,7 @@ impl App {
                     return window::close(id);
                 }
             }
+            Message::Quit => return window::latest().and_then(|id| Task::done(Message::Close(id))),
             Message::RetryStartup if !self.busy => {
                 let (worker, ready) = Worker::start(self.cli.clone(), Some(self.project.clone()));
                 self.worker = Some(worker);
@@ -468,6 +490,7 @@ impl App {
                         keyboard::Key::Character("k") if modifiers.command() => {
                             Some(Message::Commands)
                         }
+                        keyboard::Key::Character("q") if modifiers.command() => Some(Message::Quit),
                         _ => None,
                     }
                 }
