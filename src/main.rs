@@ -5,6 +5,8 @@ mod auth;
 mod cli;
 mod config;
 mod context;
+#[cfg(feature = "desktop")]
+mod desktop;
 mod docs;
 pub mod engine;
 mod event;
@@ -32,19 +34,34 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use anyhow::Context;
 use clap::Parser;
 
+fn main() -> anyhow::Result<()> {
+    let cli = cli::Cli::parse();
+    #[cfg(feature = "desktop")]
+    if cli.desktop {
+        return desktop::run(cli);
+    }
+    terminal(cli)
+}
+
 #[cfg_attr(
     feature = "multithread",
     tokio::main(flavor = "multi_thread", worker_threads = 4)
 )]
 #[cfg_attr(not(feature = "multithread"), tokio::main(flavor = "current_thread"))]
-async fn main() -> anyhow::Result<()> {
-    run().await.context(
+async fn terminal(cli: cli::Cli) -> anyhow::Result<()> {
+    run(cli).await.context(
         "This error might derive from an incomplete configuration: run `zerostack --setup` to configure your providers and models interactively, or `zerostack --tutor` to see the getting started guide",
     )
 }
 
-async fn run() -> anyhow::Result<()> {
-    let cli = cli::Cli::parse();
+async fn run(cli: cli::Cli) -> anyhow::Result<()> {
+    if let Some(startup) = prepare(cli).await? {
+        startup.dispatch().await?;
+    }
+    Ok(())
+}
+
+async fn prepare(cli: cli::Cli) -> anyhow::Result<Option<startup::Startup>> {
     logging::install_panic_hook();
     logging::init(&cli);
 
@@ -59,12 +76,12 @@ async fn run() -> anyhow::Result<()> {
 
     if cli.print_config {
         print::print_config(&cli, &cfg);
-        return Ok(());
+        return Ok(None);
     }
 
     if cli.setup {
         match setup::run(&mut cfg)? {
-            setup::SetupOutcome::Quit => return Ok(()),
+            setup::SetupOutcome::Quit => return Ok(None),
             setup::SetupOutcome::LaunchAutoconfigure => {
                 // autoconfigure was already applied in setup; fall through to launch
             }
@@ -75,16 +92,19 @@ async fn run() -> anyhow::Result<()> {
     }
 
     if cli.tutor {
-        return docs::show_get_started();
+        docs::show_get_started()?;
+        return Ok(None);
     }
 
     if cli.resume && cli.session.is_none() {
         print::print_sessions();
-        return Ok(());
+        return Ok(None);
     }
 
     let version_changed = docs::ensure_global()?;
     let is_interactive = !cli.print;
+    #[cfg(feature = "desktop")]
+    let is_interactive = is_interactive && !cli.desktop;
     #[cfg(feature = "acp")]
     let is_interactive = is_interactive && !cli.acp_enabled;
     #[cfg(feature = "loop")]
@@ -110,7 +130,7 @@ async fn run() -> anyhow::Result<()> {
                 "{}",
                 crate::extras::hooks::hooks_test_dry_run(tool_name, tool_input).await
             );
-            return Ok(());
+            return Ok(None);
         }
     }
 
@@ -122,7 +142,8 @@ async fn run() -> anyhow::Result<()> {
     // ACP mode: serve and exit before feature init
     #[cfg(feature = "acp")]
     if startup.cli.acp_enabled {
-        return extras::acp::serve(startup.cli, startup.cfg, startup.context).await;
+        extras::acp::serve(startup.cli, startup.cfg, startup.context).await?;
+        return Ok(None);
     }
 
     let phase_start = std::time::Instant::now();
@@ -131,5 +152,5 @@ async fn run() -> anyhow::Result<()> {
     let phase_start = std::time::Instant::now();
     startup.resolve_prompts().await?;
     tracing::debug!("startup: resolve_prompts took {:?}", phase_start.elapsed());
-    startup.dispatch().await
+    Ok(Some(startup))
 }
