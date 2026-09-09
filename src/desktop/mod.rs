@@ -14,7 +14,12 @@ pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
         .title("zerostack")
         .theme(style::theme())
         .subscription(App::subscription)
-        .window_size((1040.0, 760.0))
+        .window(iced::window::Settings {
+            size: (1040.0, 760.0).into(),
+            min_size: Some((680.0, 480.0).into()),
+            maximized: true,
+            ..Default::default()
+        })
         .exit_on_close_request(false)
         .run()?;
     Ok(())
@@ -34,8 +39,18 @@ mod tests {
                 .unwrap()
                 .desktop
         );
-        for flag in ["--print", "--setup", "--tutor", "--print-config"] {
+        for flag in [
+            "--print",
+            "--setup",
+            "--tutor",
+            "--print-config",
+            "--resume",
+        ] {
             assert!(Cli::try_parse_from(["zerostack", "--desktop", flag]).is_err());
         }
+        #[cfg(feature = "acp")]
+        assert!(Cli::try_parse_from(["zerostack", "--desktop", "--acp"]).is_err());
+        #[cfg(feature = "loop")]
+        assert!(Cli::try_parse_from(["zerostack", "--desktop", "--loop"]).is_err());
     }
 }

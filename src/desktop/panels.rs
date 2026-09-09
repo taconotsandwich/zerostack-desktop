@@ -102,7 +102,9 @@ impl App {
                                     .map(String::as_str),
                                 move |value| Message::Field(index, String::from(value)),
                             )
-                            .placeholder("Choose"),
+                            .placeholder("Choose")
+                            .style(style::picker)
+                            .menu_style(style::menu),
                         );
                         continue;
                     }
@@ -112,6 +114,8 @@ impl App {
                             self.fields.get(index).map(String::as_str).unwrap_or(""),
                         )
                         .id(format!("command-field-{index}"))
+                        .padding(10)
+                        .style(style::input)
                         .on_input(move |value| Message::Field(index, value))
                         .on_submit(Message::Confirm),
                     );

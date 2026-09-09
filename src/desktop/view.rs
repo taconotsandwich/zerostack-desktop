@@ -1,8 +1,8 @@
 use iced::widget::{
     button, column, container, hover, markdown, mouse_area, pick_list, row, scrollable, space,
-    stack, text, text_editor, text_input, tooltip,
+    stack, svg, text, text_editor, text_input, tooltip,
 };
-use iced::{Border, Center, Color, Element, Fill, Font, Left, Padding, Right, Theme, keyboard};
+use iced::{Center, Color, Element, Fill, Font, Left, Padding, Right, Theme, keyboard};
 
 use super::app::{App, Message, Panel};
 use super::commands;
@@ -161,9 +161,9 @@ impl App {
             .unwrap_or_default();
         container(
             column![
-                text("zerostack").size(17),
+                container(text("zerostack").size(18)).padding([0, 10]),
                 space::vertical().height(12),
-                heading,
+                container(heading).padding([0, 10]),
                 scrollable(list).height(Fill),
                 row![
                     icon_button(
@@ -173,12 +173,12 @@ impl App {
                     ),
                     space::horizontal()
                 ],
-                text(directory).size(12).color(style::MUTED),
+                container(text(directory).size(12).color(style::MUTED)).padding([0, 10]),
             ]
             .spacing(12)
-            .padding([18, 10]),
+            .padding([18, 16]),
         )
-        .width(220)
+        .width(248)
         .height(Fill)
         .style(|_| style::surface(style::SIDEBAR, 0.0))
         .into()
@@ -192,6 +192,7 @@ impl App {
             return text_input("Conversation name", name)
                 .id("conversation-name")
                 .on_input(Message::RenameValue)
+                .style(style::input)
                 .on_submit(Message::SaveName)
                 .padding([8, 10])
                 .size(13)
@@ -284,7 +285,7 @@ impl App {
                     MessageRole::Assistant => {
                         let body = markdown::view(
                             self.markdown[index].items(),
-                            markdown::Settings::with_text_size(15, style::theme()),
+                            markdown::Settings::with_text_size(16, style::theme()),
                         )
                         .map(Message::Link);
                         let mut actions = row![icon_button(
@@ -333,7 +334,9 @@ impl App {
                     }
                 }
             }
-        } else if !self.busy {
+        } else if self.busy {
+            messages = messages.push(text(&self.status).size(14).color(style::MUTED));
+        } else {
             messages = messages.push(
                 text(if self.error.is_empty() {
                     "Open a project"
@@ -351,6 +354,8 @@ impl App {
             messages = messages.push(
                 text_input("Project directory", &self.project)
                     .on_input(Message::Project)
+                    .padding(12)
+                    .style(style::input)
                     .on_submit(Message::RetryStartup),
             );
             messages = messages.push(
@@ -366,9 +371,9 @@ impl App {
         scrollable(
             container(
                 container(messages)
-                    .max_width(760)
+                    .max_width(880)
                     .width(Fill)
-                    .padding([24, 28]),
+                    .padding([24, 32]),
             )
             .center_x(Fill),
         )
@@ -412,22 +417,28 @@ impl App {
     }
 
     fn composer(&self) -> Element<'_, Message> {
-        let ring = container(space().width(14).height(14)).style(|_| container::Style {
-            border: Border {
-                width: 2.0,
-                color: style::MUTED,
-                radius: 8.0.into(),
-            },
-            ..Default::default()
+        let fraction = self.snapshot.as_ref().map_or(0.0, |snapshot| {
+            let session = &snapshot.session;
+            if session.context_window == 0 {
+                0.0
+            } else {
+                (session.effective_context_tokens() as f64 / session.context_window as f64)
+                    .clamp(0.0, 1.0)
+            }
         });
-        let usage = tooltip(
-            button(ring)
-                .padding(7)
-                .style(style::flat)
-                .on_press(Message::ToggleUsage),
-            self.usage(),
-            tooltip::Position::Top,
-        );
+        let ring = svg(svg::Handle::from_memory(format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#555555" stroke-width="2.5"/><circle cx="12" cy="12" r="9" fill="none" stroke="#ececec" stroke-width="2.5" stroke-dasharray="{} 56.55" transform="rotate(-90 12 12)"/></svg>"##,
+            fraction * std::f64::consts::TAU * 9.0
+        ).into_bytes())).width(18).height(18);
+        let usage_button = button(ring)
+            .padding(7)
+            .style(style::flat)
+            .on_press(Message::ToggleUsage);
+        let usage: Element<'_, Message> = if self.usage_open {
+            usage_button.into()
+        } else {
+            tooltip(usage_button, self.usage(), tooltip::Position::Top).into()
+        };
         let files = self
             .snapshot
             .as_ref()
@@ -445,7 +456,7 @@ impl App {
         let editor = text_editor(&self.content)
             .id("composer")
             .placeholder("Ask anything")
-            .height(78)
+            .height(58)
             .padding(4)
             .size(15)
             .on_action(Message::Edit)
@@ -470,8 +481,10 @@ impl App {
                     Some(snapshot.prompt.clone()),
                     Message::Prompt,
                 )
-                .text_size(12)
-                .padding(5),
+                .text_size(13)
+                .style(style::picker)
+                .menu_style(style::menu)
+                .padding([5, 8]),
             );
             tools = tools.push(space::horizontal());
             let mut models = snapshot.models.clone();
@@ -487,8 +500,10 @@ impl App {
                     Some(snapshot.session.model.to_string()),
                     Message::Model,
                 )
-                .text_size(12)
-                .padding(5),
+                .text_size(13)
+                .style(style::picker)
+                .menu_style(style::menu)
+                .padding([5, 8]),
             );
         } else {
             tools = tools.push(space::horizontal());
@@ -505,6 +520,7 @@ impl App {
         let mut area = column![].spacing(8);
         let matches = self.slash_commands();
         if !matches.is_empty() {
+            let picker_height = (matches.len() as f32 * 32.0).min(180.0);
             let list = column(matches.into_iter().enumerate().map(|(index, command)| {
                 button(
                     row![
@@ -529,7 +545,7 @@ impl App {
                 .into()
             }));
             area = area.push(
-                container(scrollable(list).height(180))
+                container(scrollable(list).height(picker_height))
                     .padding(5)
                     .style(|_| style::surface(style::RAISED, 10.0)),
             );
@@ -549,7 +565,7 @@ impl App {
             );
         }
         area = area.push(composer);
-        container(container(area).max_width(820).padding([16, 28]).width(Fill))
+        container(container(area).max_width(880).padding([16, 32]).width(Fill))
             .center_x(Fill)
             .into()
     }
