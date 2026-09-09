@@ -240,9 +240,35 @@ pub(super) fn matching(input: &str) -> Vec<Command> {
         .collect()
 }
 
+pub(super) fn confirmation(input: &str) -> Option<(Command, &str)> {
+    if input == "/new" || input.starts_with("/new ") {
+        return find("/clear").map(|command| (command, ""));
+    }
+    available()
+        .into_iter()
+        .filter(|command| command.confirmation.is_some())
+        .find_map(|command| {
+            input
+                .strip_prefix(command.syntax)
+                .filter(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
+                .map(|rest| (command, rest.trim()))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn confirmation_covers_aliases_and_preserves_arguments() {
+        assert_eq!(confirmation("/new").unwrap().0.syntax, "/clear");
+        assert!(confirmation("/clear extra").is_some());
+        assert!(confirmation("/clearer").is_none());
+        #[cfg(feature = "memory")]
+        assert_eq!(confirmation("/memory clear daily").unwrap().1, "daily");
+        #[cfg(feature = "export")]
+        assert!(confirmation("/share extra").is_some());
+    }
 
     #[test]
     fn arguments_preserve_instruction_text_and_reject_unsupported_paths() {
