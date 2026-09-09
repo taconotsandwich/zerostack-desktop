@@ -10,7 +10,8 @@ use crate::cli::Cli;
 use crate::engine::RunKind;
 
 pub(super) struct App {
-    pub worker: Worker,
+    pub worker: Option<Worker>,
+    pub project: String,
     pub cli: Cli,
     pub snapshot: Option<Arc<Snapshot>>,
     pub content: text_editor::Content,
@@ -32,6 +33,7 @@ pub(super) struct App {
     pub slash_dismissed: bool,
     pub usage_open: bool,
     pub pending: Option<Operation>,
+    submitted: Option<String>,
     pub after_load: Option<Command>,
     pub closing: Option<window::Id>,
 }
@@ -78,21 +80,39 @@ pub(super) enum Message {
     RenameSelected,
     Close(window::Id),
     RetryStartup,
+    Project(String),
 }
 
 impl App {
     pub fn new(cli: Cli) -> (Self, Task<Message>) {
-        let (worker, ready) = Worker::start(cli.clone());
+        let pick_project = std::env::var_os("ZS_DESKTOP_PICK_PROJECT").is_some();
+        let (worker, task) = if pick_project {
+            (None, Task::none())
+        } else {
+            let (worker, ready) = Worker::start(cli.clone(), None);
+            (
+                Some(worker),
+                Task::perform(worker::receive(ready), Message::Ready),
+            )
+        };
         (
             Self {
                 worker,
+                project: std::env::current_dir()
+                    .unwrap_or_default()
+                    .display()
+                    .to_string(),
                 cli,
                 snapshot: None,
                 content: text_editor::Content::new(),
                 markdown: Vec::new(),
-                busy: true,
+                busy: !pick_project,
                 error: String::new(),
-                status: "Loading…".into(),
+                status: if pick_project {
+                    String::new()
+                } else {
+                    "Loading…".into()
+                },
                 sidebar: true,
                 menu: None,
                 rename: None,
@@ -107,10 +127,11 @@ impl App {
                 slash_dismissed: false,
                 usage_open: false,
                 pending: None,
+                submitted: None,
                 after_load: None,
                 closing: None,
             },
-            Task::perform(worker::receive(ready), Message::Ready),
+            task,
         )
     }
 
@@ -118,15 +139,21 @@ impl App {
         if self.busy {
             return Task::none();
         }
+        let Some(worker) = self.worker.clone() else {
+            return Task::none();
+        };
         self.busy = true;
         self.error.clear();
         self.status = "Working…".into();
         self.menu = None;
         self.pending = Some(operation.clone());
-        Task::perform(self.worker.clone().request(operation), Message::Ready)
+        Task::perform(worker.request(operation), Message::Ready)
     }
 
     pub fn choose(&mut self, command: Command) -> Task<Message> {
+        if !self.slash_commands().is_empty() {
+            self.submitted = Some(self.content.text());
+        }
         self.menu = None;
         self.slash_dismissed = true;
         if command.fields.is_empty() && command.confirmation.is_none() {
@@ -192,7 +219,10 @@ impl App {
                                 < snapshot.session.messages.len();
                             if matches!(pending, Some(Operation::Run(_))) {
                                 if (new_messages || output.kind == RunKind::Command)
-                                    && matches!(&pending, Some(Operation::Run(input)) if self.content.text().trim() == input.trim())
+                                    && submitted_is_unchanged(
+                                        self.submitted.as_deref(),
+                                        &self.content.text(),
+                                    )
                                 {
                                     self.content = text_editor::Content::new();
                                 }
@@ -219,6 +249,7 @@ impl App {
                         }
                     }
                 }
+                self.submitted = None;
                 if let Some(id) = self.closing.take() {
                     return window::close(id);
                 }
@@ -243,6 +274,7 @@ impl App {
                 {
                     return self.choose(command);
                 }
+                self.submitted = Some(self.content.text());
                 return self.dispatch(Operation::Run(input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
@@ -331,6 +363,7 @@ impl App {
                 self.error.clear();
             }
             Message::ClosePanel => {
+                self.submitted = None;
                 self.panel = None;
                 self.menu = None;
                 self.error.clear();
@@ -357,6 +390,7 @@ impl App {
             Message::Cursor(point) => self.cursor = point,
             Message::Resize(size) => self.size = size,
             Message::Escape => {
+                self.submitted = None;
                 self.menu = None;
                 self.rename = None;
                 self.panel = None;
@@ -392,13 +426,14 @@ impl App {
                 }
             }
             Message::RetryStartup if !self.busy => {
-                let (worker, ready) = Worker::start(self.cli.clone());
-                self.worker = worker;
+                let (worker, ready) = Worker::start(self.cli.clone(), Some(self.project.clone()));
+                self.worker = Some(worker);
                 self.busy = true;
                 self.error.clear();
                 self.status = "Loading…".into();
                 return Task::perform(worker::receive(ready), Message::Ready);
             }
+            Message::Project(project) => self.project = project,
             _ => {}
         }
         Task::none()
@@ -440,5 +475,25 @@ impl App {
             }),
             window::close_requests().map(Message::Close),
         ])
+    }
+}
+
+fn submitted_is_unchanged(submitted: Option<&str>, current: &str) -> bool {
+    submitted.is_some_and(|submitted| submitted == current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::submitted_is_unchanged;
+
+    #[test]
+    fn completed_requests_only_clear_the_submitted_draft() {
+        assert!(submitted_is_unchanged(Some("explain this"), "explain this"));
+        assert!(!submitted_is_unchanged(
+            Some("explain this"),
+            "next question"
+        ));
+        assert!(!submitted_is_unchanged(None, "unfinished draft"));
+        assert!(!submitted_is_unchanged(Some("/"), "/review"));
     }
 }
