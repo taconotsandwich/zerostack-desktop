@@ -37,10 +37,16 @@ struct Request {
 pub(super) struct Worker(mpsc::UnboundedSender<Request>);
 
 impl Worker {
-    pub fn start(cli: Cli) -> (Self, oneshot::Receiver<Reply>) {
+    pub fn start(cli: Cli, directory: Option<String>) -> (Self, oneshot::Receiver<Reply>) {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Request>();
         let (ready, result) = oneshot::channel();
         std::thread::spawn(move || {
+            if let Some(directory) = directory
+                && let Err(error) = std::env::set_current_dir(&directory)
+            {
+                let _ = ready.send(Err(format!("Could not open {directory}: {error}")));
+                return;
+            }
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
