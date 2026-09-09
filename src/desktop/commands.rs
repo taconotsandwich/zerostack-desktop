@@ -15,10 +15,12 @@ impl Command {
         if !self.optional && values.iter().any(|value| value.trim().is_empty()) {
             return Err("Complete the required fields.".into());
         }
-        if matches!(self.syntax, "/add" | "/drop" | "/import" | "/export")
-            && values
-                .iter()
-                .any(|value| value.trim().contains(char::is_whitespace))
+        if matches!(
+            self.syntax,
+            "/add" | "/drop" | "/import" | "/export" | "/models-add"
+        ) && values
+            .iter()
+            .any(|value| value.trim().contains(char::is_whitespace))
         {
             return Err("This Engine command currently requires a path without spaces.".into());
         }
@@ -218,6 +220,10 @@ pub(super) fn available() -> Vec<Command> {
 }
 
 pub(super) fn find(syntax: &str) -> Option<Command> {
+    let syntax = match syntax {
+        "/new" => "/clear",
+        other => other,
+    };
     available()
         .into_iter()
         .find(|command| command.syntax == syntax)
