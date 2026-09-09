@@ -50,7 +50,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        features: ["", "--all-features", "--no-default-features"]
+        features: ["", "--features desktop", "--all-features", "--no-default-features"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -66,6 +66,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+        features: ["", "--features desktop"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,7 +75,11 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
 
       - name: Install locally (debug)
-        run: cargo install --locked --path . --debug
+        run: cargo install --locked --path . --debug ${{ matrix.features }}
+
+      - name: Package desktop app
+        if: runner.os == 'macOS' && matrix.features == '--features desktop'
+        run: scripts/package-desktop.sh
 
   package:
     runs-on: ubuntu-latest
