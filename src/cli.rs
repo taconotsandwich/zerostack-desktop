@@ -7,6 +7,10 @@ use crate::config::types::EditSystem;
 #[derive(Parser, Debug, Default, Clone)]
 #[command(name = "zerostack", version, about = "Minimal coding agent")]
 pub struct Cli {
+    #[cfg(feature = "desktop")]
+    #[arg(long, env = "ZS_DESKTOP", conflicts_with_all = ["print", "setup", "tutor", "print_config"])]
+    pub desktop: bool,
+
     #[arg(short = 'p', long = "print", help = "Print response and exit")]
     pub print: bool,
 
