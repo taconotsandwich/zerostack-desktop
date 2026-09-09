@@ -41,9 +41,12 @@ impl App {
         .spacing(12)
         .align_y(Center)
         .padding([12, 20]);
-        let main = column![header, self.conversation(), self.composer()]
+        let mut main = column![header, self.conversation()]
             .width(Fill)
             .height(Fill);
+        if self.snapshot.is_some() {
+            main = main.push(self.composer());
+        }
         let layout = if self.sidebar {
             row![self.sidebar_view(), main]
         } else {
@@ -224,7 +227,7 @@ impl App {
             .height(Fill)
             .align_x(Right)
             .align_y(Center);
-        hover(base, overlay).into()
+        hover(base, overlay)
     }
 
     fn conversation(&self) -> Element<'_, Message> {
@@ -281,7 +284,7 @@ impl App {
                     MessageRole::Assistant => {
                         let body = markdown::view(
                             self.markdown[index].items(),
-                            markdown::Settings::with_text_size(15, &style::theme()),
+                            markdown::Settings::with_text_size(15, style::theme()),
                         )
                         .map(Message::Link);
                         let mut actions = row![icon_button(
@@ -331,7 +334,14 @@ impl App {
                 }
             }
         } else if !self.busy {
-            messages = messages.push(text("Could not start the session").size(18));
+            messages = messages.push(
+                text(if self.error.is_empty() {
+                    "Open a project"
+                } else {
+                    "Could not start the session"
+                })
+                .size(18),
+            );
             messages = messages.push(text(&self.error).size(14));
             messages = messages.push(
                 text("Use the existing zerostack configuration and provider credentials.")
@@ -339,16 +349,28 @@ impl App {
                     .color(style::MUTED),
             );
             messages = messages.push(
-                button("Retry")
-                    .on_press(Message::RetryStartup)
-                    .style(style::flat),
+                text_input("Project directory", &self.project)
+                    .on_input(Message::Project)
+                    .on_submit(Message::RetryStartup),
+            );
+            messages = messages.push(
+                button(if self.error.is_empty() {
+                    "Open"
+                } else {
+                    "Retry"
+                })
+                .on_press(Message::RetryStartup)
+                .style(style::flat),
             );
         }
         scrollable(
-            container(messages)
-                .max_width(760)
-                .width(Fill)
-                .padding([24, 28]),
+            container(
+                container(messages)
+                    .max_width(760)
+                    .width(Fill)
+                    .padding([24, 28]),
+            )
+            .center_x(Fill),
         )
         .id("conversation")
         .height(Fill)
@@ -527,10 +549,8 @@ impl App {
             );
         }
         area = area.push(composer);
-        container(area)
-            .max_width(820)
-            .padding([16, 28])
-            .width(Fill)
+        container(container(area).max_width(820).padding([16, 28]).width(Fill))
+            .center_x(Fill)
             .into()
     }
 }
