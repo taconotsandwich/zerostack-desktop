@@ -8,7 +8,9 @@ use crate::config::types::EditSystem;
 #[command(name = "zerostack", version, about = "Minimal coding agent")]
 pub struct Cli {
     #[cfg(feature = "desktop")]
-    #[arg(long, env = "ZS_DESKTOP", conflicts_with_all = ["print", "setup", "tutor", "print_config"])]
+    #[arg(long, env = "ZS_DESKTOP", conflicts_with_all = ["print", "setup", "tutor", "print_config", "resume"])]
+    #[cfg_attr(feature = "acp", arg(conflicts_with = "acp_enabled"))]
+    #[cfg_attr(feature = "loop", arg(conflicts_with = "loop_mode"))]
     pub desktop: bool,
 
     #[arg(short = 'p', long = "print", help = "Print response and exit")]
