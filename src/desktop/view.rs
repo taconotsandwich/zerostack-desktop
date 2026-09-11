@@ -228,7 +228,7 @@ impl App {
     fn conversation(&self) -> Element<'_, Message> {
         let mut messages = column![].spacing(layout::XL).width(Fill);
         if let Some(snapshot) = &self.snapshot {
-            if snapshot.session.messages.is_empty() {
+            if snapshot.session.messages.is_empty() && self.command_output.is_empty() {
                 messages = messages.push(
                     container(
                         text("What would you like to work on?")
@@ -327,6 +327,9 @@ impl App {
                         messages = messages.push(details.spacing(layout::SM));
                     }
                 }
+            }
+            if !self.command_output.is_empty() {
+                messages = messages.push(text(&self.command_output).size(style::BODY));
             }
         } else if self.busy {
             messages = messages.push(text(&self.status).size(style::LABEL).color(style::MUTED));
@@ -535,7 +538,7 @@ impl App {
         if !self.status.is_empty() {
             area = area.push(text(&self.status).size(style::CAPTION).color(style::MUTED));
         }
-        if !self.error.is_empty() && self.snapshot.is_some() {
+        if !self.error.is_empty() && self.snapshot.is_some() && self.panel.is_none() {
             area = area.push(
                 text(&self.error)
                     .size(style::CAPTION)

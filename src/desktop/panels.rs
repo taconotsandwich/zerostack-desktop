@@ -11,7 +11,6 @@ impl App {
             Panel::Settings => "Settings",
             Panel::Form(command) => command.label,
             Panel::Delete { .. } => "Delete conversation?",
-            Panel::Result(_) => "Result",
         };
         let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
@@ -48,23 +47,58 @@ impl App {
             }
             Panel::Settings => {
                 if let Some(snapshot) = &self.snapshot {
-                    content = content.push(
-                        text(format!(
-                            "{} / {}",
-                            snapshot.session.provider, snapshot.session.model
+                    content = content
+                        .push(text("Provider").size(style::CAPTION).color(style::MUTED))
+                        .push(components::choice(
+                            snapshot.providers.clone(),
+                            Some(snapshot.session.provider.to_string()),
+                            Message::Provider,
+                            Fill,
                         ))
-                        .size(style::LABEL),
-                    );
+                        .push(text("Model").size(style::CAPTION).color(style::MUTED))
+                        .push(
+                            row![
+                                components::field("Model ID", &self.model_input)
+                                    .on_input(Message::ModelInput)
+                                    .on_submit(Message::SaveModel),
+                                components::action(
+                                    "Apply",
+                                    (!self.busy
+                                        && self.model_input.trim()
+                                            != snapshot.session.model.as_str())
+                                    .then_some(Message::SaveModel)
+                                ),
+                            ]
+                            .spacing(layout::SM)
+                            .align_y(iced::Center),
+                        );
+                    if let Some(mode) = &snapshot.permission_mode {
+                        content = content
+                            .push(text("Permissions").size(style::CAPTION).color(style::MUTED))
+                            .push(components::choice(
+                                ["standard", "restrictive", "readonly", "guarded", "yolo"]
+                                    .into_iter()
+                                    .map(String::from)
+                                    .collect(),
+                                Some(mode.clone()),
+                                |value| Message::Run(format!("/mode {value}")),
+                                Fill,
+                            ));
+                    }
+                    content = content
+                        .push(
+                            text("File editing")
+                                .size(style::CAPTION)
+                                .color(style::MUTED),
+                        )
+                        .push(components::choice(
+                            vec!["similarity".into(), "hashedit".into()],
+                            Some(snapshot.edit_system.clone()),
+                            |value| Message::Run(format!("/editsys {value}")),
+                            Fill,
+                        ));
                 }
-                for syntax in [
-                    "/provider",
-                    "/model",
-                    "/models-add",
-                    "/reasoning",
-                    "/mode",
-                    "/editsys",
-                    "/regen-prompts",
-                ] {
+                for syntax in ["/models-add", "/reasoning", "/regen-prompts"] {
                     if let Some(command) = commands::find(syntax) {
                         content = content.push(
                             components::action(
@@ -125,14 +159,6 @@ impl App {
                 content = content.push(components::action(
                     "Delete",
                     (!self.busy).then_some(Message::Confirm),
-                ));
-            }
-            Panel::Result(value) => {
-                content = content.push(text(value).size(style::LABEL));
-                content = content.push(components::icon_button(
-                    style::Icon::Copy,
-                    "Copy",
-                    Some(Message::Copy(value.clone())),
                 ));
             }
         }
