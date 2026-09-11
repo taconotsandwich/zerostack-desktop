@@ -16,7 +16,7 @@ impl App {
             Panel::Result(_) => "Result",
         };
         let mut content = column![row![
-            text(title).size(18),
+            text(title).size(style::TITLE),
             space::horizontal(),
             button("Close")
                 .style(style::flat)
@@ -30,7 +30,7 @@ impl App {
                         let path = file.display().to_string();
                         content = content.push(
                             row![
-                                text(path.clone()).size(13).width(Fill),
+                                text(path.clone()).size(style::LABEL).width(Fill),
                                 button("Remove").style(style::flat).on_press_maybe(
                                     (!self.busy && !path.contains(char::is_whitespace))
                                         .then_some(Message::Run(format!("/drop {path}")))
@@ -57,7 +57,7 @@ impl App {
                             "{} / {}",
                             snapshot.session.provider, snapshot.session.model
                         ))
-                        .size(13),
+                        .size(style::LABEL),
                     );
                 }
                 for syntax in [
@@ -80,10 +80,10 @@ impl App {
             }
             Panel::Form(command) => {
                 if let Some(confirmation) = command.confirmation {
-                    content = content.push(text(confirmation).size(14));
+                    content = content.push(text(confirmation).size(style::LABEL));
                 }
                 for (index, label) in command.fields.iter().enumerate() {
-                    content = content.push(text(*label).size(12).color(style::MUTED));
+                    content = content.push(text(*label).size(style::CAPTION).color(style::MUTED));
                     let choices: &[&str] = match command.syntax {
                         "/mode" => &["standard", "restrictive", "readonly", "guarded", "yolo"],
                         "/editsys" => &["similarity", "hashedit"],
@@ -125,14 +125,15 @@ impl App {
                 );
             }
             Panel::Delete { title, .. } => {
-                content = content
-                    .push(text(format!("Delete “{title}” from saved conversations?")).size(14));
+                content = content.push(
+                    text(format!("Delete “{title}” from saved conversations?")).size(style::LABEL),
+                );
                 content = content.push(
                     button("Delete").on_press_maybe((!self.busy).then_some(Message::Confirm)),
                 );
             }
             Panel::Result(value) => {
-                content = content.push(text(value).size(14));
+                content = content.push(text(value).size(style::LABEL));
                 content = content.push(super::view::icon_button(
                     style::Icon::Copy,
                     "Copy",
@@ -143,7 +144,7 @@ impl App {
         if !self.error.is_empty() {
             content = content.push(
                 text(&self.error)
-                    .size(13)
+                    .size(style::LABEL)
                     .color(style::theme().palette().danger),
             );
         }
