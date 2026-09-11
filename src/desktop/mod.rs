@@ -1,5 +1,6 @@
 mod app;
 mod commands;
+mod components;
 mod layout;
 mod panels;
 mod style;
