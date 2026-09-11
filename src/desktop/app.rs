@@ -315,7 +315,10 @@ impl App {
                 } else {
                     Some((
                         id,
-                        Point::new(14.0, self.cursor.y.min((self.size.height - 210.0).max(0.0))),
+                        super::layout::Layout::new(self.size, self.sidebar).menu_position(
+                            self.cursor,
+                            if cfg!(feature = "export") { 4 } else { 2 },
+                        ),
                     ))
                 };
             }
