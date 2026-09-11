@@ -19,6 +19,7 @@ pub(super) struct App {
     pub busy: bool,
     pub error: String,
     pub status: String,
+    pub command_output: String,
     pub sidebar: bool,
     pub menu: Option<(String, Point)>,
     pub rename: Option<(String, String)>,
@@ -35,6 +36,7 @@ pub(super) struct App {
     pub pending: Option<Operation>,
     submitted: Option<String>,
     pub after_load: Option<Command>,
+    pub model_input: String,
     pub closing: Option<window::Id>,
 }
 
@@ -44,7 +46,6 @@ pub(super) enum Panel {
     Settings,
     Form(Command),
     Delete { id: String, title: String },
-    Result(String),
 }
 
 #[derive(Debug, Clone)]
@@ -70,8 +71,12 @@ pub(super) enum Message {
     ToggleTool(usize),
     ToggleUsage,
     Model(String),
+    ModelInput(String),
+    SaveModel,
+    Provider(String),
     Prompt(String),
     Link(markdown::Uri),
+    LinkOpened(Result<(), String>),
     Cursor(Point),
     Resize(Size),
     Escape,
@@ -114,6 +119,7 @@ impl App {
                 } else {
                     "Loading…".into()
                 },
+                command_output: String::new(),
                 sidebar: true,
                 menu: None,
                 rename: None,
@@ -130,6 +136,7 @@ impl App {
                 pending: None,
                 submitted: None,
                 after_load: None,
+                model_input: String::new(),
                 closing: None,
             },
             task,
@@ -145,6 +152,7 @@ impl App {
         };
         self.busy = true;
         self.error.clear();
+        self.command_output.clear();
         self.status = "Working…".into();
         self.menu = None;
         self.pending = Some(operation.clone());
@@ -184,6 +192,7 @@ impl App {
                 self.busy = false;
                 self.status.clear();
                 let pending = self.pending.take();
+                let mut scroll = false;
                 match result {
                     Err(error) => {
                         self.error = error;
@@ -213,6 +222,7 @@ impl App {
                             .as_ref()
                             .is_none_or(|old| old.session.id != snapshot.session.id);
                         if changed_session {
+                            scroll = true;
                             self.content = text_editor::Content::with_text(
                                 self.drafts
                                     .get(snapshot.session.id.as_str())
@@ -222,13 +232,21 @@ impl App {
                             self.expanded.clear();
                             self.usage_open = false;
                         }
-                        let mut show_result = None;
                         if let Some(output) = &snapshot.output {
+                            if output.kind == RunKind::Command {
+                                self.error = output
+                                    .text
+                                    .lines()
+                                    .filter_map(|line| line.strip_prefix("error: "))
+                                    .collect::<Vec<_>>()
+                                    .join("\n");
+                            }
                             let new_messages = self
                                 .snapshot
                                 .as_ref()
                                 .map_or(0, |old| old.session.messages.len())
                                 < snapshot.session.messages.len();
+                            scroll |= new_messages;
                             if matches!(pending, Some(Operation::Run(_))) {
                                 if (new_messages || output.kind == RunKind::Command)
                                     && submitted_is_unchanged(
@@ -238,12 +256,13 @@ impl App {
                                 {
                                     self.content = text_editor::Content::new();
                                 }
-                                if !new_messages && !output.text.trim().is_empty() {
-                                    let inline = matches!(&pending, Some(Operation::Run(input)) if matches!(input.split_whitespace().next(), Some("/undo" | "/redo" | "/clear" | "/new" | "/rename" | "/add" | "/drop" | "/drop-all" | "/model" | "/provider" | "/prompt" | "/reasoning" | "/mode" | "/editsys")));
-                                    if inline {
-                                        self.status = output.text.clone();
-                                    } else {
-                                        show_result = Some(output.text.clone());
+                                if !new_messages
+                                    && self.error.is_empty()
+                                    && matches!(&pending, Some(Operation::Run(input)) if requests_output(input))
+                                {
+                                    if let Some(Operation::Run(input)) = &pending {
+                                        self.command_output = command_text(input, &output.text);
+                                        scroll |= !self.command_output.is_empty();
                                     }
                                 }
                             }
@@ -254,14 +273,15 @@ impl App {
                             .iter()
                             .map(|message| markdown::Content::parse(message.content.as_str()))
                             .collect();
+                        self.model_input = snapshot.session.model.to_string();
                         self.snapshot = Some(snapshot);
                         if let Some(command) = self.after_load.take() {
                             return self.choose(command);
                         }
-                        if let Some(result) = show_result {
-                            self.panel = Some(Panel::Result(result));
-                        }
-                        if matches!(pending, Some(Operation::Load(_))) {
+                        if self.error.is_empty()
+                            && (matches!(pending, Some(Operation::Load(_)))
+                                || matches!(self.panel, Some(Panel::Form(_))))
+                        {
                             self.panel = None;
                         }
                     }
@@ -270,7 +290,11 @@ impl App {
                 if let Some(id) = self.closing.take() {
                     return window::close(id);
                 }
-                return operation::snap_to_end("conversation");
+                return if scroll {
+                    operation::snap_to_end("conversation")
+                } else {
+                    Task::none()
+                };
             }
             Message::Edit(action) => {
                 self.content.perform(action);
@@ -364,7 +388,6 @@ impl App {
             Message::Confirm if !self.busy => match self.panel.clone() {
                 Some(Panel::Form(command)) => match command.input(&self.fields) {
                     Ok(input) => {
-                        self.panel = None;
                         return self.dispatch(Operation::Run(input));
                     }
                     Err(error) => self.error = error,
@@ -403,12 +426,34 @@ impl App {
             Message::Model(model) if !self.busy => {
                 return self.dispatch(Operation::Run(format!("/models {model}")));
             }
+            Message::ModelInput(value) => self.model_input = value,
+            Message::SaveModel if !self.busy => {
+                let model = self.model_input.trim();
+                if !model.is_empty() && !model.contains(char::is_whitespace) {
+                    return self.dispatch(Operation::Run(format!("/models {model}")));
+                }
+                self.error = "Enter a model ID without spaces.".into();
+            }
+            Message::Provider(provider) if !self.busy => {
+                return self.dispatch(Operation::Run(format!("/provider {provider}")));
+            }
             Message::Prompt(prompt) if !self.busy => {
                 return self.dispatch(Operation::Run(format!("/prompt {prompt}")));
             }
             Message::Link(uri) => {
-                self.panel = Some(Panel::Result(uri.to_string()));
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::ui::renderer::open_url(&uri.to_string())
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                    },
+                    Message::LinkOpened,
+                );
             }
+            Message::LinkOpened(Err(error)) => self.error = error,
             Message::Cursor(point) => self.cursor = point,
             Message::Resize(size) => self.size = size,
             Message::Escape => {
@@ -508,9 +553,78 @@ fn submitted_is_unchanged(submitted: Option<&str>, current: &str) -> bool {
     submitted.is_some_and(|submitted| submitted == current)
 }
 
+fn requests_output(input: &str) -> bool {
+    let mut words = input.split_whitespace();
+    match words.next() {
+        Some("/help" | "/history" | "/btw" | "/review" | "/hooks" | "/share") => true,
+        Some("/models" | "/mode" | "/editsys" | "/prompt" | "/theme" | "/advisor") => {
+            words.next().is_none()
+        }
+        Some("/memory") => matches!(words.next(), Some("status" | "search" | "read")),
+        Some(command) => command.starts_with('!'),
+        None => false,
+    }
+}
+
+fn command_text(input: &str, output: &str) -> String {
+    let echo = input
+        .trim()
+        .lines()
+        .map(|line| format!("> {line}\n"))
+        .collect::<String>();
+    output
+        .strip_prefix(&echo)
+        .unwrap_or(output)
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::submitted_is_unchanged;
+
+    #[test]
+    fn command_echo_is_not_presented_as_content() {
+        assert_eq!(
+            super::command_text("/history", "> /history\n\nEarlier input"),
+            "Earlier input"
+        );
+        assert_eq!(
+            super::command_text("/btw question", "An answer\n> quoted content"),
+            "An answer\n> quoted content"
+        );
+    }
+
+    #[test]
+    fn routine_actions_are_quiet_but_requested_content_is_visible() {
+        for input in [
+            "/models fast",
+            "/model example",
+            "/reasoning",
+            "/undo",
+            "/redo",
+            "/add file.rs",
+            "/compress",
+            "/regen-prompts",
+            "/export out.html",
+            "/memory clear daily",
+        ] {
+            assert!(!super::requests_output(input), "{input}");
+        }
+        for input in [
+            "/help",
+            "/history",
+            "/models",
+            "/mode",
+            "/btw explain this",
+            "/memory search topic",
+            "!pwd",
+            "! pwd",
+            "/share",
+        ] {
+            assert!(super::requests_output(input), "{input}");
+        }
+    }
 
     #[test]
     fn completed_requests_only_clear_the_submitted_draft() {
