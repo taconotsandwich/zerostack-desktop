@@ -23,6 +23,9 @@ pub(super) struct Snapshot {
     pub prompts: Vec<String>,
     pub prompt: String,
     pub models: Vec<String>,
+    pub providers: Vec<String>,
+    pub permission_mode: Option<String>,
+    pub edit_system: String,
     pub output: Option<RunOutput>,
 }
 
@@ -72,6 +75,15 @@ impl Worker {
                     }
                 };
                 let no_session = startup.cli.no_session;
+                let permission = startup.permission.clone();
+                let mut providers: Vec<String> =
+                    ["openrouter", "openai", "anthropic", "gemini", "ollama"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect();
+                providers.extend(startup.cfg.custom_providers_map().into_keys());
+                providers.sort();
+                providers.dedup();
                 let models = startup
                     .cfg
                     .quick_models
@@ -92,14 +104,16 @@ impl Worker {
                     startup.sandbox,
                 );
                 let _ = ready.send(
-                    snapshot(&engine, &models, None)
+                    snapshot(&engine, &models, &providers, permission.as_ref(), None)
                         .map(Arc::new)
                         .map_err(|e| format!("{e:#}")),
                 );
                 while let Some(request) = receiver.recv().await {
                     let result = apply(&mut engine, request.operation, no_session)
                         .await
-                        .and_then(|output| snapshot(&engine, &models, output))
+                        .and_then(|output| {
+                            snapshot(&engine, &models, &providers, permission.as_ref(), output)
+                        })
                         .map(Arc::new)
                         .map_err(|error| format!("{error:#}"));
                     let _ = request.reply.send(result);
@@ -192,6 +206,8 @@ fn saved_session(id: &str) -> anyhow::Result<Session> {
 fn snapshot(
     engine: &Engine,
     models: &[String],
+    providers: &[String],
+    permission: Option<&crate::permission::checker::PermCheck>,
     output: Option<RunOutput>,
 ) -> anyhow::Result<Snapshot> {
     let mut prompts: Vec<_> = engine.context().prompts.keys().cloned().collect();
@@ -208,6 +224,15 @@ fn snapshot(
             .clone()
             .unwrap_or_else(|| "default".into()),
         models: models.to_vec(),
+        providers: providers.to_vec(),
+        permission_mode: permission.map(|permission| {
+            permission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .mode()
+                .to_string()
+        }),
+        edit_system: crate::agent::tools::edit_system().to_string(),
         output,
     })
 }
