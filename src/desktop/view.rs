@@ -16,14 +16,14 @@ pub(super) fn icon_button<'a>(
     message: Option<Message>,
 ) -> Element<'a, Message> {
     tooltip(
-        button(style::icon(icon))
+        button(style::icon(icon, message.is_some()))
             .padding(7)
             .on_press_maybe(message)
             .style(style::flat),
-        text(label).size(12),
+        text(label).size(style::CAPTION),
         tooltip::Position::Top,
     )
-    .style(|_| style::surface(style::RAISED, 6.0))
+    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
     .into()
 }
 
@@ -36,7 +36,7 @@ impl App {
             .unwrap_or_else(|| "zerostack".into());
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
-            text(title).size(14)
+            text(title).size(style::LABEL)
         ]
         .spacing(12)
         .align_y(Center)
@@ -61,14 +61,14 @@ impl App {
             let sheet = container(self.panel_view(panel))
                 .padding(24)
                 .max_width(520)
-                .style(|_| style::surface(style::RAISED, 14.0));
+                .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
             return stack![
                 base,
                 container(sheet)
                     .center_x(Fill)
                     .center_y(Fill)
                     .style(|_| container::Style {
-                        background: Some(Color::BLACK.scale_alpha(0.4).into()),
+                        background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
                         ..Default::default()
                     })
             ]
@@ -83,7 +83,7 @@ impl App {
             ] {
                 if commands::find(syntax).is_some() {
                     menu = menu.push(
-                        button(text(label).size(13))
+                        button(text(label).size(style::LABEL))
                             .width(Fill)
                             .padding([9, 12])
                             .style(style::flat)
@@ -92,7 +92,7 @@ impl App {
                 }
             }
             menu = menu.push(
-                button(text("Delete").size(13))
+                button(text("Delete").size(style::LABEL))
                     .width(Fill)
                     .padding([9, 12])
                     .style(style::flat)
@@ -101,7 +101,7 @@ impl App {
             let menu = container(menu)
                 .width(190)
                 .padding(5)
-                .style(|_| style::surface(style::RAISED, 10.0));
+                .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
             let overlay = mouse_area(
                 container(menu)
                     .width(Fill)
@@ -122,7 +122,9 @@ impl App {
 
     fn sidebar_view(&self) -> Element<'_, Message> {
         let mut heading = row![
-            text("Conversations").size(12).color(style::MUTED),
+            text("Conversations")
+                .size(style::CAPTION)
+                .color(style::MUTED),
             space::horizontal()
         ]
         .align_y(Center);
@@ -161,7 +163,7 @@ impl App {
             .unwrap_or_default();
         container(
             column![
-                container(text("zerostack").size(18)).padding([0, 10]),
+                container(text("zerostack").size(style::TITLE)).padding([0, 10]),
                 space::vertical().height(12),
                 container(heading).padding([0, 10]),
                 scrollable(list).height(Fill),
@@ -173,7 +175,8 @@ impl App {
                     ),
                     space::horizontal()
                 ],
-                container(text(directory).size(12).color(style::MUTED)).padding([0, 10]),
+                container(text(directory).size(style::CAPTION).color(style::MUTED))
+                    .padding([0, 10]),
             ]
             .spacing(12)
             .padding([18, 16]),
@@ -195,7 +198,7 @@ impl App {
                 .style(style::input)
                 .on_submit(Message::SaveName)
                 .padding([8, 10])
-                .size(13)
+                .size(style::LABEL)
                 .into();
         }
         let active = self
@@ -203,9 +206,13 @@ impl App {
             .as_ref()
             .is_some_and(|snapshot| snapshot.session.id == session.id);
         let title = worker::title(session);
-        let label = mouse_area(container(text(title).size(13)).width(Fill).padding([9, 10]))
-            .on_press(Message::Select(id.clone()))
-            .on_double_click(Message::Rename(id.clone()));
+        let label = mouse_area(
+            container(text(title).size(style::LABEL))
+                .width(Fill)
+                .padding([9, 10]),
+        )
+        .on_press(Message::Select(id.clone()))
+        .on_double_click(Message::Rename(id.clone()));
         let more = icon_button(
             Icon::More,
             "More",
@@ -238,7 +245,7 @@ impl App {
                 messages = messages.push(
                     container(
                         text("What would you like to work on?")
-                            .size(18)
+                            .size(style::TITLE)
                             .color(style::MUTED),
                     )
                     .padding([60, 0]),
@@ -257,10 +264,10 @@ impl App {
             for (index, message) in snapshot.session.messages.iter().enumerate() {
                 match message.role {
                     MessageRole::User => {
-                        let bubble = container(text(message.content.as_str()).size(15))
+                        let bubble = container(text(message.content.as_str()).size(style::BODY))
                             .padding([11, 16])
                             .max_width(620)
-                            .style(|_| style::surface(style::RAISED, 18.0));
+                            .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
                         let mut actions = row![icon_button(
                             Icon::Copy,
                             "Copy message",
@@ -285,7 +292,7 @@ impl App {
                     MessageRole::Assistant => {
                         let body = markdown::view(
                             self.markdown[index].items(),
-                            markdown::Settings::with_text_size(16, style::theme()),
+                            markdown::Settings::with_text_size(style::BODY, style::theme()),
                         )
                         .map(Message::Link);
                         let mut actions = row![icon_button(
@@ -313,7 +320,7 @@ impl App {
                             None => "Details".into(),
                         };
                         let mut details = column![
-                            button(text(label).size(12))
+                            button(text(label).size(style::CAPTION))
                                 .padding(0)
                                 .style(style::flat)
                                 .on_press(Message::ToggleTool(index))
@@ -321,7 +328,7 @@ impl App {
                         if self.expanded.contains(&index) {
                             details = details.push(
                                 text(message.content.as_str())
-                                    .size(12)
+                                    .size(style::CAPTION)
                                     .font(Font::MONOSPACE),
                             );
                             details = details.push(icon_button(
@@ -335,7 +342,7 @@ impl App {
                 }
             }
         } else if self.busy {
-            messages = messages.push(text(&self.status).size(14).color(style::MUTED));
+            messages = messages.push(text(&self.status).size(style::LABEL).color(style::MUTED));
         } else {
             messages = messages.push(
                 text(if self.error.is_empty() {
@@ -343,12 +350,12 @@ impl App {
                 } else {
                     "Could not start the session"
                 })
-                .size(18),
+                .size(style::TITLE),
             );
-            messages = messages.push(text(&self.error).size(14));
+            messages = messages.push(text(&self.error).size(style::LABEL));
             messages = messages.push(
                 text("Use the existing zerostack configuration and provider credentials.")
-                    .size(13)
+                    .size(style::LABEL)
                     .color(style::MUTED),
             );
             messages = messages.push(
@@ -384,7 +391,7 @@ impl App {
     }
 
     fn usage(&self) -> Element<'_, Message> {
-        let mut details = column![text("Token usage").size(12)].spacing(8);
+        let mut details = column![text("Token usage").size(style::CAPTION)].spacing(8);
         if let Some(snapshot) = &self.snapshot {
             let session = &snapshot.session;
             for (label, value) in [
@@ -394,9 +401,9 @@ impl App {
                 ("Cache creation", session.total_cache_creation_input_tokens),
             ] {
                 details = details.push(row![
-                    text(label).size(12).color(style::MUTED),
+                    text(label).size(style::CAPTION).color(style::MUTED),
                     space::horizontal(),
-                    text(value.to_string()).size(12)
+                    text(value.to_string()).size(style::CAPTION)
                 ]);
             }
             details = details.push(
@@ -405,14 +412,14 @@ impl App {
                     session.effective_context_tokens(),
                     session.context_window
                 ))
-                .size(12)
+                .size(style::CAPTION)
                 .color(style::MUTED),
             );
         }
         container(details)
             .width(230)
             .padding(14)
-            .style(|_| style::surface(style::RAISED, 12.0))
+            .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS))
             .into()
     }
 
@@ -444,7 +451,7 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.files.len());
         let context = row![
-            button(text(format!("Context · {files} files")).size(12))
+            button(text(format!("Context · {files} files")).size(style::CAPTION))
                 .padding(0)
                 .style(style::flat)
                 .on_press(Message::Show(Panel::Context)),
@@ -458,7 +465,7 @@ impl App {
             .placeholder("Ask anything")
             .height(58)
             .padding(4)
-            .size(15)
+            .size(style::BODY)
             .on_action(Message::Edit)
             .style(style::editor)
             .key_binding(move |press| match press.key.as_ref() {
@@ -481,7 +488,7 @@ impl App {
                     Some(snapshot.prompt.clone()),
                     Message::Prompt,
                 )
-                .text_size(13)
+                .text_size(style::LABEL)
                 .style(style::picker)
                 .menu_style(style::menu)
                 .padding([5, 8]),
@@ -500,7 +507,7 @@ impl App {
                     Some(snapshot.session.model.to_string()),
                     Message::Model,
                 )
-                .text_size(13)
+                .text_size(style::LABEL)
                 .style(style::picker)
                 .menu_style(style::menu)
                 .padding([5, 8]),
@@ -516,7 +523,7 @@ impl App {
         ));
         let composer = container(column![editor, tools].spacing(8))
             .padding(14)
-            .style(|_| style::surface(style::RAISED, 18.0));
+            .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
         let mut area = column![].spacing(8);
         let matches = self.slash_commands();
         if !matches.is_empty() {
@@ -524,8 +531,8 @@ impl App {
             let list = column(matches.into_iter().enumerate().map(|(index, command)| {
                 button(
                     row![
-                        text(command.syntax).size(12).width(130),
-                        text(command.label).size(12)
+                        text(command.syntax).size(style::CAPTION).width(130),
+                        text(command.label).size(style::CAPTION)
                     ]
                     .spacing(8),
                 )
@@ -547,7 +554,7 @@ impl App {
             area = area.push(
                 container(scrollable(list).height(picker_height))
                     .padding(5)
-                    .style(|_| style::surface(style::RAISED, 10.0)),
+                    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
             );
         }
         if self.usage_open {
@@ -555,12 +562,12 @@ impl App {
         }
         area = area.push(context);
         if !self.status.is_empty() {
-            area = area.push(text(&self.status).size(12).color(style::MUTED));
+            area = area.push(text(&self.status).size(style::CAPTION).color(style::MUTED));
         }
         if !self.error.is_empty() && self.snapshot.is_some() {
             area = area.push(
                 text(&self.error)
-                    .size(12)
+                    .size(style::CAPTION)
                     .color(style::theme().palette().danger),
             );
         }
