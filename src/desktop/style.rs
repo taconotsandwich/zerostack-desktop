@@ -2,12 +2,12 @@ use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor
 use iced::{Border, Color, Theme};
 
 // Typography roles are shared by labels, fields, buttons, and message bodies.
-pub(super) const CAPTION: u16 = 12;
-pub(super) const LABEL: u16 = 14;
-pub(super) const BODY: u16 = 16;
-pub(super) const TITLE: u16 = 18;
+pub(super) const CAPTION: f32 = 12.0;
+pub(super) const LABEL: f32 = 14.0;
+pub(super) const BODY: f32 = 16.0;
+pub(super) const TITLE: f32 = 18.0;
 pub(super) const CONTROL_LINE: f32 = 20.0;
-pub(super) const ICON_SIZE: u16 = 18;
+pub(super) const ICON_SIZE: f32 = 18.0;
 pub(super) const CONTROL_RADIUS: f32 = 8.0;
 pub(super) const PANEL_RADIUS: f32 = 12.0;
 pub(super) const BUBBLE_RADIUS: f32 = 16.0;
@@ -80,7 +80,7 @@ pub(super) fn input(_theme: &Theme, status: text_input::Status) -> text_input::S
         background: if matches!(status, text_input::Status::Focused { .. }) {
             SELECTED
         } else {
-            PAPER
+            RAISED
         }
         .into(),
         border: Border {
@@ -162,4 +162,19 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
                 MUTED.scale_alpha(DISABLED_ALPHA)
             }),
         })
+}
+
+pub(super) fn usage_ring<'a>(fraction: f64) -> svg::Svg<'a, Theme> {
+    let fraction = if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    svg(svg::Handle::from_memory(format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5"/><circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-width="2.5" stroke-dasharray="{} 56.55" transform="rotate(-90 12 12)"/></svg>"##,
+        fraction * std::f64::consts::TAU * 9.0,
+    ).into_bytes()))
+    .width(ICON_SIZE)
+    .height(ICON_SIZE)
+    .style(|_, _| svg::Style { color: Some(INK) })
 }
