@@ -1,33 +1,22 @@
 use iced::widget::{
-    button, column, container, hover, markdown, mouse_area, pick_list, row, scrollable, space,
-    stack, svg, text, text_editor, text_input, tooltip,
+    button, column, container, hover, markdown, mouse_area, row, scrollable, space, stack, text,
+    text_editor, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Font, Left, Padding, Right, Theme, keyboard};
 
 use super::app::{App, Message, Panel};
 use super::commands;
+use super::components::{self, icon_button};
+use super::layout::{self, Layout};
 use super::style::{self, Icon};
 use super::worker;
 use crate::session::{MessageRole, Session, ToolRecord};
 
-pub(super) fn icon_button<'a>(
-    icon: Icon,
-    label: &'a str,
-    message: Option<Message>,
-) -> Element<'a, Message> {
-    tooltip(
-        button(style::icon(icon, message.is_some()))
-            .padding(7)
-            .on_press_maybe(message)
-            .style(style::flat),
-        text(label).size(style::CAPTION),
-        tooltip::Position::Top,
-    )
-    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
-    .into()
-}
-
 impl App {
+    fn layout(&self) -> Layout {
+        Layout::new(self.size, self.sidebar)
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let title = self
             .snapshot
@@ -38,9 +27,10 @@ impl App {
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
             text(title).size(style::LABEL)
         ]
-        .spacing(12)
+        .spacing(layout::SM)
         .align_y(Center)
-        .padding([12, 20]);
+        .padding([0.0, layout::XL])
+        .height(layout::HEADER_HEIGHT);
         let mut main = column![header, self.conversation()]
             .width(Fill)
             .height(Fill);
@@ -59,8 +49,8 @@ impl App {
             .into();
         if let Some(panel) = &self.panel {
             let sheet = container(self.panel_view(panel))
-                .padding(24)
-                .max_width(520)
+                .padding(layout::XL)
+                .max_width(layout::PANEL_WIDTH)
                 .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
             return stack![
                 base,
@@ -75,7 +65,7 @@ impl App {
             .into();
         }
         if let Some((id, position)) = &self.menu {
-            let mut menu = column![].spacing(2);
+            let mut menu = column![];
             for (label, syntax) in [
                 ("Export", "/export"),
                 ("Share", "/share"),
@@ -83,24 +73,16 @@ impl App {
             ] {
                 if commands::find(syntax).is_some() {
                     menu = menu.push(
-                        button(text(label).size(style::LABEL))
-                            .width(Fill)
-                            .padding([9, 12])
-                            .style(style::flat)
-                            .on_press(Message::RowAction(id.clone(), syntax)),
+                        components::action(label, Some(Message::RowAction(id.clone(), syntax)))
+                            .width(Fill),
                     );
                 }
             }
-            menu = menu.push(
-                button(text("Delete").size(style::LABEL))
-                    .width(Fill)
-                    .padding([9, 12])
-                    .style(style::flat)
-                    .on_press(Message::Delete(id.clone())),
-            );
+            menu = menu
+                .push(components::action("Delete", Some(Message::Delete(id.clone()))).width(Fill));
             let menu = container(menu)
-                .width(190)
-                .padding(5)
+                .width(layout::MENU_WIDTH)
+                .padding(layout::XS)
                 .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
             let overlay = mouse_area(
                 container(menu)
@@ -135,7 +117,7 @@ impl App {
                 (!self.busy).then_some(Message::Choose(command)),
             ));
         }
-        let mut list = column![].spacing(3);
+        let mut list = column![].spacing(layout::XS);
         if let Some(snapshot) = &self.snapshot {
             if !self.deleted.contains(snapshot.session.id.as_str())
                 && !snapshot
@@ -161,27 +143,39 @@ impl App {
                     .unwrap_or_else(|| snapshot.session.working_dir.to_string())
             })
             .unwrap_or_default();
-        container(
-            column![
-                container(text("zerostack").size(style::TITLE)).padding([0, 10]),
-                space::vertical().height(12),
-                container(heading).padding([0, 10]),
-                scrollable(list).height(Fill),
-                row![
-                    icon_button(
-                        Icon::Settings,
-                        "Settings",
-                        Some(Message::Show(Panel::Settings))
-                    ),
-                    space::horizontal()
-                ],
-                container(text(directory).size(style::CAPTION).color(style::MUTED))
-                    .padding([0, 10]),
-            ]
-            .spacing(12)
-            .padding([18, 16]),
-        )
-        .width(248)
+        let brand = container(text("zerostack").size(style::TITLE))
+            .height(layout::HEADER_HEIGHT)
+            .width(Fill)
+            .align_y(Center)
+            .padding([0.0, layout::XL]);
+        let footer = row![
+            container(text(directory).size(style::CAPTION).color(style::MUTED))
+                .width(Fill)
+                .padding([0.0, layout::MD]),
+            icon_button(
+                Icon::Settings,
+                "Settings",
+                Some(Message::Show(Panel::Settings))
+            ),
+        ]
+        .align_y(Center)
+        .height(layout::CONTROL_HEIGHT);
+        container(column![
+            brand,
+            container(
+                column![
+                    container(heading)
+                        .padding([0.0, layout::MD])
+                        .height(layout::CONTROL_HEIGHT),
+                    scrollable(list).height(Fill),
+                    footer,
+                ]
+                .spacing(layout::SM)
+            )
+            .padding(layout::MD)
+            .height(Fill),
+        ])
+        .width(layout::SIDEBAR_WIDTH)
         .height(Fill)
         .style(|_| style::surface(style::SIDEBAR, 0.0))
         .into()
@@ -192,13 +186,10 @@ impl App {
         if let Some((editing, name)) = &self.rename
             && editing == &id
         {
-            return text_input("Conversation name", name)
+            return components::field("Conversation name", name)
                 .id("conversation-name")
                 .on_input(Message::RenameValue)
-                .style(style::input)
                 .on_submit(Message::SaveName)
-                .padding([8, 10])
-                .size(style::LABEL)
                 .into();
         }
         let active = self
@@ -206,19 +197,15 @@ impl App {
             .as_ref()
             .is_some_and(|snapshot| snapshot.session.id == session.id);
         let title = worker::title(session);
-        let label = mouse_area(
-            container(text(title).size(style::LABEL))
-                .width(Fill)
-                .padding([9, 10]),
-        )
-        .on_press(Message::Select(id.clone()))
-        .on_double_click(Message::Rename(id.clone()));
+        let label = mouse_area(components::row_label(title))
+            .on_press(Message::Select(id.clone()))
+            .on_double_click(Message::Rename(id.clone()));
         let more = icon_button(
             Icon::More,
             "More",
             (!self.busy).then_some(Message::More(id.clone())),
         );
-        let base = container(row![label, space::horizontal().width(30)])
+        let base = container(row![label, space::horizontal().width(layout::ICON_TARGET)])
             .width(Fill)
             .style(move |_| {
                 style::surface(
@@ -227,7 +214,7 @@ impl App {
                     } else {
                         Color::TRANSPARENT
                     },
-                    9.0,
+                    style::CONTROL_RADIUS,
                 )
             });
         let overlay = container(more)
@@ -239,7 +226,7 @@ impl App {
     }
 
     fn conversation(&self) -> Element<'_, Message> {
-        let mut messages = column![].spacing(24).width(Fill);
+        let mut messages = column![].spacing(layout::XL).width(Fill);
         if let Some(snapshot) = &self.snapshot {
             if snapshot.session.messages.is_empty() {
                 messages = messages.push(
@@ -248,7 +235,7 @@ impl App {
                             .size(style::TITLE)
                             .color(style::MUTED),
                     )
-                    .padding([60, 0]),
+                    .padding([layout::HEADER_HEIGHT, 0.0]),
                 );
             }
             let latest_user = snapshot
@@ -265,15 +252,15 @@ impl App {
                 match message.role {
                     MessageRole::User => {
                         let bubble = container(text(message.content.as_str()).size(style::BODY))
-                            .padding([11, 16])
-                            .max_width(620)
+                            .padding([layout::MD, layout::LG])
+                            .max_width(layout::MESSAGE_WIDTH)
                             .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
                         let mut actions = row![icon_button(
                             Icon::Copy,
                             "Copy message",
                             Some(Message::Copy(message.content.to_string()))
                         )]
-                        .spacing(4);
+                        .spacing(layout::XS);
                         if latest_user == Some(index) {
                             actions = actions.push(icon_button(
                                 Icon::Revert,
@@ -286,7 +273,7 @@ impl App {
                                 container(bubble).width(Fill).align_x(Right),
                                 container(actions).width(Fill).align_x(Right)
                             ]
-                            .spacing(4),
+                            .spacing(layout::XS),
                         );
                     }
                     MessageRole::Assistant => {
@@ -300,7 +287,7 @@ impl App {
                             "Copy response",
                             Some(Message::Copy(message.content.to_string()))
                         )]
-                        .spacing(4);
+                        .spacing(layout::XS);
                         if latest_assistant == Some(index) {
                             actions = actions.push(icon_button(
                                 Icon::Retry,
@@ -308,7 +295,7 @@ impl App {
                                 (!self.busy).then_some(Message::Run("/retry".into())),
                             ));
                         }
-                        messages = messages.push(column![body, actions].spacing(10));
+                        messages = messages.push(column![body, actions].spacing(layout::SM));
                     }
                     _ => {
                         let label = match &message.tool {
@@ -337,7 +324,7 @@ impl App {
                                 Some(Message::Copy(message.content.to_string())),
                             ));
                         }
-                        messages = messages.push(details.spacing(8));
+                        messages = messages.push(details.spacing(layout::SM));
                     }
                 }
             }
@@ -352,46 +339,37 @@ impl App {
                 })
                 .size(style::TITLE),
             );
-            messages = messages.push(text(&self.error).size(style::LABEL));
+            if !self.error.is_empty() {
+                messages = messages.push(text(&self.error).size(style::LABEL));
+            }
             messages = messages.push(
                 text("Use the existing zerostack configuration and provider credentials.")
                     .size(style::LABEL)
                     .color(style::MUTED),
             );
             messages = messages.push(
-                text_input("Project directory", &self.project)
+                components::field("Project directory", &self.project)
                     .on_input(Message::Project)
-                    .padding(12)
-                    .style(style::input)
                     .on_submit(Message::RetryStartup),
             );
-            messages = messages.push(
-                button(if self.error.is_empty() {
+            messages = messages.push(components::action(
+                if self.error.is_empty() {
                     "Open"
                 } else {
                     "Retry"
-                })
-                .on_press(Message::RetryStartup)
-                .style(style::flat),
-            );
+                },
+                Some(Message::RetryStartup),
+            ));
         }
-        scrollable(
-            container(
-                container(messages)
-                    .max_width(880)
-                    .width(Fill)
-                    .padding([24, 32]),
-            )
-            .center_x(Fill),
-        )
-        .id("conversation")
-        .height(Fill)
-        .width(Fill)
-        .into()
+        scrollable(components::rail(messages, self.layout()))
+            .id("conversation")
+            .height(Fill)
+            .width(Fill)
+            .into()
     }
 
     fn usage(&self) -> Element<'_, Message> {
-        let mut details = column![text("Token usage").size(style::CAPTION)].spacing(8);
+        let mut details = column![text("Token usage").size(style::CAPTION)].spacing(layout::SM);
         if let Some(snapshot) = &self.snapshot {
             let session = &snapshot.session;
             for (label, value) in [
@@ -417,8 +395,8 @@ impl App {
             );
         }
         container(details)
-            .width(230)
-            .padding(14)
+            .width(layout::USAGE_WIDTH)
+            .padding(layout::LG)
             .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS))
             .into()
     }
@@ -433,14 +411,8 @@ impl App {
                     .clamp(0.0, 1.0)
             }
         });
-        let ring = svg(svg::Handle::from_memory(format!(
-            r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="#555555" stroke-width="2.5"/><circle cx="12" cy="12" r="9" fill="none" stroke="#ececec" stroke-width="2.5" stroke-dasharray="{} 56.55" transform="rotate(-90 12 12)"/></svg>"##,
-            fraction * std::f64::consts::TAU * 9.0
-        ).into_bytes())).width(18).height(18);
-        let usage_button = button(ring)
-            .padding(7)
-            .style(style::flat)
-            .on_press(Message::ToggleUsage);
+        let usage_button =
+            components::icon_target(style::usage_ring(fraction), Some(Message::ToggleUsage));
         let usage: Element<'_, Message> = if self.usage_open {
             usage_button.into()
         } else {
@@ -451,10 +423,11 @@ impl App {
             .as_ref()
             .map_or(0, |snapshot| snapshot.files.len());
         let context = row![
-            button(text(format!("Context · {files} files")).size(style::CAPTION))
-                .padding(0)
-                .style(style::flat)
-                .on_press(Message::Show(Panel::Context)),
+            components::action(
+                format!("Context · {files} files"),
+                Some(Message::Show(Panel::Context))
+            )
+            .padding(0),
             space::horizontal(),
             usage
         ]
@@ -463,8 +436,8 @@ impl App {
         let editor = text_editor(&self.content)
             .id("composer")
             .placeholder("Ask anything")
-            .height(58)
-            .padding(4)
+            .height(layout::EDITOR_HEIGHT)
+            .padding(0)
             .size(style::BODY)
             .on_action(Message::Edit)
             .style(style::editor)
@@ -480,19 +453,14 @@ impl App {
                 }
                 _ => text_editor::Binding::from_key_press(press),
             });
-        let mut tools = row![].spacing(12).align_y(Center);
+        let mut tools = row![].spacing(layout::MD).align_y(Center);
         if let Some(snapshot) = &self.snapshot {
-            tools = tools.push(
-                pick_list(
-                    snapshot.prompts.as_slice(),
-                    Some(snapshot.prompt.clone()),
-                    Message::Prompt,
-                )
-                .text_size(style::LABEL)
-                .style(style::picker)
-                .menu_style(style::menu)
-                .padding([5, 8]),
-            );
+            tools = tools.push(components::choice(
+                snapshot.prompts.clone(),
+                Some(snapshot.prompt.clone()),
+                Message::Prompt,
+                iced::Length::Shrink,
+            ));
             tools = tools.push(space::horizontal());
             let mut models = snapshot.models.clone();
             if !models
@@ -501,17 +469,12 @@ impl App {
             {
                 models.push(snapshot.session.model.to_string());
             }
-            tools = tools.push(
-                pick_list(
-                    models,
-                    Some(snapshot.session.model.to_string()),
-                    Message::Model,
-                )
-                .text_size(style::LABEL)
-                .style(style::picker)
-                .menu_style(style::menu)
-                .padding([5, 8]),
-            );
+            tools = tools.push(components::choice(
+                models,
+                Some(snapshot.session.model.to_string()),
+                Message::Model,
+                iced::Length::Shrink,
+            ));
         } else {
             tools = tools.push(space::horizontal());
         }
@@ -521,23 +484,31 @@ impl App {
             (!self.busy && self.snapshot.is_some() && !self.content.text().trim().is_empty())
                 .then_some(Message::Send),
         ));
-        let composer = container(column![editor, tools].spacing(8))
-            .padding(14)
+        let composer = container(column![editor, tools].spacing(layout::SM))
+            .padding(layout::LG)
             .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
-        let mut area = column![].spacing(8);
+        let mut area = column![].spacing(layout::SM);
         let matches = self.slash_commands();
         if !matches.is_empty() {
-            let picker_height = (matches.len() as f32 * 32.0).min(180.0);
+            let picker_height =
+                (matches.len() as f32 * layout::CONTROL_HEIGHT).min(layout::PICKER_HEIGHT);
             let list = column(matches.into_iter().enumerate().map(|(index, command)| {
                 button(
-                    row![
-                        text(command.syntax).size(style::CAPTION).width(130),
-                        text(command.label).size(style::CAPTION)
-                    ]
-                    .spacing(8),
+                    container(
+                        row![
+                            text(command.syntax)
+                                .size(style::CAPTION)
+                                .width(layout::COMMAND_COLUMN),
+                            text(command.label).size(style::CAPTION)
+                        ]
+                        .spacing(layout::SM)
+                        .align_y(Center),
+                    )
+                    .center_y(Fill),
                 )
                 .width(Fill)
-                .padding([8, 10])
+                .padding([0.0, layout::MD])
+                .height(layout::CONTROL_HEIGHT)
                 .on_press(Message::Choose(command))
                 .style(move |theme: &Theme, status| {
                     if index == self.slash_selection {
@@ -553,7 +524,7 @@ impl App {
             }));
             area = area.push(
                 container(scrollable(list).height(picker_height))
-                    .padding(5)
+                    .padding(layout::XS)
                     .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
             );
         }
@@ -572,8 +543,6 @@ impl App {
             );
         }
         area = area.push(composer);
-        container(container(area).max_width(880).padding([16, 32]).width(Fill))
-            .center_x(Fill)
-            .into()
+        components::rail(area, self.layout())
     }
 }
