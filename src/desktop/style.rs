@@ -1,6 +1,19 @@
 use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor, text_input};
 use iced::{Border, Color, Theme};
 
+// Typography roles are shared by labels, fields, buttons, and message bodies.
+pub(super) const CAPTION: u16 = 12;
+pub(super) const LABEL: u16 = 14;
+pub(super) const BODY: u16 = 16;
+pub(super) const TITLE: u16 = 18;
+pub(super) const CONTROL_LINE: f32 = 20.0;
+pub(super) const ICON_SIZE: u16 = 18;
+pub(super) const CONTROL_RADIUS: f32 = 8.0;
+pub(super) const PANEL_RADIUS: f32 = 12.0;
+pub(super) const BUBBLE_RADIUS: f32 = 16.0;
+pub(super) const DISABLED_ALPHA: f32 = 0.4;
+pub(super) const SCRIM_ALPHA: f32 = 0.4;
+
 pub(super) const PAPER: Color = Color::from_rgb8(25, 25, 25);
 pub(super) const SIDEBAR: Color = Color::from_rgb8(38, 38, 38);
 pub(super) const RAISED: Color = Color::from_rgb8(43, 43, 43);
@@ -40,12 +53,12 @@ pub(super) fn flat(_theme: &Theme, status: button::Status) -> button::Style {
         background: matches!(status, button::Status::Hovered | button::Status::Pressed)
             .then_some(SELECTED.into()),
         text_color: if status == button::Status::Disabled {
-            MUTED.scale_alpha(0.4)
+            MUTED.scale_alpha(DISABLED_ALPHA)
         } else {
             MUTED
         },
         border: Border {
-            radius: 7.0.into(),
+            radius: CONTROL_RADIUS.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -62,11 +75,16 @@ pub(super) fn editor(_theme: &Theme, _status: text_editor::Status) -> text_edito
     }
 }
 
-pub(super) fn input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
+pub(super) fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     text_input::Style {
-        background: SELECTED.into(),
+        background: if matches!(status, text_input::Status::Focused { .. }) {
+            SELECTED
+        } else {
+            PAPER
+        }
+        .into(),
         border: Border {
-            radius: 8.0.into(),
+            radius: CONTROL_RADIUS.into(),
             ..Border::default()
         },
         icon: MUTED,
@@ -91,7 +109,7 @@ pub(super) fn picker(_theme: &Theme, status: pick_list::Status) -> pick_list::St
         }
         .into(),
         border: Border {
-            radius: 6.0.into(),
+            radius: CONTROL_RADIUS.into(),
             ..Border::default()
         },
     }
@@ -101,7 +119,7 @@ pub(super) fn menu(_theme: &Theme) -> menu::Style {
     menu::Style {
         background: RAISED.into(),
         border: Border {
-            radius: 8.0.into(),
+            radius: CONTROL_RADIUS.into(),
             ..Border::default()
         },
         text_color: INK,
@@ -123,7 +141,7 @@ pub(super) enum Icon {
     Import,
 }
 
-pub(super) fn icon<'a>(icon: Icon) -> svg::Svg<'a, Theme> {
+pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
     let bytes: &[u8] = match icon {
         Icon::Sidebar => include_bytes!("icons/rectangle-stack.svg"),
         Icon::Send => include_bytes!("icons/arrow-up.svg"),
@@ -135,7 +153,13 @@ pub(super) fn icon<'a>(icon: Icon) -> svg::Svg<'a, Theme> {
         Icon::Import => include_bytes!("icons/arrow-down-tray.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
-        .width(17)
-        .height(17)
-        .style(|_, _| svg::Style { color: Some(MUTED) })
+        .width(ICON_SIZE)
+        .height(ICON_SIZE)
+        .style(move |_, _| svg::Style {
+            color: Some(if enabled {
+                INK
+            } else {
+                MUTED.scale_alpha(DISABLED_ALPHA)
+            }),
+        })
 }
