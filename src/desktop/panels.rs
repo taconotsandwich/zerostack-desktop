@@ -1,10 +1,8 @@
-use iced::widget::{
-    button, column, container, pick_list, row, scrollable, space, text, text_input,
-};
+use iced::widget::{column, row, text};
 use iced::{Element, Fill};
 
 use super::app::{App, Message, Panel};
-use super::{commands, style};
+use super::{commands, components, layout, style};
 
 impl App {
     pub fn panel_view<'a>(&'a self, panel: &'a Panel) -> Element<'a, Message> {
@@ -15,14 +13,7 @@ impl App {
             Panel::Delete { .. } => "Delete conversation?",
             Panel::Result(_) => "Result",
         };
-        let mut content = column![row![
-            text(title).size(style::TITLE),
-            space::horizontal(),
-            button("Close")
-                .style(style::flat)
-                .on_press(Message::ClosePanel)
-        ]]
-        .spacing(16);
+        let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
             Panel::Context => {
                 if let Some(snapshot) = &self.snapshot {
@@ -31,21 +22,26 @@ impl App {
                         content = content.push(
                             row![
                                 text(path.clone()).size(style::LABEL).width(Fill),
-                                button("Remove").style(style::flat).on_press_maybe(
+                                components::action(
+                                    "Remove",
                                     (!self.busy && !path.contains(char::is_whitespace))
                                         .then_some(Message::Run(format!("/drop {path}")))
                                 )
                             ]
-                            .spacing(12),
+                            .spacing(layout::MD)
+                            .align_y(iced::Center),
                         );
                     }
                 }
                 for syntax in ["/add", "/drop-all", "/compress"] {
                     if let Some(command) = commands::find(syntax) {
                         content = content.push(
-                            button(command.label)
-                                .style(style::flat)
-                                .on_press_maybe((!self.busy).then_some(Message::Choose(command))),
+                            components::action(
+                                command.label,
+                                (!self.busy).then_some(Message::Choose(command)),
+                            )
+                            .padding(0)
+                            .width(Fill),
                         );
                     }
                 }
@@ -71,9 +67,12 @@ impl App {
                 ] {
                     if let Some(command) = commands::find(syntax) {
                         content = content.push(
-                            button(command.label)
-                                .style(style::flat)
-                                .on_press_maybe((!self.busy).then_some(Message::Choose(command))),
+                            components::action(
+                                command.label,
+                                (!self.busy).then_some(Message::Choose(command)),
+                            )
+                            .padding(0)
+                            .width(Fill),
                         );
                     }
                 }
@@ -93,48 +92,44 @@ impl App {
                         _ => &[],
                     };
                     if !choices.is_empty() {
-                        content = content.push(
-                            pick_list(
-                                choices.to_vec(),
-                                self.fields
-                                    .get(index)
-                                    .filter(|value| !value.is_empty())
-                                    .map(String::as_str),
-                                move |value| Message::Field(index, String::from(value)),
-                            )
-                            .placeholder("Choose")
-                            .style(style::picker)
-                            .menu_style(style::menu),
-                        );
+                        content = content.push(components::choice(
+                            choices.iter().map(|value| String::from(*value)).collect(),
+                            self.fields
+                                .get(index)
+                                .filter(|value| !value.is_empty())
+                                .cloned(),
+                            move |value| Message::Field(index, value),
+                            Fill,
+                        ));
                         continue;
                     }
                     content = content.push(
-                        text_input(
+                        components::field(
                             label,
                             self.fields.get(index).map(String::as_str).unwrap_or(""),
                         )
                         .id(format!("command-field-{index}"))
-                        .padding(10)
-                        .style(style::input)
                         .on_input(move |value| Message::Field(index, value))
                         .on_submit(Message::Confirm),
                     );
                 }
-                content = content.push(
-                    button(command.label).on_press_maybe((!self.busy).then_some(Message::Confirm)),
-                );
+                content = content.push(components::action(
+                    command.label,
+                    (!self.busy).then_some(Message::Confirm),
+                ));
             }
             Panel::Delete { title, .. } => {
                 content = content.push(
                     text(format!("Delete “{title}” from saved conversations?")).size(style::LABEL),
                 );
-                content = content.push(
-                    button("Delete").on_press_maybe((!self.busy).then_some(Message::Confirm)),
-                );
+                content = content.push(components::action(
+                    "Delete",
+                    (!self.busy).then_some(Message::Confirm),
+                ));
             }
             Panel::Result(value) => {
                 content = content.push(text(value).size(style::LABEL));
-                content = content.push(super::view::icon_button(
+                content = content.push(components::icon_button(
                     style::Icon::Copy,
                     "Copy",
                     Some(Message::Copy(value.clone())),
@@ -148,8 +143,6 @@ impl App {
                     .color(style::theme().palette().danger),
             );
         }
-        container(scrollable(content).height(iced::Length::Shrink))
-            .max_height(560)
-            .into()
+        components::panel_body(content, layout::Layout::new(self.size, self.sidebar))
     }
 }
