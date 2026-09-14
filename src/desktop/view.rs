@@ -265,7 +265,8 @@ impl App {
                             actions = actions.push(icon_button(
                                 Icon::Revert,
                                 "Undo latest messages",
-                                (!self.busy).then_some(Message::Run("/undo".into())),
+                                (!self.busy)
+                                    .then_some(Message::Operate(super::worker::Operation::Undo)),
                             ));
                         }
                         messages = messages.push(
@@ -292,7 +293,8 @@ impl App {
                             actions = actions.push(icon_button(
                                 Icon::Retry,
                                 "Regenerate",
-                                (!self.busy).then_some(Message::Run("/retry".into())),
+                                (!self.busy)
+                                    .then_some(Message::Operate(super::worker::Operation::Retry)),
                             ));
                         }
                         messages = messages.push(column![body, actions].spacing(layout::SM));
