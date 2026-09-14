@@ -9,10 +9,80 @@ use crate::session::{Session, storage};
 
 #[derive(Debug, Clone)]
 pub(super) enum Operation {
-    Run(String),
+    Prompt(String),
+    Command(String),
     Load(String),
-    Rename { id: String, name: String },
+    Rename {
+        id: String,
+        name: String,
+    },
     Delete(String),
+    ClearMessages,
+    Undo,
+    Redo,
+    Retry,
+    SelectModel {
+        selection: String,
+    },
+    SelectProvider {
+        provider: String,
+    },
+    SelectPrompt {
+        prompt: String,
+    },
+    SetPermissionMode {
+        mode: String,
+    },
+    SetEditSystem {
+        system: String,
+    },
+    AddContextFile {
+        path: PathBuf,
+    },
+    DropContextFile {
+        path: PathBuf,
+    },
+    ClearContextFiles,
+    ToggleReasoning,
+    SaveQuickModel {
+        name: String,
+        provider: String,
+        model: String,
+    },
+    CompressConversation {
+        instructions: Option<String>,
+    },
+    AskSeparateQuestion {
+        question: String,
+    },
+    RunShell {
+        command: String,
+    },
+    #[cfg(feature = "export")]
+    ExportConversation {
+        destination: Option<PathBuf>,
+    },
+    #[cfg(feature = "export")]
+    ImportConversation {
+        path: PathBuf,
+    },
+    #[cfg(feature = "export")]
+    ShareConversation,
+}
+
+impl Operation {
+    pub(super) fn is_textual(&self) -> bool {
+        match self {
+            Operation::Prompt(_)
+            | Operation::Command(_)
+            | Operation::Retry
+            | Operation::AskSeparateQuestion { .. }
+            | Operation::RunShell { .. } => true,
+            #[cfg(feature = "export")]
+            Operation::ShareConversation => true,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -143,25 +213,37 @@ async fn apply(
     operation: Operation,
     no_session: bool,
 ) -> anyhow::Result<Option<RunOutput>> {
-    match operation {
-        Operation::Run(input) => {
-            let before = serde_json::to_vec(engine.session())?;
-            let output = engine.run_string(&input).await?;
-            if !no_session && before != serde_json::to_vec(engine.session())? {
-                storage::save_session(engine.session())?;
-            }
-            Ok(Some(output))
-        }
+    let persist = !no_session
+        && matches!(
+            operation,
+            Operation::Prompt(_)
+                | Operation::Command(_)
+                | Operation::Load(_)
+                | Operation::ClearMessages
+                | Operation::Undo
+                | Operation::Redo
+                | Operation::Retry
+                | Operation::SelectModel { .. }
+                | Operation::SelectProvider { .. }
+                | Operation::SelectPrompt { .. }
+                | Operation::SetPermissionMode { .. }
+                | Operation::SetEditSystem { .. }
+                | Operation::AddContextFile { .. }
+                | Operation::DropContextFile { .. }
+                | Operation::ClearContextFiles
+                | Operation::ToggleReasoning
+                | Operation::CompressConversation { .. }
+                | Operation::AskSeparateQuestion { .. }
+                | Operation::RunShell { .. }
+        );
+    let before = serde_json::to_vec(engine.session())?;
+    let output = match operation {
+        Operation::Prompt(prompt) => Some(engine.run_prompt(prompt).await),
+        Operation::Command(input) => Some(engine.run_string(&input).await?),
         Operation::Load(id) => {
-            validate_id(&id)?;
-            let matches = storage::find_sessions_by_prefix(&id)?;
-            anyhow::ensure!(
-                matches.iter().any(|session| session.id.as_str() == id),
-                "Conversation no longer exists."
-            );
-            let output = engine.run_string(&format!("/sessions {id}")).await?;
-            anyhow::ensure!(engine.session().id.as_str() == id, "{}", output.text);
-            Ok(None)
+            let session = saved_session(&id)?;
+            *engine.session_mut() = session;
+            None
         }
         Operation::Rename { id, name } => {
             anyhow::ensure!(
@@ -180,14 +262,103 @@ async fn apply(
                 session.name = name.trim().into();
                 storage::save_session(&session)?;
             }
-            Ok(None)
+            None
         }
         Operation::Delete(id) => {
             validate_id(&id)?;
             storage::delete_session(&id)?;
-            Ok(None)
+            None
         }
+        Operation::ClearMessages => {
+            engine.clear_messages().await;
+            None
+        }
+        Operation::Undo => {
+            engine.undo_messages();
+            None
+        }
+        Operation::Redo => {
+            engine.redo_messages();
+            None
+        }
+        Operation::Retry => Some(engine.retry_last_message().await?),
+        Operation::SelectModel { selection } => {
+            engine.set_model_selection(&selection).await?;
+            None
+        }
+        Operation::SelectProvider { provider } => {
+            engine.set_provider(&provider).await?;
+            None
+        }
+        Operation::SelectPrompt { prompt } => {
+            engine.set_prompt(&prompt).await?;
+            None
+        }
+        Operation::SetPermissionMode { mode } => {
+            engine.set_permission_mode(&mode)?;
+            None
+        }
+        Operation::SetEditSystem { system } => {
+            engine.set_edit_system(&system)?;
+            None
+        }
+        Operation::AddContextFile { path } => {
+            engine.add_context_file(path).await?;
+            None
+        }
+        Operation::DropContextFile { path } => {
+            engine.drop_context_file(path).await?;
+            None
+        }
+        Operation::ClearContextFiles => {
+            engine.clear_context_files().await?;
+            None
+        }
+        Operation::ToggleReasoning => {
+            engine.toggle_reasoning().await;
+            None
+        }
+        Operation::SaveQuickModel {
+            name,
+            provider,
+            model,
+        } => {
+            for value in [&name, &provider, &model] {
+                anyhow::ensure!(!value.trim().is_empty(), "Complete the required fields.");
+                anyhow::ensure!(
+                    !value.trim().contains(char::is_whitespace),
+                    "This Engine command currently requires a path without spaces."
+                );
+            }
+            crate::config::save_quick_model(&name, &provider, &model, 0.0, 0.0)
+                .map_err(|error| anyhow::anyhow!("failed to save quick model: {error}"))?;
+            None
+        }
+        Operation::CompressConversation { instructions } => {
+            engine.compress_conversation(instructions).await?;
+            None
+        }
+        Operation::AskSeparateQuestion { question } => {
+            Some(engine.ask_separate_question(question).await?)
+        }
+        Operation::RunShell { command } => Some(engine.run_shell(command).await?),
+        #[cfg(feature = "export")]
+        Operation::ExportConversation { destination } => {
+            engine.export_conversation(destination)?;
+            None
+        }
+        #[cfg(feature = "export")]
+        Operation::ImportConversation { path } => {
+            engine.import_conversation(path)?;
+            None
+        }
+        #[cfg(feature = "export")]
+        Operation::ShareConversation => Some(engine.share_conversation().await?),
+    };
+    if persist && before != serde_json::to_vec(engine.session())? {
+        storage::save_session(engine.session())?;
     }
+    Ok(output)
 }
 
 fn validate_id(id: &str) -> anyhow::Result<()> {
@@ -299,7 +470,7 @@ mod tests {
 
     fn engine() -> Engine {
         let model = fake_model::text_turns(vec![vec!["First reply"], vec!["Second reply"]]);
-        Engine::with_agent(
+        Engine::new(
             Cli {
                 api_key: Some("test-key".into()),
                 ..Default::default()
@@ -311,8 +482,10 @@ mod tests {
                 .unwrap(),
             None,
             crate::sandbox::Sandbox::new(false, "bwrap"),
-            crate::provider::AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build()),
         )
+        .with_agent(crate::provider::AnyAgent::Mock(
+            rig::agent::AgentBuilder::new(model).build(),
+        ))
     }
 
     #[tokio::test]
@@ -322,7 +495,7 @@ mod tests {
         let mut engine = engine();
         let output = apply(
             &mut engine,
-            Operation::Run("Explain the code".into()),
+            Operation::Prompt("Explain the code".into()),
             false,
         )
         .await
@@ -333,18 +506,14 @@ mod tests {
             saved_session(&engine.session().id).unwrap().messages.len(),
             2
         );
-        apply(&mut engine, Operation::Run("/undo".into()), false)
-            .await
-            .unwrap();
+        apply(&mut engine, Operation::Undo, false).await.unwrap();
         assert!(
             saved_session(&engine.session().id)
                 .unwrap()
                 .messages
                 .is_empty()
         );
-        apply(&mut engine, Operation::Run("/redo".into()), false)
-            .await
-            .unwrap();
+        apply(&mut engine, Operation::Redo, false).await.unwrap();
         assert_eq!(
             saved_session(&engine.session().id).unwrap().messages.len(),
             2
