@@ -63,7 +63,7 @@ pub(super) enum Message {
     Delete(String),
     Confirm,
     Choose(Command),
-    Run(String),
+    Operate(Operation),
     Field(usize, String),
     Show(Panel),
     ClosePanel,
@@ -166,7 +166,7 @@ impl App {
         self.menu = None;
         self.slash_dismissed = true;
         if command.fields.is_empty() && command.confirmation.is_none() {
-            return self.dispatch(Operation::Run(command.syntax.into()));
+            return self.dispatch(super::operations::fieldless_operation(&command));
         }
         self.fields = vec![String::new(); command.fields.len()];
         self.panel = Some(Panel::Form(command));
@@ -247,7 +247,7 @@ impl App {
                                 .map_or(0, |old| old.session.messages.len())
                                 < snapshot.session.messages.len();
                             scroll |= new_messages;
-                            if matches!(pending, Some(Operation::Run(_))) {
+                            if pending.as_ref().is_some_and(Operation::is_textual) {
                                 if (new_messages || output.kind == RunKind::Command)
                                     && submitted_is_unchanged(
                                         self.submitted.as_deref(),
@@ -256,13 +256,24 @@ impl App {
                                 {
                                     self.content = text_editor::Content::new();
                                 }
-                                if !new_messages
-                                    && self.error.is_empty()
-                                    && matches!(&pending, Some(Operation::Run(input)) if requests_output(input))
-                                {
-                                    if let Some(Operation::Run(input)) = &pending {
-                                        self.command_output = command_text(input, &output.text);
-                                        scroll |= !self.command_output.is_empty();
+                                if !new_messages && self.error.is_empty() {
+                                    match &pending {
+                                        Some(Operation::Command(input))
+                                            if requests_output(input) =>
+                                        {
+                                            self.command_output = command_text(input, &output.text);
+                                            scroll |= !self.command_output.is_empty();
+                                        }
+                                        Some(Operation::AskSeparateQuestion { .. }) => {
+                                            self.command_output = output.text.trim().to_string();
+                                            scroll |= !self.command_output.is_empty();
+                                        }
+                                        #[cfg(feature = "export")]
+                                        Some(Operation::ShareConversation) => {
+                                            self.command_output = output.text.trim().to_string();
+                                            scroll |= !self.command_output.is_empty();
+                                        }
+                                        _ => {}
                                     }
                                 }
                             }
@@ -318,7 +329,7 @@ impl App {
                     }
                     return task;
                 }
-                return self.dispatch(Operation::Run(input));
+                return self.dispatch(super::operations::composer_operation(&input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Select(id) if !self.busy => {
@@ -386,17 +397,21 @@ impl App {
                 self.menu = None;
             }
             Message::Confirm if !self.busy => match self.panel.clone() {
-                Some(Panel::Form(command)) => match command.input(&self.fields) {
-                    Ok(input) => {
-                        return self.dispatch(Operation::Run(input));
+                Some(Panel::Form(command)) => {
+                    let current = self
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.session.id.as_str());
+                    match super::operations::form_operation(&command, &self.fields, current) {
+                        Ok(operation) => return self.dispatch(operation),
+                        Err(error) => self.error = error,
                     }
-                    Err(error) => self.error = error,
-                },
+                }
                 Some(Panel::Delete { id, .. }) => return self.dispatch(Operation::Delete(id)),
                 _ => {}
             },
             Message::Choose(command) if !self.busy => return self.choose(command),
-            Message::Run(input) if !self.busy => return self.dispatch(Operation::Run(input)),
+            Message::Operate(operation) if !self.busy => return self.dispatch(operation),
             Message::Field(index, value) => {
                 if let Some(field) = self.fields.get_mut(index) {
                     *field = value;
@@ -424,21 +439,23 @@ impl App {
             }
             Message::ToggleUsage => self.usage_open = !self.usage_open,
             Message::Model(model) if !self.busy => {
-                return self.dispatch(Operation::Run(format!("/models {model}")));
+                return self.dispatch(Operation::SelectModel { selection: model });
             }
             Message::ModelInput(value) => self.model_input = value,
             Message::SaveModel if !self.busy => {
                 let model = self.model_input.trim();
                 if !model.is_empty() && !model.contains(char::is_whitespace) {
-                    return self.dispatch(Operation::Run(format!("/models {model}")));
+                    return self.dispatch(Operation::SelectModel {
+                        selection: model.to_string(),
+                    });
                 }
                 self.error = "Enter a model ID without spaces.".into();
             }
             Message::Provider(provider) if !self.busy => {
-                return self.dispatch(Operation::Run(format!("/provider {provider}")));
+                return self.dispatch(Operation::SelectProvider { provider });
             }
             Message::Prompt(prompt) if !self.busy => {
-                return self.dispatch(Operation::Run(format!("/prompt {prompt}")));
+                return self.dispatch(Operation::SelectPrompt { prompt });
             }
             Message::Link(uri) => {
                 return Task::perform(
