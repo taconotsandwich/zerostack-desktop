@@ -172,6 +172,387 @@ impl Engine {
         &self.context
     }
 
+    // ── typed actions for programmatic callers (desktop UI) ─────────
+    //
+    // These methods expose the same state changes as the slash handlers
+    // without requiring callers to format command strings. `run_string`
+    // remains the entry point for user-typed slash/bang/dot commands.
+
+    /// Run a plain prompt as an agent turn.
+    pub async fn run_prompt(&mut self, prompt: String) -> RunOutput {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return RunOutput::ignored();
+        }
+        self.run_agent_text(prompt).await
+    }
+
+    /// Run a shell command without a leading `!`.
+    pub async fn run_shell(&mut self, command: String) -> anyhow::Result<RunOutput> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "shell command cannot be empty");
+        Ok(self.run_bang(&format!("!{command}")).await)
+    }
+
+    /// Ask a separate question without mutating the session.
+    pub async fn ask_separate_question(&mut self, question: String) -> anyhow::Result<RunOutput> {
+        let question = question.trim();
+        anyhow::ensure!(!question.is_empty(), "question cannot be empty");
+        Ok(self.run_btw(&format!("/btw {question}")).await)
+    }
+
+    /// Switch provider and apply its default model.
+    pub async fn set_provider(&mut self, provider: &str) -> anyhow::Result<()> {
+        let new_provider = provider.trim();
+        anyhow::ensure!(!new_provider.is_empty(), "provider cannot be empty");
+        if crate::provider::parse_provider(new_provider).is_none()
+            && !self.cfg.custom_providers_map().contains_key(new_provider)
+        {
+            anyhow::bail!("unknown provider: '{new_provider}'");
+        }
+        if let Some((model, costs)) =
+            crate::provider::default_model_for_provider(new_provider, &self.cfg)
+        {
+            self.session.model = CompactString::new(&model);
+            if let Some((inc, outc)) = costs {
+                self.session.input_token_cost = inc;
+                self.session.output_token_cost = outc;
+            }
+        }
+        self.rebuild_agent_with_client(new_provider).await?;
+        self.session.provider = CompactString::new(new_provider);
+        let qm = config::quick_models_map(&self.cfg);
+        self.session
+            .update_context_window(self.cfg.resolve_context_window(
+                new_provider,
+                &self.session.model,
+                &qm,
+            ));
+        Ok(())
+    }
+
+    /// Select a quick model by name or switch to a raw model ID.
+    pub async fn set_model_selection(&mut self, selection: &str) -> anyhow::Result<()> {
+        let selection = selection.trim();
+        anyhow::ensure!(!selection.is_empty(), "model selection cannot be empty");
+        anyhow::ensure!(
+            !selection.contains(char::is_whitespace),
+            "model selection cannot contain spaces"
+        );
+        let qm = config::quick_models_map(&self.cfg);
+        if let Some(q) = qm.get(selection) {
+            let provider = q.provider.to_string();
+            let model = q.model.to_string();
+            let in_cost = q.input_token_cost;
+            let out_cost = q.output_token_cost;
+            self.rebuild_agent_with_client(&provider).await?;
+            self.session.provider = CompactString::from(&provider);
+            self.rebuild_agent(&model).await;
+            self.session.model = CompactString::from(&model);
+            let qm2 = config::quick_models_map(&self.cfg);
+            self.session
+                .update_context_window(self.cfg.resolve_context_window(
+                    &self.session.provider,
+                    &self.session.model,
+                    &qm2,
+                ));
+            self.session.input_token_cost = in_cost;
+            self.session.output_token_cost = out_cost;
+            return Ok(());
+        }
+        let selection_owned = selection.to_string();
+        self.rebuild_agent(&selection_owned).await;
+        self.session.model = CompactString::new(selection);
+        Ok(())
+    }
+
+    /// Activate a prompt by name, or `"default"` to clear the active prompt.
+    pub async fn set_prompt(&mut self, prompt: &str) -> anyhow::Result<()> {
+        let prompt = prompt.trim();
+        anyhow::ensure!(!prompt.is_empty(), "prompt cannot be empty");
+        let mut sink = StringSink::new();
+        let parts = if prompt == "default" {
+            vec!["/prompt", "default"]
+        } else {
+            vec!["/prompt", prompt]
+        };
+        self.cmd_prompt(&parts, &mut sink).await?;
+        let transcript = sink.transcript();
+        if sink.lines().iter().any(|line| line.starts_with("error: ")) {
+            anyhow::bail!("{transcript}");
+        }
+        Ok(())
+    }
+
+    /// Switch the permission mode.
+    pub fn set_permission_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+        let mode = mode.trim();
+        let mode = match mode {
+            "standard" => SecurityMode::Standard,
+            "restrictive" => SecurityMode::Restrictive,
+            "readonly" => SecurityMode::ReadOnly,
+            "guarded" => SecurityMode::Guarded,
+            "yolo" => SecurityMode::Yolo,
+            _ => anyhow::bail!("unknown mode: {mode}"),
+        };
+        match &self.permission {
+            Some(permission) => {
+                permission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .set_mode(mode);
+                Ok(())
+            }
+            None => anyhow::bail!("permission system not active"),
+        }
+    }
+
+    /// Switch the file-editing system.
+    pub fn set_edit_system(&self, system: &str) -> anyhow::Result<()> {
+        let system = system.trim();
+        match system {
+            "similarity" => {
+                crate::agent::tools::set_edit_system(crate::config::types::EditSystem::Similarity);
+                Ok(())
+            }
+            "hashedit" => {
+                crate::agent::tools::set_edit_system(crate::config::types::EditSystem::Hashedit);
+                Ok(())
+            }
+            _ => anyhow::bail!("unknown: '{system}' (similarity|hashedit)"),
+        }
+    }
+
+    /// Add a file to context. Returns a status message when one applies.
+    pub async fn add_context_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<Option<String>> {
+        let path = Self::resolve_path(path.to_string_lossy().as_ref());
+        if !path.exists() {
+            anyhow::bail!("file not found: {}", path.display());
+        }
+        if !path.is_file() {
+            anyhow::bail!("not a file: {}", path.display());
+        }
+        #[cfg(feature = "multimodal")]
+        if crate::extras::multimodal::detect_media(&path).is_some() {
+            match crate::extras::multimodal::load_attachment(&path) {
+                Ok(attachment) => {
+                    let size = attachment.size();
+                    self.session.pending_media.push(attachment);
+                    return Ok(Some(format!("attached: {} ({size}B)", path.display())));
+                }
+                Err(error) => anyhow::bail!("failed to load media: {error}"),
+            }
+        }
+        let canonical = path.canonicalize().unwrap_or(path);
+        if self.context.extra_files.contains(&canonical) {
+            return Ok(Some(format!("already added: {}", canonical.display())));
+        }
+        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        self.context.extra_files.push(canonical.clone());
+        let model_id = self.session.model.to_string();
+        self.rebuild_agent(&model_id).await;
+        Ok(Some(format!("added: {} ({size}B)", canonical.display())))
+    }
+
+    /// Remove a file from context. Returns a status message when one applies.
+    pub async fn drop_context_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<Option<String>> {
+        let path = Self::resolve_path(path.to_string_lossy().as_ref());
+        let canonical = path.canonicalize().unwrap_or(path);
+        if let Some(index) = self
+            .context
+            .extra_files
+            .iter()
+            .position(|file| file == &canonical)
+        {
+            self.context.extra_files.remove(index);
+            let model_id = self.session.model.to_string();
+            self.rebuild_agent(&model_id).await;
+            return Ok(Some(format!("dropped: {}", canonical.display())));
+        }
+        anyhow::bail!("not in context: {} (use /add to see)", canonical.display())
+    }
+
+    /// Remove all context files and pending media.
+    pub async fn clear_context_files(&mut self) -> anyhow::Result<Option<String>> {
+        let file_count = self.context.extra_files.len();
+        #[cfg(feature = "multimodal")]
+        let media_count = self.session.pending_media.len();
+        #[cfg(not(feature = "multimodal"))]
+        let media_count = 0;
+        if file_count == 0 && media_count == 0 {
+            return Ok(None);
+        }
+        if file_count > 0 {
+            self.context.extra_files.clear();
+            let model_id = self.session.model.to_string();
+            self.rebuild_agent(&model_id).await;
+        }
+        #[cfg(feature = "multimodal")]
+        self.session.pending_media.clear();
+        Ok(Some(format!("dropped {file_count} file(s)")))
+    }
+
+    /// Clear session messages and related turn state.
+    pub async fn clear_messages(&mut self) {
+        #[cfg(feature = "hooks")]
+        crate::extras::hooks::dispatch_session_end("clear").await;
+        self.session.messages.clear();
+        self.session.total_estimated_tokens = 0;
+        self.session.reset_calibration();
+        self.session.compactions.clear();
+        self.context.chain_declined.clear();
+        #[cfg(feature = "hooks")]
+        crate::extras::hooks::dispatch_session_start("clear").await;
+    }
+
+    /// Undo the last exchange. Returns the removed message count.
+    pub fn undo_messages(&mut self) -> usize {
+        crate::ui::slash::undo_last(&mut self.session)
+    }
+
+    /// Restore the last rewind. Returns false when there is nothing to redo.
+    pub fn redo_messages(&mut self) -> bool {
+        self.session.redo()
+    }
+
+    /// Retry the last user message as a new agent turn.
+    pub async fn retry_last_message(&mut self) -> anyhow::Result<RunOutput> {
+        let Some(message) = self.last_user_message() else {
+            anyhow::bail!("no previous message to retry");
+        };
+        let output = self.run_agent_text(&message.content).await;
+        self.save_session_best_effort();
+        Ok(output)
+    }
+
+    fn last_user_message(&self) -> Option<crate::session::SessionMessage> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .cloned()
+    }
+
+    /// Toggle reasoning on or off.
+    pub async fn toggle_reasoning(&mut self) {
+        self.reasoning_enabled = !self.reasoning_enabled;
+        self.show_reasoning = self.reasoning_enabled;
+        let model_id = self.session.model.to_string();
+        self.rebuild_agent(&model_id).await;
+    }
+
+    /// Compact the context with optional instructions.
+    pub async fn compress_conversation(
+        &mut self,
+        instructions: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut sink = StringSink::new();
+        self.compress(instructions.as_deref(), false, &mut sink)
+            .await?;
+        self.save_session_best_effort();
+        Ok(())
+    }
+
+    /// Export the active session. Returns the success message.
+    #[cfg(feature = "export")]
+    pub fn export_conversation(
+        &self,
+        destination: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<String> {
+        let default_name = format!(
+            "zerostack-session-{}.html",
+            &self.session.id[..8.min(self.session.id.len())]
+        );
+        let default_path = std::path::PathBuf::from(default_name);
+        let path = destination.unwrap_or(default_path);
+        let path = path.to_string_lossy().into_owned();
+        let (content, kind) = if path.ends_with(".jsonl") {
+            (
+                crate::extras::export::session_to_jsonl(&self.session),
+                "JSONL",
+            )
+        } else {
+            (
+                crate::extras::export::session_to_html(&self.session),
+                "HTML",
+            )
+        };
+        std::fs::write(&path, content)
+            .map_err(|error| anyhow::anyhow!("export failed: {error}"))?;
+        Ok(format!("exported {kind} to {path}"))
+    }
+
+    /// Import a session file and make it active. Returns the success message.
+    #[cfg(feature = "export")]
+    pub fn import_conversation(&mut self, path: std::path::PathBuf) -> anyhow::Result<String> {
+        use compact_str::CompactString;
+
+        let path = path.to_string_lossy().into_owned();
+        anyhow::ensure!(
+            !path.trim().is_empty(),
+            "usage: /import <file.jsonl|session.json>"
+        );
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
+        let mut session = if content.trim_start().starts_with('{') {
+            serde_json::from_str::<Session>(&content)
+                .map_err(|error| anyhow::anyhow!("invalid session file: {error}"))?
+        } else {
+            let messages = crate::extras::export::parse_jsonl_import(&content)
+                .map_err(|error| anyhow::anyhow!("invalid JSONL session: {error}"))?;
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "imported".to_string());
+            let mut session = Session::new(
+                self.session.provider.as_str(),
+                self.session.model.as_str(),
+                self.session.context_window,
+                &name,
+            );
+            for message in messages {
+                session.add_message(message.role, &message.content);
+            }
+            session
+        };
+        if session.name.is_empty() {
+            session.name = CompactString::new("imported");
+        }
+        let message_count = session.messages.len();
+        crate::session::storage::save_session(&session)
+            .map_err(|error| anyhow::anyhow!("failed to save session: {error}"))?;
+        self.session = session;
+        Ok(format!(
+            "imported session from {path} ({message_count} msgs)"
+        ))
+    }
+
+    /// Publish the active session as a secret gist. Returns the run output.
+    #[cfg(feature = "export")]
+    pub async fn share_conversation(&self) -> anyhow::Result<RunOutput> {
+        let filename = format!(
+            "zerostack-session-{}.html",
+            &self.session.id[..8.min(self.session.id.len())]
+        );
+        let html = crate::extras::export::session_to_html(&self.session);
+        let description = if self.session.name.is_empty() {
+            "zerostack session".to_string()
+        } else {
+            format!("zerostack session: {}", self.session.name)
+        };
+        match crate::extras::export::share_gist(&filename, &html, &description).await {
+            Ok(url) => Ok(RunOutput::command(format!("shared as secret gist: {url}"))),
+            Err(error) => anyhow::bail!("share failed: {error}"),
+        }
+    }
+
     /// Run one user input string: plain message, `/` slash command, `.`
     /// dot-prompt command, or `!` shell command.
     pub async fn run_string(&mut self, input: &str) -> anyhow::Result<RunOutput> {
@@ -1063,35 +1444,13 @@ impl Engine {
             sink.write_ok(format!("current provider: {}", self.session.provider));
             return Ok(SlashFlow::Done);
         }
-        let new_provider = parts[1].trim();
-        if crate::provider::parse_provider(new_provider).is_none()
-            && !self.cfg.custom_providers_map().contains_key(new_provider)
-        {
-            sink.write_error(format!("unknown provider: '{new_provider}'"));
-            return Ok(SlashFlow::Done);
+        match self.set_provider(parts[1].trim()).await {
+            Ok(()) => sink.write_ok(format!(
+                "switched to provider: {} (model: {})",
+                self.session.provider, self.session.model
+            )),
+            Err(error) => sink.write_error(error.to_string()),
         }
-        if let Some((model, costs)) =
-            crate::provider::default_model_for_provider(new_provider, &self.cfg)
-        {
-            self.session.model = CompactString::new(&model);
-            if let Some((inc, outc)) = costs {
-                self.session.input_token_cost = inc;
-                self.session.output_token_cost = outc;
-            }
-        }
-        self.rebuild_agent_with_client(new_provider).await?;
-        self.session.provider = CompactString::new(new_provider);
-        let qm = config::quick_models_map(&self.cfg);
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                new_provider,
-                &self.session.model,
-                &qm,
-            ));
-        sink.write_ok(format!(
-            "switched to provider: {} (model: {})",
-            new_provider, self.session.model
-        ));
         Ok(SlashFlow::Done)
     }
 
@@ -1128,32 +1487,10 @@ impl Engine {
         let qm = config::quick_models_map(&self.cfg);
         // `/models <name>`: quick-model switch, else raw model id.
         if parts.len() >= 2 && parts.get(1).map(|s| s.trim()) != Some("refresh") {
-            let arg = parts[1].trim();
-            if let Some(q) = qm.get(arg) {
-                let provider = q.provider.to_string();
-                let model = q.model.to_string();
-                let in_cost = q.input_token_cost;
-                let out_cost = q.output_token_cost;
-                self.rebuild_agent_with_client(&provider).await?;
-                self.session.provider = CompactString::from(&provider);
-                self.rebuild_agent(&model).await;
-                self.session.model = CompactString::from(&model);
-                let qm2 = config::quick_models_map(&self.cfg);
-                self.session
-                    .update_context_window(self.cfg.resolve_context_window(
-                        &self.session.provider,
-                        &self.session.model,
-                        &qm2,
-                    ));
-                self.session.input_token_cost = in_cost;
-                self.session.output_token_cost = out_cost;
-                sink.write_ok(format!("switched to model: {model}"));
-                return Ok(SlashFlow::Done);
+            match self.set_model_selection(parts[1].trim()).await {
+                Ok(()) => sink.write_ok(format!("switched to model: {}", self.session.model)),
+                Err(error) => sink.write_error(error.to_string()),
             }
-            let arg_owned = arg.to_string();
-            self.rebuild_agent(&arg_owned).await;
-            self.session.model = CompactString::new(arg);
-            sink.write_ok(format!("switched to model: {arg}"));
             return Ok(SlashFlow::Done);
         }
         // List mode.
@@ -1383,10 +1720,7 @@ impl Engine {
     ) -> anyhow::Result<SlashFlow> {
         match parts[0] {
             "/reasoning" | "/thinking" => {
-                self.reasoning_enabled = !self.reasoning_enabled;
-                self.show_reasoning = self.reasoning_enabled;
-                let model_id = self.session.model.to_string();
-                self.rebuild_agent(&model_id).await;
+                self.toggle_reasoning().await;
                 sink.write_ok(format!(
                     "reasoning: {}",
                     if self.reasoning_enabled { "on" } else { "off" }
@@ -1403,21 +1737,16 @@ impl Engine {
                     sink.write_ok(format!("current security mode: {current}"));
                     return Ok(SlashFlow::Done);
                 }
-                let mode = match parts[1] {
-                    "standard" => Some(SecurityMode::Standard),
-                    "restrictive" => Some(SecurityMode::Restrictive),
-                    "readonly" => Some(SecurityMode::ReadOnly),
-                    "guarded" => Some(SecurityMode::Guarded),
-                    "yolo" => Some(SecurityMode::Yolo),
-                    _ => None,
-                };
-                match (mode, &self.permission) {
-                    (Some(m), Some(p)) => {
-                        p.lock().unwrap_or_else(|e| e.into_inner()).set_mode(m);
-                        sink.write_ok(format!("security mode: {m}"));
+                match self.set_permission_mode(parts[1]) {
+                    Ok(()) => {
+                        let current = self
+                            .permission
+                            .as_ref()
+                            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).mode())
+                            .unwrap_or(SecurityMode::Standard);
+                        sink.write_ok(format!("security mode: {current}"));
                     }
-                    (None, _) => sink.write_error(format!("unknown mode: {}", parts[1])),
-                    (_, None) => sink.write_error("permission system not active"),
+                    Err(error) => sink.write_error(error.to_string()),
                 }
                 Ok(SlashFlow::Done)
             }
@@ -1433,20 +1762,12 @@ impl Engine {
                     ));
                     return Ok(SlashFlow::Done);
                 }
-                match parts[1] {
-                    "similarity" => {
-                        crate::agent::tools::set_edit_system(
-                            crate::config::types::EditSystem::Similarity,
-                        );
-                        sink.write_ok("edit system: similarity (SEARCH/REPLACE)");
-                    }
-                    "hashedit" => {
-                        crate::agent::tools::set_edit_system(
-                            crate::config::types::EditSystem::Hashedit,
-                        );
-                        sink.write_ok("edit system: hashedit (tag-based)");
-                    }
-                    _ => sink.write_error(format!("unknown: '{}' (similarity|hashedit)", parts[1])),
+                match self.set_edit_system(parts[1]) {
+                    Ok(()) => match parts[1] {
+                        "similarity" => sink.write_ok("edit system: similarity (SEARCH/REPLACE)"),
+                        _ => sink.write_ok("edit system: hashedit (tag-based)"),
+                    },
+                    Err(error) => sink.write_error(error.to_string()),
                 }
                 Ok(SlashFlow::Done)
             }
@@ -1517,20 +1838,12 @@ impl Engine {
             "/sessions" => self.cmd_sessions(parts, sink),
             "/rename" => self.cmd_rename(parts, sink),
             "/clear" | "/new" => {
-                #[cfg(feature = "hooks")]
-                crate::extras::hooks::dispatch_session_end("clear").await;
-                self.session.messages.clear();
-                self.session.total_estimated_tokens = 0;
-                self.session.reset_calibration();
-                self.session.compactions.clear();
-                self.context.chain_declined.clear();
-                #[cfg(feature = "hooks")]
-                crate::extras::hooks::dispatch_session_start("clear").await;
+                self.clear_messages().await;
                 sink.write_ok("session cleared");
                 Ok(SlashFlow::Done)
             }
             "/undo" => {
-                let removed = crate::ui::slash::undo_last(&mut self.session);
+                let removed = self.undo_messages();
                 if removed == 0 {
                     sink.write_ok("nothing to undo");
                 } else {
@@ -1539,7 +1852,7 @@ impl Engine {
                 Ok(SlashFlow::Done)
             }
             "/redo" => {
-                if !self.session.redo() {
+                if !self.redo_messages() {
                     sink.write_ok("nothing to redo");
                 } else {
                     sink.write_ok("restored the last rewind");
@@ -1552,28 +1865,19 @@ impl Engine {
                 );
                 Ok(SlashFlow::Done)
             }
-            "/retry" => {
-                match self
-                    .session
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == MessageRole::User)
-                    .cloned()
-                {
-                    Some(msg) => {
-                        sink.write_ok("retrying last message...");
-                        let out = self.run_agent_text(&msg.content).await;
-                        sink.write_ok(&out.text);
-                        self.save_session_best_effort();
-                        Ok(SlashFlow::Done)
-                    }
-                    None => {
-                        sink.write_ok("no previous message to retry");
-                        Ok(SlashFlow::Done)
-                    }
+            "/retry" => match self.last_user_message() {
+                Some(msg) => {
+                    sink.write_ok("retrying last message...");
+                    let out = self.run_agent_text(&msg.content).await;
+                    sink.write_ok(&out.text);
+                    self.save_session_best_effort();
+                    Ok(SlashFlow::Done)
                 }
-            }
+                None => {
+                    sink.write_ok("no previous message to retry");
+                    Ok(SlashFlow::Done)
+                }
+            },
             "/quit" | "/exit" => {
                 anyhow::bail!("quit requested (headless engines do not exit the process)");
             }
@@ -1596,23 +1900,16 @@ impl Engine {
             #[cfg(feature = "export")]
             "/import" => self.cmd_import(parts, sink),
             #[cfg(feature = "export")]
-            "/share" => {
-                let filename = format!(
-                    "zerostack-session-{}.html",
-                    &self.session.id[..8.min(self.session.id.len())]
-                );
-                let html = crate::extras::export::session_to_html(&self.session);
-                let description = if self.session.name.is_empty() {
-                    "zerostack session".to_string()
-                } else {
-                    format!("zerostack session: {}", self.session.name)
-                };
-                match crate::extras::export::share_gist(&filename, &html, &description).await {
-                    Ok(url) => sink.write_ok(format!("shared as secret gist: {url}")),
-                    Err(e) => sink.write_error(format!("share failed: {e}")),
+            "/share" => match self.share_conversation().await {
+                Ok(output) => {
+                    sink.write_ok(&output.text);
+                    Ok(SlashFlow::Done)
                 }
-                Ok(SlashFlow::Done)
-            }
+                Err(error) => {
+                    sink.write_error(error.to_string());
+                    Ok(SlashFlow::Done)
+                }
+            },
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -1715,87 +2012,32 @@ impl Engine {
 
     #[cfg(feature = "export")]
     fn cmd_export(&mut self, parts: &[&str], sink: &mut StringSink) -> anyhow::Result<SlashFlow> {
-        let default_name = format!(
-            "zerostack-session-{}.html",
-            &self.session.id[..8.min(self.session.id.len())]
-        );
-        let path = parts
+        let destination = parts
             .get(1)
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .unwrap_or(&default_name);
-        let (content, kind) = if path.ends_with(".jsonl") {
-            (
-                crate::extras::export::session_to_jsonl(&self.session),
-                "JSONL",
-            )
-        } else {
-            (
-                crate::extras::export::session_to_html(&self.session),
-                "HTML",
-            )
-        };
-        match std::fs::write(path, content) {
-            Ok(()) => sink.write_ok(format!("exported {kind} to {path}")),
-            Err(e) => sink.write_error(format!("export failed: {e}")),
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(std::path::PathBuf::from);
+        match self.export_conversation(destination) {
+            Ok(message) => sink.write_ok(message),
+            Err(error) => sink.write_error(error.to_string()),
         }
         Ok(SlashFlow::Done)
     }
 
     #[cfg(feature = "export")]
     fn cmd_import(&mut self, parts: &[&str], sink: &mut StringSink) -> anyhow::Result<SlashFlow> {
-        let Some(path) = parts.get(1).map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+        let Some(path) = parts
+            .get(1)
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+        else {
             sink.write_error("usage: /import <file.jsonl|session.json>");
             return Ok(SlashFlow::Done);
         };
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                sink.write_error(format!("failed to read {path}: {e}"));
-                return Ok(SlashFlow::Done);
-            }
-        };
-        let mut session = if content.trim_start().starts_with('{') {
-            match serde_json::from_str::<Session>(&content) {
-                Ok(s) => s,
-                Err(e) => {
-                    sink.write_error(format!("invalid session file: {e}"));
-                    return Ok(SlashFlow::Done);
-                }
-            }
-        } else {
-            let messages = match crate::extras::export::parse_jsonl_import(&content) {
-                Ok(m) => m,
-                Err(e) => {
-                    sink.write_error(format!("invalid JSONL session: {e}"));
-                    return Ok(SlashFlow::Done);
-                }
-            };
-            let name = std::path::Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "imported".to_string());
-            let mut session = Session::new(
-                self.session.provider.as_str(),
-                self.session.model.as_str(),
-                self.session.context_window,
-                &name,
-            );
-            for msg in messages {
-                session.add_message(msg.role, &msg.content);
-            }
-            session
-        };
-        if session.name.is_empty() {
-            session.name = CompactString::new("imported");
+        match self.import_conversation(std::path::PathBuf::from(path)) {
+            Ok(message) => sink.write_ok(message),
+            Err(error) => sink.write_error(error.to_string()),
         }
-        let msg_count = session.messages.len();
-        if let Err(e) = crate::session::storage::save_session(&session) {
-            sink.write_error(format!("failed to save session: {e}"));
-            return Ok(SlashFlow::Done);
-        }
-        self.session = session;
-        sink.write_ok(format!("imported session from {path} ({msg_count} msgs)"));
         Ok(SlashFlow::Done)
     }
 
@@ -1836,26 +2078,20 @@ impl Engine {
         match parts[0] {
             "/add" => self.cmd_add(parts, sink).await,
             "/drop" => self.cmd_drop(parts, sink).await,
-            "/drop-all" => {
-                let file_count = self.context.extra_files.len();
-                #[cfg(feature = "multimodal")]
-                let media_count = self.session.pending_media.len();
-                #[cfg(not(feature = "multimodal"))]
-                let media_count = 0;
-                if file_count == 0 && media_count == 0 {
+            "/drop-all" => match self.clear_context_files().await {
+                Ok(Some(message)) => {
+                    sink.write_ok(message);
+                    Ok(SlashFlow::Done)
+                }
+                Ok(None) => {
                     sink.write_ok("no files or media to drop");
-                    return Ok(SlashFlow::Done);
+                    Ok(SlashFlow::Done)
                 }
-                if file_count > 0 {
-                    self.context.extra_files.clear();
-                    let model_id = self.session.model.to_string();
-                    self.rebuild_agent(&model_id).await;
+                Err(error) => {
+                    sink.write_error(error.to_string());
+                    Ok(SlashFlow::Done)
                 }
-                #[cfg(feature = "multimodal")]
-                self.session.pending_media.clear();
-                sink.write_ok(format!("dropped {file_count} file(s)"));
-                Ok(SlashFlow::Done)
-            }
+            },
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -1877,37 +2113,14 @@ impl Engine {
             }
             return Ok(SlashFlow::Done);
         }
-        let path = Self::resolve_path(parts[1]);
-        if !path.exists() {
-            sink.write_error(format!("file not found: {}", path.display()));
-            return Ok(SlashFlow::Done);
+        match self
+            .add_context_file(std::path::PathBuf::from(parts[1]))
+            .await
+        {
+            Ok(Some(message)) => sink.write_ok(message),
+            Ok(None) => {}
+            Err(error) => sink.write_error(error.to_string()),
         }
-        if !path.is_file() {
-            sink.write_error(format!("not a file: {}", path.display()));
-            return Ok(SlashFlow::Done);
-        }
-        #[cfg(feature = "multimodal")]
-        if crate::extras::multimodal::detect_media(&path).is_some() {
-            match crate::extras::multimodal::load_attachment(&path) {
-                Ok(attachment) => {
-                    let size = attachment.size();
-                    self.session.pending_media.push(attachment);
-                    sink.write_ok(format!("attached: {} ({size}B)", path.display()));
-                }
-                Err(e) => sink.write_error(format!("failed to load media: {e}")),
-            }
-            return Ok(SlashFlow::Done);
-        }
-        let canonical = path.canonicalize().unwrap_or(path);
-        if self.context.extra_files.contains(&canonical) {
-            sink.write_ok(format!("already added: {}", canonical.display()));
-            return Ok(SlashFlow::Done);
-        }
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        self.context.extra_files.push(canonical.clone());
-        let model_id = self.session.model.to_string();
-        self.rebuild_agent(&model_id).await;
-        sink.write_ok(format!("added: {} ({size}B)", canonical.display()));
         Ok(SlashFlow::Done)
     }
 
@@ -1920,24 +2133,14 @@ impl Engine {
             sink.write_error("usage: /drop <path-or-index>");
             return Ok(SlashFlow::Done);
         }
-        let path = Self::resolve_path(parts[1]);
-        let canonical = path.canonicalize().unwrap_or(path);
-        if let Some(i) = self
-            .context
-            .extra_files
-            .iter()
-            .position(|f| f == &canonical)
+        match self
+            .drop_context_file(std::path::PathBuf::from(parts[1]))
+            .await
         {
-            self.context.extra_files.remove(i);
-            let model_id = self.session.model.to_string();
-            self.rebuild_agent(&model_id).await;
-            sink.write_ok(format!("dropped: {}", canonical.display()));
-            return Ok(SlashFlow::Done);
+            Ok(Some(message)) => sink.write_ok(message),
+            Ok(None) => {}
+            Err(error) => sink.write_error(error.to_string()),
         }
-        sink.write_error(format!(
-            "not in context: {} (use /add to see)",
-            canonical.display()
-        ));
         Ok(SlashFlow::Done)
     }
 

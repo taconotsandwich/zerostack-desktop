@@ -2,6 +2,7 @@ use iced::widget::{column, row, text};
 use iced::{Element, Fill};
 
 use super::app::{App, Message, Panel};
+use super::worker::Operation;
 use super::{commands, components, layout, style};
 
 impl App {
@@ -23,8 +24,9 @@ impl App {
                                 text(path.clone()).size(style::LABEL).width(Fill),
                                 components::action(
                                     "Remove",
-                                    (!self.busy && !path.contains(char::is_whitespace))
-                                        .then_some(Message::Run(format!("/drop {path}")))
+                                    (!self.busy).then_some(Message::Operate(
+                                        Operation::DropContextFile { path: file.clone() },
+                                    )),
                                 )
                             ]
                             .spacing(layout::MD)
@@ -81,7 +83,9 @@ impl App {
                                     .map(String::from)
                                     .collect(),
                                 Some(mode.clone()),
-                                |value| Message::Run(format!("/mode {value}")),
+                                |value| {
+                                    Message::Operate(Operation::SetPermissionMode { mode: value })
+                                },
                                 Fill,
                             ));
                     }
@@ -94,7 +98,7 @@ impl App {
                         .push(components::choice(
                             vec!["similarity".into(), "hashedit".into()],
                             Some(snapshot.edit_system.clone()),
-                            |value| Message::Run(format!("/editsys {value}")),
+                            |value| Message::Operate(Operation::SetEditSystem { system: value }),
                             Fill,
                         ));
                 }
