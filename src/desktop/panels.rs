@@ -1,4 +1,4 @@
-use iced::widget::{column, row, text};
+use iced::widget::{column, markdown, row, text};
 use iced::{Element, Fill};
 
 use super::app::{App, Message, Panel};
@@ -12,6 +12,12 @@ impl App {
             Panel::Settings => "Settings",
             Panel::Form(command) => command.label,
             Panel::Delete { .. } => "Delete conversation?",
+            Panel::Rewind => "Rewind to…",
+            Panel::Document => self
+                .document
+                .as_ref()
+                .map(|(name, _)| name.as_str())
+                .unwrap_or("Documentation"),
         };
         let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
@@ -156,6 +162,30 @@ impl App {
                     (!self.busy).then_some(Message::Confirm),
                 ));
             }
+            Panel::Rewind => {
+                if let Some(snapshot) = &self.snapshot {
+                    if snapshot.rewind_points.is_empty() {
+                        content = content.push(text("Nothing to rewind to").size(style::LABEL));
+                    }
+                    for (index, preview) in &snapshot.rewind_points {
+                        content = content.push(components::action(
+                            preview.clone(),
+                            (!self.busy).then_some(Message::Operate(Operation::Rewind(*index))),
+                        ));
+                    }
+                }
+            }
+            Panel::Document => {
+                if let Some((_, document)) = &self.document {
+                    content = content.push(
+                        markdown::view(
+                            document.items(),
+                            markdown::Settings::with_text_size(style::BODY, style::theme()),
+                        )
+                        .map(Message::Link),
+                    );
+                }
+            }
             Panel::Delete { title, .. } => {
                 content = content.push(
                     text(format!("Delete “{title}” from saved conversations?")).size(style::LABEL),
@@ -170,7 +200,7 @@ impl App {
             content = content.push(
                 text(&self.error)
                     .size(style::LABEL)
-                    .color(style::theme().palette().danger),
+                    .color(self.theme().palette().danger),
             );
         }
         components::panel_body(content, layout::Layout::new(self.size, self.sidebar))

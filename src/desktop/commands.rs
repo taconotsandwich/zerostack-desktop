@@ -60,6 +60,7 @@ pub(super) fn available() -> Vec<Command> {
         ),
         command("Undo latest messages", "/undo", &[], false, None),
         command("Restore messages", "/redo", &[], false, None),
+        command("Rewind to earlier point", "/rewind", &[], false, None),
         command("Regenerate response", "/retry", &[], false, None),
         command("Rename conversation", "/rename", &["Name"], false, None),
         command("Recent input", "/history", &[], false, None),
@@ -159,6 +160,36 @@ pub(super) fn available() -> Vec<Command> {
             false,
             Some("Create a worktree and change this process’s working directory?"),
         ),
+        #[cfg(feature = "git-worktree")]
+        command(
+            "Merge worktree",
+            "/wt-merge",
+            &["Target branch"],
+            true,
+            None,
+        ),
+        #[cfg(feature = "git-worktree")]
+        command("Leave worktree", "/wt-exit", &[], false, None),
+        command("Documentation", "/docs", &["File name"], true, None),
+        command("Getting started guide", "/tutor", &[], false, None),
+        #[cfg(feature = "loop")]
+        command("Run an iteration loop", "/loop", &["Prompt"], false, None),
+        #[cfg(feature = "mcp")]
+        command(
+            "Log in to MCP server",
+            "/mcp login",
+            &["Server"],
+            false,
+            None,
+        ),
+        #[cfg(feature = "mcp")]
+        command(
+            "Log out of MCP server",
+            "/mcp logout",
+            &["Server"],
+            false,
+            None,
+        ),
         #[cfg(feature = "export")]
         command(
             "Export conversation",
@@ -211,6 +242,10 @@ pub(super) fn available() -> Vec<Command> {
             false,
             Some("Clear the selected memory store?"),
         ),
+        #[cfg(feature = "memory")]
+        command("Open memory file", "/memory editor", &[], false, None),
+        #[cfg(feature = "mcp")]
+        command("MCP servers", "/mcp", &[], false, None),
         #[cfg(feature = "hooks")]
         command("Inspect hooks", "/hooks", &[], false, None),
         #[cfg(feature = "advisor")]
@@ -307,5 +342,29 @@ mod tests {
                 .input(&["only-name".into()])
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod palette_tests {
+    use super::find;
+
+    #[test]
+    fn palette_exposes_desktop_owned_commands() {
+        for syntax in ["/rewind", "/docs", "/tutor"] {
+            assert!(find(syntax).is_some(), "{syntax}");
+        }
+        #[cfg(feature = "git-worktree")]
+        for syntax in ["/wt-merge", "/wt-exit"] {
+            assert!(find(syntax).is_some(), "{syntax}");
+        }
+        #[cfg(feature = "mcp")]
+        for syntax in ["/mcp", "/mcp login", "/mcp logout"] {
+            assert!(find(syntax).is_some(), "{syntax}");
+        }
+        #[cfg(feature = "loop")]
+        assert!(find("/loop").is_some());
+        #[cfg(feature = "memory")]
+        assert!(find("/memory editor").is_some());
     }
 }

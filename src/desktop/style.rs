@@ -36,6 +36,114 @@ pub(super) fn theme() -> Theme {
     )
 }
 
+/// Build the window theme from the engine's active colors so `/theme` and
+/// `[colors]` drive the desktop exactly like the TUI: backgrounds come from
+/// the theme file and the semantic roles fill the iced palette slots
+/// (`agent` → text, `tool` → primary, `permission` → warning,
+/// `error` → danger, `welcome` → success).
+pub(super) fn theme_for(colors: Option<&crate::config::ColorsConfig>) -> Theme {
+    let Some(colors) = colors else {
+        return theme();
+    };
+    let mut palette = theme().palette();
+    if let Some(background) = colors
+        .chat_background
+        .as_deref()
+        .and_then(crate::ui::utils::parse_color)
+    {
+        palette.background = from_ansi(background);
+    }
+    if let Some(roles) = &colors.roles {
+        let role = |name: &str| {
+            roles
+                .get(name)
+                .and_then(|value| crate::ui::utils::parse_color(value))
+                .map(from_ansi)
+        };
+        if let Some(agent) = role("agent") {
+            palette.text = agent;
+        }
+        if let Some(tool) = role("tool") {
+            palette.primary = tool;
+        }
+        if let Some(permission) = role("permission") {
+            palette.warning = permission;
+        }
+        if let Some(error) = role("error") {
+            palette.danger = error;
+        }
+        if let Some(welcome) = role("welcome") {
+            palette.success = welcome;
+        }
+    }
+    Theme::custom("zerostack", palette)
+}
+
+/// The color the TUI would render `role` in, translated for the desktop.
+pub(super) fn role_color(role: crate::ui::feed::BlockStyle) -> Color {
+    from_ansi(crate::ui::roles::color(role))
+}
+
+/// Translate a terminal color (the language themes and roles are written in)
+/// into an iced color.
+fn from_ansi(color: crossterm::style::Color) -> Color {
+    use crossterm::style::Color as Ansi;
+
+    const BASE16: [Color; 16] = [
+        Color::from_rgb8(0, 0, 0),
+        Color::from_rgb8(170, 0, 0),
+        Color::from_rgb8(0, 170, 0),
+        Color::from_rgb8(170, 85, 0),
+        Color::from_rgb8(0, 0, 170),
+        Color::from_rgb8(170, 0, 170),
+        Color::from_rgb8(0, 170, 170),
+        Color::from_rgb8(170, 170, 170),
+        Color::from_rgb8(85, 85, 85),
+        Color::from_rgb8(255, 85, 85),
+        Color::from_rgb8(85, 255, 85),
+        Color::from_rgb8(255, 255, 85),
+        Color::from_rgb8(85, 85, 255),
+        Color::from_rgb8(255, 85, 255),
+        Color::from_rgb8(85, 255, 255),
+        Color::from_rgb8(255, 255, 255),
+    ];
+
+    match color {
+        Ansi::Black => BASE16[0],
+        Ansi::DarkRed => BASE16[1],
+        Ansi::DarkGreen => BASE16[2],
+        Ansi::DarkYellow => BASE16[3],
+        Ansi::DarkBlue => BASE16[4],
+        Ansi::DarkMagenta => BASE16[5],
+        Ansi::DarkCyan => BASE16[6],
+        Ansi::Grey => BASE16[7],
+        Ansi::DarkGrey => BASE16[8],
+        Ansi::Red => BASE16[9],
+        Ansi::Green => BASE16[10],
+        Ansi::Yellow => BASE16[11],
+        Ansi::Blue => BASE16[12],
+        Ansi::Magenta => BASE16[13],
+        Ansi::Cyan => BASE16[14],
+        Ansi::White => BASE16[15],
+        Ansi::Rgb { r, g, b } => Color::from_rgb8(r, g, b),
+        Ansi::AnsiValue(value) if value < 16 => BASE16[value as usize],
+        Ansi::AnsiValue(value) if value < 232 => {
+            let index = value - 16;
+            const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+            Color::from_rgb8(
+                STEPS[(index / 36) as usize],
+                STEPS[((index % 36) / 6) as usize],
+                STEPS[(index % 6) as usize],
+            )
+        }
+        Ansi::AnsiValue(value) => {
+            let level = 8 + (value - 232) * 10;
+            Color::from_rgb8(level, level, level)
+        }
+        Ansi::Reset => INK,
+    }
+}
+
 pub(super) fn surface(color: Color, radius: f32) -> container::Style {
     container::Style {
         background: Some(color.into()),
@@ -177,4 +285,55 @@ pub(super) fn usage_ring<'a>(fraction: f64) -> svg::Svg<'a, Theme> {
     .width(ICON_SIZE)
     .height(ICON_SIZE)
     .style(|_, _| svg::Style { color: Some(INK) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_colours_translate_to_iced() {
+        assert_eq!(
+            from_ansi(crossterm::style::Color::Red),
+            Color::from_rgb8(255, 85, 85)
+        );
+        assert_eq!(
+            from_ansi(crossterm::style::Color::Rgb { r: 1, g: 2, b: 3 }),
+            Color::from_rgb8(1, 2, 3)
+        );
+        // 256-colour cube and greyscale ramp.
+        assert_eq!(
+            from_ansi(crossterm::style::Color::AnsiValue(16)),
+            Color::from_rgb8(0, 0, 0)
+        );
+        assert_eq!(
+            from_ansi(crossterm::style::Color::AnsiValue(196)),
+            Color::from_rgb8(255, 0, 0)
+        );
+        assert_eq!(
+            from_ansi(crossterm::style::Color::AnsiValue(232)),
+            Color::from_rgb8(8, 8, 8)
+        );
+    }
+
+    #[test]
+    fn theme_for_maps_backgrounds_and_semantic_roles() {
+        let colors = crate::config::ColorsConfig {
+            chat_background: Some("#101010".into()),
+            roles: Some(std::collections::HashMap::from([
+                ("agent".to_string(), "white".to_string()),
+                ("error".to_string(), "#ff0000".to_string()),
+                ("tool".to_string(), "cyan".to_string()),
+            ])),
+            ..Default::default()
+        };
+        let palette = theme_for(Some(&colors)).palette();
+        assert_eq!(palette.background, Color::from_rgb8(16, 16, 16));
+        assert_eq!(palette.text, Color::from_rgb8(255, 255, 255));
+        assert_eq!(palette.danger, Color::from_rgb8(255, 0, 0));
+        assert_eq!(palette.primary, Color::from_rgb8(85, 255, 255));
+
+        // Without colors the built-in desktop palette is kept.
+        assert_eq!(theme_for(None).palette(), theme().palette());
+    }
 }
