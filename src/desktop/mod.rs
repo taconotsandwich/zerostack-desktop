@@ -15,7 +15,7 @@ use crate::cli::Cli;
 pub(crate) fn run(cli: Cli) -> anyhow::Result<()> {
     iced::application(move || App::new(cli.clone()), App::update, App::view)
         .title("zerostack")
-        .theme(style::theme())
+        .theme(App::theme)
         .subscription(App::subscription)
         .window(iced::window::Settings {
             size: (1040.0, 760.0).into(),

@@ -3,11 +3,15 @@ use std::sync::Arc;
 
 use iced::widget::{markdown, operation, text_editor};
 use iced::{Point, Size, Subscription, Task, keyboard, window};
+use tokio::sync::mpsc;
 
 use super::commands::{self, Command};
-use super::worker::{self, Operation, Snapshot, Worker};
+use super::style;
+use super::worker::{self, Operation, Snapshot, UiEvent, UiSender, Worker};
 use crate::cli::Cli;
 use crate::engine::RunKind;
+use crate::event::AgentEvent;
+use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
     pub worker: Option<Worker>,
@@ -38,6 +42,32 @@ pub(super) struct App {
     pub after_load: Option<Command>,
     pub model_input: String,
     pub closing: Option<window::Id>,
+    /// Streamed state of the in-flight turn (cleared when the snapshot lands).
+    pub live: LiveTurn,
+    /// The permission ask currently blocking a tool call, if any.
+    pub permission: Option<worker::PermissionRequest>,
+    /// UI sender for the running operation; dropping it ends the stream task.
+    pub events: Option<UiSender>,
+    /// Markdown of the document shown by [`Panel::Document`].
+    pub document: Option<(String, markdown::Content)>,
+    notices_shown: bool,
+}
+
+/// Agent activity streamed while a turn runs, rendered until the authoritative
+/// snapshot replaces it.
+#[derive(Default)]
+pub(super) struct LiveTurn {
+    pub response: String,
+    pub reasoning: String,
+    pub tools: Vec<ToolActivity>,
+    pub notice: String,
+}
+
+/// One tool call in the live view.
+pub(super) struct ToolActivity {
+    pub call_id: String,
+    pub summary: String,
+    pub done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +76,8 @@ pub(super) enum Panel {
     Settings,
     Form(Command),
     Delete { id: String, title: String },
+    Rewind,
+    Document,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +119,10 @@ pub(super) enum Message {
     Quit,
     RetryStartup,
     Project(String),
+    Engine(UiEvent),
+    AllowOnce,
+    AllowAlways,
+    Deny,
 }
 
 impl App {
@@ -138,6 +174,11 @@ impl App {
                 after_load: None,
                 model_input: String::new(),
                 closing: None,
+                live: LiveTurn::default(),
+                permission: None,
+                events: None,
+                document: None,
+                notices_shown: false,
             },
             task,
         )
@@ -155,8 +196,97 @@ impl App {
         self.command_output.clear();
         self.status = "Working…".into();
         self.menu = None;
+        self.live = LiveTurn::default();
         self.pending = Some(operation.clone());
-        Task::perform(worker.request(operation), Message::Ready)
+        // The engine streams agent events and permission asks for this
+        // operation through `events`; the stream task ends when both this
+        // sender and the worker's copy are dropped.
+        let (events, receiver) = mpsc::unbounded_channel();
+        self.events = Some(events.clone());
+        Task::batch([
+            Task::stream(futures::stream::unfold(
+                receiver,
+                |mut receiver| async move {
+                    receiver
+                        .recv()
+                        .await
+                        .map(|event| (Message::Engine(event), receiver))
+                },
+            )),
+            Task::perform(worker.request(operation, Some(events)), Message::Ready),
+        ])
+    }
+
+    fn answer_permission(&mut self, decision: UserDecision) -> Task<Message> {
+        if let Some(request) = self.permission.take() {
+            let reply = request
+                .reply
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(reply) = reply {
+                let _ = reply.send(decision);
+            }
+        }
+        Task::none()
+    }
+
+    fn handle_agent_event(&mut self, event: AgentEvent) {
+        match event {
+            AgentEvent::Token(text) => {
+                self.live
+                    .response
+                    .push_str(crate::ui::events::sanitize_output(&text).as_str());
+            }
+            AgentEvent::Reasoning(text) => {
+                let show = self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.show_reasoning);
+                if show {
+                    self.live.reasoning.push_str(&text);
+                }
+            }
+            AgentEvent::ToolCall {
+                call_id,
+                name,
+                args,
+                ..
+            } => {
+                self.live.response.clear();
+                self.live.tools.push(ToolActivity {
+                    call_id: call_id.to_string(),
+                    summary: crate::ui::utils::format_tool_call_summary(&name, &args),
+                    done: false,
+                });
+            }
+            #[cfg(any(feature = "subagents", feature = "acp"))]
+            AgentEvent::SubagentToolCall { name, args } => {
+                self.live.tools.push(ToolActivity {
+                    call_id: String::new(),
+                    summary: crate::ui::utils::format_tool_call_summary(&name, &args),
+                    done: false,
+                });
+            }
+            AgentEvent::ToolResult { call_id, .. } => {
+                if let Some(tool) = self
+                    .live
+                    .tools
+                    .iter_mut()
+                    .rev()
+                    .find(|tool| tool.call_id == call_id.as_str())
+                {
+                    tool.done = true;
+                }
+            }
+            AgentEvent::Retrying { attempt, max } => {
+                self.live.notice = format!("retrying… ({attempt}/{max})");
+            }
+            AgentEvent::Error(error) => {
+                self.live.notice = format!("error: {error}");
+            }
+            AgentEvent::CompletionCall { .. } | AgentEvent::Done { .. } => {}
+        }
     }
 
     pub fn choose(&mut self, command: Command) -> Task<Message> {
@@ -165,6 +295,11 @@ impl App {
         }
         self.menu = None;
         self.slash_dismissed = true;
+        if command.syntax == "/rewind" {
+            self.panel = Some(Panel::Rewind);
+            self.error.clear();
+            return Task::none();
+        }
         if command.fields.is_empty() && command.confirmation.is_none() {
             return self.dispatch(super::operations::fieldless_operation(&command));
         }
@@ -191,8 +326,12 @@ impl App {
             Message::Ready(result) => {
                 self.busy = false;
                 self.status.clear();
+                self.events = None;
+                self.live = LiveTurn::default();
+                self.permission = None;
                 let pending = self.pending.take();
                 let mut scroll = false;
+                let mut open_path: Option<String> = None;
                 match result {
                     Err(error) => {
                         self.error = error;
@@ -256,25 +395,45 @@ impl App {
                                 {
                                     self.content = text_editor::Content::new();
                                 }
-                                if !new_messages && self.error.is_empty() {
-                                    match &pending {
-                                        Some(Operation::Command(input))
-                                            if requests_output(input) =>
-                                        {
-                                            self.command_output = command_text(input, &output.text);
-                                            scroll |= !self.command_output.is_empty();
-                                        }
-                                        Some(Operation::AskSeparateQuestion { .. }) => {
-                                            self.command_output = output.text.trim().to_string();
-                                            scroll |= !self.command_output.is_empty();
-                                        }
-                                        #[cfg(feature = "export")]
-                                        Some(Operation::ShareConversation) => {
-                                            self.command_output = output.text.trim().to_string();
-                                            scroll |= !self.command_output.is_empty();
-                                        }
-                                        _ => {}
+                                // Operation transcripts the conversation does
+                                // not already show (structured actions such as
+                                // merge/exit/loop report their outcome here).
+                                let transcript = match &pending {
+                                    Some(Operation::Command(input))
+                                        if !new_messages
+                                            && self.error.is_empty()
+                                            && requests_output(input) =>
+                                    {
+                                        Some(command_text(input, &output.text))
                                     }
+                                    Some(Operation::AskSeparateQuestion { .. }) => {
+                                        Some(output.text.trim().to_string())
+                                    }
+                                    #[cfg(feature = "git-worktree")]
+                                    Some(
+                                        Operation::MergeWorktree { .. } | Operation::ExitWorktree,
+                                    ) => Some(output.text.trim().to_string()),
+                                    #[cfg(feature = "memory")]
+                                    Some(Operation::MemoryEditor) => {
+                                        Some(output.text.trim().to_string())
+                                    }
+                                    #[cfg(feature = "loop")]
+                                    Some(Operation::StartLoop { .. }) => {
+                                        Some(output.text.trim().to_string())
+                                    }
+                                    #[cfg(feature = "mcp")]
+                                    Some(
+                                        Operation::McpLogin { .. } | Operation::McpLogout { .. },
+                                    ) => Some(output.text.trim().to_string()),
+                                    #[cfg(feature = "export")]
+                                    Some(Operation::ShareConversation) => {
+                                        Some(output.text.trim().to_string())
+                                    }
+                                    _ => None,
+                                };
+                                if let Some(transcript) = transcript {
+                                    self.command_output = transcript;
+                                    scroll |= !self.command_output.is_empty();
                                 }
                             }
                         }
@@ -285,7 +444,30 @@ impl App {
                             .map(|message| markdown::Content::parse(message.content.as_str()))
                             .collect();
                         self.model_input = snapshot.session.model.to_string();
+                        if !self.notices_shown && !snapshot.notices.is_empty() {
+                            self.notices_shown = true;
+                            self.command_output = snapshot.notices.join("\n");
+                            scroll = true;
+                        }
+                        if matches!(pending, Some(Operation::OpenDocument { .. }))
+                            && let Some((name, content)) = &snapshot.document
+                        {
+                            self.document = Some((name.clone(), markdown::Content::parse(content)));
+                            self.panel = Some(Panel::Document);
+                        }
+                        open_path = snapshot.open_path.clone();
                         self.snapshot = Some(snapshot);
+                        // Re-arm the global semantic role colors the TUI also
+                        // uses, so themed text matches across both front ends.
+                        match self
+                            .snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.colors.as_ref())
+                            .and_then(|colors| colors.roles.as_ref())
+                        {
+                            Some(roles) => crate::ui::roles::apply(roles),
+                            None => crate::ui::roles::reset(),
+                        }
                         if let Some(command) = self.after_load.take() {
                             return self.choose(command);
                         }
@@ -300,6 +482,9 @@ impl App {
                 self.submitted = None;
                 if let Some(id) = self.closing.take() {
                     return window::close(id);
+                }
+                if let Some(path) = open_path {
+                    return open_path_task(path);
                 }
                 return if scroll {
                     operation::snap_to_end("conversation")
@@ -321,6 +506,20 @@ impl App {
                 if input.is_empty() {
                     return Task::none();
                 }
+                // `/quit` mirrors the TUI handler (which intercepts the engine
+                // error): the desktop closes its window instead of exiting a
+                // process it does not own.
+                if matches!(input.as_str(), "/quit" | "/exit") {
+                    return self.update(Message::Quit);
+                }
+                if input == "/rewind" {
+                    self.panel = Some(Panel::Rewind);
+                    return Task::none();
+                }
+                if let Some(operation) = super::operations::typed_operation(&input) {
+                    self.submitted = Some(self.content.text());
+                    return self.dispatch(operation);
+                }
                 self.submitted = Some(self.content.text());
                 if let Some((command, arguments)) = commands::confirmation(&input) {
                     let task = self.choose(command);
@@ -332,6 +531,30 @@ impl App {
                 return self.dispatch(super::operations::composer_operation(&input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
+            Message::Engine(UiEvent::Agent(event)) => self.handle_agent_event(event),
+            Message::Engine(UiEvent::Permission(request)) => {
+                self.permission = Some(request);
+            }
+            Message::Engine(UiEvent::OpenUrl(url)) => {
+                return Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::ui::renderer::open_url(&url).map_err(|error| error.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                    },
+                    Message::LinkOpened,
+                );
+            }
+            Message::AllowOnce => return self.answer_permission(UserDecision::AllowOnce),
+            Message::AllowAlways => {
+                if let Some(request) = &self.permission {
+                    let pattern = crate::ui::utils::suggest_pattern(&request.tool, &request.input);
+                    return self.answer_permission(UserDecision::AllowAlways(pattern));
+                }
+            }
+            Message::Deny => return self.answer_permission(UserDecision::Deny),
             Message::Select(id) if !self.busy => {
                 self.menu = None;
                 self.panel = None;
@@ -526,6 +749,16 @@ impl App {
         Task::none()
     }
 
+    /// Window theme derived from the engine's active colors, so `/theme` and
+    /// `[colors]` drive the desktop exactly like the TUI.
+    pub fn theme(&self) -> iced::Theme {
+        style::theme_for(
+            self.snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.colors.as_ref()),
+        )
+    }
+
     pub fn session_by_id(&self, id: &str) -> Option<&crate::session::Session> {
         self.snapshot.as_ref().and_then(|snapshot| {
             if snapshot.session.id.as_str() == id {
@@ -570,10 +803,24 @@ fn submitted_is_unchanged(submitted: Option<&str>, current: &str) -> bool {
     submitted.is_some_and(|submitted| submitted == current)
 }
 
+/// Hand a local file to the OS default application (`/memory editor`).
+fn open_path_task(path: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::ui::renderer::open_url(&path).map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
+        },
+        Message::LinkOpened,
+    )
+}
+
 fn requests_output(input: &str) -> bool {
     let mut words = input.split_whitespace();
     match words.next() {
-        Some("/help" | "/history" | "/btw" | "/review" | "/hooks" | "/share") => true,
+        Some("/help" | "/history" | "/btw" | "/review" | "/hooks" | "/share" | "/mcp") => true,
         Some("/models" | "/mode" | "/editsys" | "/prompt" | "/theme" | "/advisor") => {
             words.next().is_none()
         }
