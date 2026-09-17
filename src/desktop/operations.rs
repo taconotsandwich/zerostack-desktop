@@ -27,7 +27,71 @@ pub(super) fn fieldless_operation(command: &Command) -> Operation {
         "/retry" => Operation::Retry,
         "/reasoning" => Operation::ToggleReasoning,
         "/drop-all" => Operation::ClearContextFiles,
+        "/tutor" => Operation::OpenDocument {
+            name: "GET_STARTED.md".into(),
+        },
+        #[cfg(feature = "memory")]
+        "/memory editor" => Operation::MemoryEditor,
+        #[cfg(feature = "git-worktree")]
+        "/wt-exit" => Operation::ExitWorktree,
         _ => Operation::Command(command.syntax.to_string()),
+    }
+}
+
+/// Desktop-owned commands typed into the composer, rewritten into the same
+/// structured operations the picker uses. Returns `None` for anything the
+/// engine runs itself, which keeps typed input faithful to the TUI.
+pub(super) fn typed_operation(input: &str) -> Option<Operation> {
+    let mut words = input.split_whitespace();
+    match words.next()? {
+        "/tutor" | "/welcome" | "/tutorial" if words.next().is_none() => {
+            Some(Operation::OpenDocument {
+                name: "GET_STARTED.md".into(),
+            })
+        }
+        "/docs" => {
+            let name = words.next().unwrap_or("GET_STARTED.md").to_string();
+            words
+                .next()
+                .is_none()
+                .then_some(Operation::OpenDocument { name })
+        }
+        #[cfg(feature = "git-worktree")]
+        "/wt-exit" if words.next().is_none() => Some(Operation::ExitWorktree),
+        #[cfg(feature = "git-worktree")]
+        "/wt-merge" => Some(Operation::MergeWorktree {
+            target: words.next().map(str::to_string),
+        }),
+        #[cfg(feature = "memory")]
+        "/memory" if words.next() == Some("editor") && words.next().is_none() => {
+            Some(Operation::MemoryEditor)
+        }
+        #[cfg(feature = "loop")]
+        "/loop" => {
+            let prompt = words.collect::<Vec<_>>().join(" ");
+            (!prompt.is_empty()).then_some(Operation::StartLoop {
+                prompt,
+                max_iterations: None,
+            })
+        }
+        #[cfg(feature = "mcp")]
+        "/mcp" => {
+            let action = words.next()?;
+            let server = words.next()?;
+            if words.next().is_some() {
+                return None;
+            }
+            match action {
+                "login" => Some(Operation::McpLogin {
+                    server: server.to_string(),
+                }),
+                "logout" => Some(Operation::McpLogout {
+                    server: server.to_string(),
+                }),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -119,6 +183,26 @@ pub(super) fn form_operation(
         }),
         "/btw" => Ok(Operation::AskSeparateQuestion {
             question: required_field(fields, 0)?,
+        }),
+        "/docs" => Ok(Operation::OpenDocument {
+            name: optional_field(fields, 0).unwrap_or_else(|| "GET_STARTED.md".into()),
+        }),
+        #[cfg(feature = "git-worktree")]
+        "/wt-merge" => Ok(Operation::MergeWorktree {
+            target: optional_field(fields, 0),
+        }),
+        #[cfg(feature = "loop")]
+        "/loop" => Ok(Operation::StartLoop {
+            prompt: required_field(fields, 0)?,
+            max_iterations: None,
+        }),
+        #[cfg(feature = "mcp")]
+        "/mcp login" => Ok(Operation::McpLogin {
+            server: required_field(fields, 0)?,
+        }),
+        #[cfg(feature = "mcp")]
+        "/mcp logout" => Ok(Operation::McpLogout {
+            server: required_field(fields, 0)?,
         }),
         "!" => Ok(Operation::RunShell {
             command: required_field(fields, 0)?,
@@ -215,6 +299,86 @@ mod tests {
     fn advanced_forms_keep_validated_command_text() {
         let operation = form_operation(&command("/review"), &["check this".into()], None).unwrap();
         assert!(matches!(operation, Operation::Command(_)));
+    }
+
+    #[test]
+    fn typed_desktop_commands_map_to_structured_operations() {
+        assert!(matches!(
+            typed_operation("/tutor"),
+            Some(Operation::OpenDocument { .. })
+        ));
+        assert!(matches!(
+            typed_operation("/docs COMMANDS.md"),
+            Some(Operation::OpenDocument { .. })
+        ));
+        assert!(typed_operation("/docs a b").is_none());
+        assert!(
+            typed_operation("/help").is_none(),
+            "engine-owned commands stay typed input"
+        );
+        assert!(
+            typed_operation("/mcp").is_none(),
+            "plain /mcp lists via the engine"
+        );
+        #[cfg(feature = "git-worktree")]
+        {
+            assert!(matches!(
+                typed_operation("/wt-exit"),
+                Some(Operation::ExitWorktree)
+            ));
+            assert!(matches!(
+                typed_operation("/wt-merge main"),
+                Some(Operation::MergeWorktree { target: Some(_) })
+            ));
+        }
+        #[cfg(feature = "mcp")]
+        {
+            assert!(matches!(
+                typed_operation("/mcp login demo"),
+                Some(Operation::McpLogin { .. })
+            ));
+            assert!(matches!(
+                typed_operation("/mcp logout demo"),
+                Some(Operation::McpLogout { .. })
+            ));
+        }
+        #[cfg(feature = "loop")]
+        assert!(matches!(
+            typed_operation("/loop keep going"),
+            Some(Operation::StartLoop { .. })
+        ));
+        #[cfg(feature = "memory")]
+        assert!(matches!(
+            typed_operation("/memory editor"),
+            Some(Operation::MemoryEditor)
+        ));
+    }
+
+    #[test]
+    fn forms_cover_the_desktop_owned_commands() {
+        assert!(matches!(
+            form_operation(&command("/docs"), &[String::new()], None).unwrap(),
+            Operation::OpenDocument { .. }
+        ));
+        assert!(matches!(
+            fieldless_operation(&command("/tutor")),
+            Operation::OpenDocument { .. }
+        ));
+        #[cfg(feature = "loop")]
+        assert!(matches!(
+            form_operation(&command("/loop"), &["keep going".into()], None).unwrap(),
+            Operation::StartLoop { .. }
+        ));
+        #[cfg(feature = "git-worktree")]
+        assert!(matches!(
+            form_operation(&command("/wt-merge"), &[String::new()], None).unwrap(),
+            Operation::MergeWorktree { target: None }
+        ));
+        #[cfg(feature = "mcp")]
+        assert!(matches!(
+            form_operation(&command("/mcp login"), &["demo".into()], None).unwrap(),
+            Operation::McpLogin { .. }
+        ));
     }
 
     #[cfg(feature = "export")]
