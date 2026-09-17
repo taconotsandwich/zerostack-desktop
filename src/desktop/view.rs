@@ -11,6 +11,7 @@ use super::layout::{self, Layout};
 use super::style::{self, Icon};
 use super::worker;
 use crate::session::{MessageRole, Session, ToolRecord};
+use crate::ui::feed::BlockStyle;
 
 impl App {
     fn layout(&self) -> Layout {
@@ -251,10 +252,14 @@ impl App {
             for (index, message) in snapshot.session.messages.iter().enumerate() {
                 match message.role {
                     MessageRole::User => {
-                        let bubble = container(text(message.content.as_str()).size(style::BODY))
-                            .padding([layout::MD, layout::LG])
-                            .max_width(layout::MESSAGE_WIDTH)
-                            .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
+                        let bubble = container(
+                            text(message.content.as_str())
+                                .size(style::BODY)
+                                .color(style::role_color(BlockStyle::User)),
+                        )
+                        .padding([layout::MD, layout::LG])
+                        .max_width(layout::MESSAGE_WIDTH)
+                        .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
                         let mut actions = row![icon_button(
                             Icon::Copy,
                             "Copy message",
@@ -330,6 +335,12 @@ impl App {
                     }
                 }
             }
+            if let Some(permission) = &self.permission {
+                messages = messages.push(self.permission_prompt(permission));
+            }
+            if self.busy {
+                messages = messages.push(self.live_turn());
+            }
             if !self.command_output.is_empty() {
                 messages = messages.push(text(&self.command_output).size(style::BODY));
             }
@@ -371,6 +382,63 @@ impl App {
             .height(Fill)
             .width(Fill)
             .into()
+    }
+
+    fn permission_prompt(&self, request: &worker::PermissionRequest) -> Element<'_, Message> {
+        let header = text(format!("[permission] {}: {}", request.tool, request.input))
+            .size(style::LABEL)
+            .font(Font::MONOSPACE)
+            .color(style::role_color(BlockStyle::Permission));
+        let options = row![
+            components::action("Allow once", Some(Message::AllowOnce)),
+            components::action("Allow always", Some(Message::AllowAlways)),
+            components::action("Deny", Some(Message::Deny)),
+        ]
+        .spacing(layout::SM);
+        column![header, options].spacing(layout::SM).into()
+    }
+
+    /// Streamed view of the in-flight turn: tool activity, notices, then the
+    /// partial response. Replaced by the authoritative snapshot when the
+    /// operation completes.
+    fn live_turn(&self) -> Element<'_, Message> {
+        let mut entries: Vec<Element<'_, Message>> = Vec::new();
+        for tool in &self.live.tools {
+            let state = if tool.done { "done" } else { "running" };
+            entries.push(
+                text(format!("[{state}] {}", tool.summary))
+                    .size(style::CAPTION)
+                    .color(style::role_color(BlockStyle::Tool))
+                    .into(),
+            );
+        }
+        if !self.live.notice.is_empty() {
+            entries.push(
+                text(&self.live.notice)
+                    .size(style::CAPTION)
+                    .color(style::MUTED)
+                    .into(),
+            );
+        }
+        if !self.live.reasoning.is_empty() {
+            entries.push(
+                text(&self.live.reasoning)
+                    .size(style::CAPTION)
+                    .color(style::role_color(BlockStyle::Reasoning))
+                    .into(),
+            );
+        }
+        if !self.live.response.is_empty() {
+            entries.push(text(&self.live.response).size(style::BODY).into());
+        } else if entries.is_empty() {
+            entries.push(
+                text(&self.status)
+                    .size(style::LABEL)
+                    .color(style::MUTED)
+                    .into(),
+            );
+        }
+        column(entries).spacing(layout::SM).into()
     }
 
     fn usage(&self) -> Element<'_, Message> {
