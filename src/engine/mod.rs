@@ -34,13 +34,18 @@ pub use sink::{EventSink, StringSink};
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::runner::{self, AgentRunner};
 use crate::cli::Cli;
 use crate::config::{self, Config};
 use crate::context::ContextFiles;
 use crate::event::AgentEvent;
+#[cfg(feature = "mcp")]
+use crate::extras::mcp::McpClientManager;
+use crate::extras::status_signals::StatusSignals;
 use crate::permission::SecurityMode;
+use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
@@ -79,7 +84,8 @@ impl RunOutput {
         }
     }
 
-    fn command(text: impl Into<String>) -> Self {
+    /// Build a command-transcript output (slash-style text, no agent usage).
+    pub fn command(text: impl Into<String>) -> Self {
         Self {
             kind: RunKind::Command,
             text: text.into(),
@@ -108,6 +114,15 @@ pub struct Engine {
     agent: Option<AnyAgent>,
     permission: Option<PermCheck>,
     sandbox: Sandbox,
+    /// Interactive services injected by rich embedders (the desktop app).
+    /// A bare engine leaves them unset and stays fully headless: `Ask`
+    /// verdicts fail closed, no MCP tools are registered, no status is
+    /// published, and no events are forwarded.
+    ask_tx: Option<AskSender>,
+    #[cfg(feature = "mcp")]
+    mcp_manager: Option<McpClientManager>,
+    status_signals: Option<StatusSignals>,
+    event_tx: Option<UnboundedSender<AgentEvent>>,
     /// Mirrors `SlashState`: toggles owned by slash commands.
     show_reasoning: bool,
     reasoning_enabled: bool,
@@ -142,6 +157,11 @@ impl Engine {
             agent: None,
             permission,
             sandbox,
+            ask_tx: None,
+            #[cfg(feature = "mcp")]
+            mcp_manager: None,
+            status_signals: None,
+            event_tx: None,
             show_reasoning,
             reasoning_enabled: true,
             pending_tool_calls: Vec::new(),
@@ -154,6 +174,34 @@ impl Engine {
     /// Inject a pre-built agent (tests inject `AnyAgent::Mock`).
     pub fn with_agent(mut self, agent: AnyAgent) -> Self {
         self.agent = Some(agent);
+        self
+    }
+
+    /// Let tools ask the user for permission. The caller must drain the
+    /// matching receiver and answer each request; without a sender an `Ask`
+    /// verdict stays fail-closed (`Permission denied (non-interactive mode)`).
+    pub fn with_ask(mut self, ask_tx: AskSender) -> Self {
+        self.ask_tx = Some(ask_tx);
+        self
+    }
+
+    /// Register MCP tools on every agent this engine builds.
+    #[cfg(feature = "mcp")]
+    pub fn with_mcp(mut self, manager: McpClientManager) -> Self {
+        self.mcp_manager = Some(manager);
+        self
+    }
+
+    /// Publish run state over the same status socket the TUI reports to.
+    pub fn with_status_signals(mut self, signals: StatusSignals) -> Self {
+        self.status_signals = Some(signals);
+        self
+    }
+
+    /// Forward every [`AgentEvent`] of a running turn to `tx` so embedders can
+    /// render tokens, tool calls, and usage while the turn is in flight.
+    pub fn with_events(mut self, tx: UnboundedSender<AgentEvent>) -> Self {
+        self.event_tx = Some(tx);
         self
     }
 
@@ -170,6 +218,11 @@ impl Engine {
     /// Borrow the context files (extra files, prompts).
     pub fn context(&self) -> &ContextFiles {
         &self.context
+    }
+
+    /// Mutably borrow the context files (prompt/theme selection, reloads).
+    pub fn context_mut(&mut self) -> &mut ContextFiles {
+        &mut self.context
     }
 
     // ── typed actions for programmatic callers (desktop UI) ─────────
@@ -421,6 +474,94 @@ impl Engine {
         self.session.redo()
     }
 
+    /// Rewind candidate points, mirroring the TUI rewind picker: the index and
+    /// an 80-character preview of every user message.
+    pub fn rewind_points(&self) -> Vec<(usize, String)> {
+        crate::ui::rewind_targets(&self.session)
+    }
+
+    /// Rewind the conversation to `new_len` messages; the TUI picker passes the
+    /// index of the chosen user message. Returns the number of messages removed
+    /// (0 when the index is already at or past the end).
+    pub fn rewind_to(&mut self, new_len: usize) -> usize {
+        self.session.rewind_to(new_len)
+    }
+
+    /// Merge the current worktree branch into `target` (defaults to the main
+    /// repo's detected main branch) by driving the same prompt the TUI uses,
+    /// then verify on disk and only clean up when the merge actually landed.
+    #[cfg(feature = "git-worktree")]
+    pub async fn merge_worktree(&mut self, target: Option<String>) -> anyhow::Result<RunOutput> {
+        let info = crate::extras::git_worktree::detect()
+            .ok_or_else(|| anyhow::anyhow!("not in a git worktree"))?;
+        let target = match target
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+        {
+            Some(target) => target,
+            None => crate::extras::git_worktree::default_branch(&info.main_repo_path).ok_or_else(
+                || anyhow::anyhow!("no target branch specified and couldn't detect main/master"),
+            )?,
+        };
+        let main_path = info.main_repo_path.display().to_string();
+        let wt_path = info.worktree_path.display().to_string();
+        let prompt =
+            crate::extras::git_worktree::merge_prompt(&info.branch, &target, &main_path, &wt_path);
+        let output = self.run_agent_text(&prompt).await;
+        let force = self.cli.resolve_wt_force(&self.cfg);
+        let outcome = crate::extras::git_worktree::finish_agent_merge(
+            &main_path,
+            &wt_path,
+            &info.branch,
+            &target,
+            force,
+        );
+        // A successful merge removes the worktree, so the process returns to
+        // the main repo; the TUI does the same after its merge agent finishes.
+        let returned = self.return_to_main_repo(&main_path).await;
+        let mut text = output.text;
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&outcome);
+        if let Err(e) = returned {
+            text.push_str(&format!(
+                "\nwarning: failed to change back to main repo: {e}"
+            ));
+        }
+        Ok(RunOutput::command(text))
+    }
+
+    /// Leave the current worktree: return to the main repo, reload context and
+    /// prompt mode, reconnect MCP, and rebuild the agent. Mirrors the TUI's
+    /// `/wt-exit` deferred action.
+    #[cfg(feature = "git-worktree")]
+    pub async fn exit_worktree(&mut self) -> anyhow::Result<RunOutput> {
+        let info = crate::extras::git_worktree::detect()
+            .ok_or_else(|| anyhow::anyhow!("not in a git worktree"))?;
+        let main_path = info.main_repo_path.display().to_string();
+        self.return_to_main_repo(&main_path).await?;
+        Ok(RunOutput::command(format!(
+            "returned to main repo at {main_path}"
+        )))
+    }
+
+    #[cfg(feature = "git-worktree")]
+    async fn return_to_main_repo(&mut self, main_path: &str) -> anyhow::Result<()> {
+        std::env::set_current_dir(main_path)
+            .map_err(|e| anyhow::anyhow!("failed to change directory: {e}"))?;
+        self.session.working_dir = CompactString::new(main_path);
+        self.context.reload();
+        crate::ui::apply_current_prompt_mode(&mut self.context, &self.permission);
+        #[cfg(feature = "mcp")]
+        if self.mcp_manager.is_some() {
+            self.mcp_manager = crate::startup::connect_headless_mcp(&self.cfg).await;
+        }
+        let model_id = self.session.model.to_string();
+        self.rebuild_agent(&model_id).await;
+        Ok(())
+    }
+
     /// Retry the last user message as a new agent turn.
     pub async fn retry_last_message(&mut self) -> anyhow::Result<RunOutput> {
         let Some(message) = self.last_user_message() else {
@@ -553,6 +694,172 @@ impl Engine {
         }
     }
 
+    /// Drive the same iteration loop the TUI runs after `/loop <prompt>`,
+    /// inline until the shared [`LoopState`](crate::extras::r#loop::LoopState)
+    /// stops (iteration cap or plan completion). Iteration prompts and
+    /// continuation text come from the same state the TUI uses.
+    #[cfg(feature = "loop")]
+    pub async fn run_loop(
+        &mut self,
+        prompt: Option<String>,
+        max_iterations: Option<u32>,
+    ) -> anyhow::Result<RunOutput> {
+        let prompt = match prompt
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty())
+        {
+            Some(prompt) => prompt,
+            None => anyhow::bail!("usage: /loop <prompt>"),
+        };
+        let mut sink = StringSink::new();
+        let plan_file = self.cli.loop_plan.clone().unwrap_or_else(|| {
+            std::path::PathBuf::from(crate::extras::r#loop::DEFAULT_PLAN_FILENAME)
+        });
+        let mut state = crate::extras::r#loop::LoopState::new(
+            prompt,
+            plan_file,
+            max_iterations.or(self.cli.loop_max),
+            self.cli.loop_run.clone(),
+        );
+        while !state.should_stop() {
+            state.iteration += 1;
+            let iteration_prompt = state.build_prompt();
+            sink.write_ok(format!("[loop] launching {}", state.iteration_label()));
+            match self.start_agent_run(iteration_prompt).await {
+                Ok((response, _)) => {
+                    state.last_summary = Some(
+                        response
+                            .chars()
+                            .take(crate::extras::r#loop::SUMMARY_TRUNCATION_CHARS)
+                            .collect(),
+                    );
+                    sink.write_ok(response);
+                }
+                Err(error) => {
+                    sink.write_error(format!("[loop] iteration failed: {error}"));
+                    break;
+                }
+            }
+        }
+        self.save_session_best_effort();
+        sink.write_ok(format!(
+            "[loop] stopped after {} iteration(s)",
+            state.iteration
+        ));
+        Ok(RunOutput::command(sink.transcript()))
+    }
+
+    /// Read a bundled documentation file (`GET_STARTED.md`, `COMMANDS.md`, …)
+    /// so a GUI shell can render it. Mirrors the TUI's `/docs` and `/tutor`.
+    pub fn read_doc(&self, name: &str) -> anyhow::Result<String> {
+        let name = name.trim();
+        anyhow::ensure!(!name.is_empty(), "usage: /docs <file>");
+        anyhow::ensure!(
+            !name.contains('/') && !name.contains('\\') && !name.starts_with('.'),
+            "invalid doc name: {name}"
+        );
+        crate::docs::read(name)
+    }
+
+    /// The colors a UI should render with: the active theme file when one is
+    /// selected, otherwise the config `[colors]` section. Mirrors the TUI's
+    /// theme resolution in `run_interactive`.
+    pub fn active_colors(&self) -> Option<crate::config::ColorsConfig> {
+        if let Some(name) = self.context.current_theme_name.as_deref()
+            && let Some(content) = self.context.themes.get(name)
+            && let Ok(colors) = serde_json::from_str::<crate::config::ColorsConfig>(content)
+        {
+            return Some(colors);
+        }
+        self.cfg.colors.clone()
+    }
+
+    /// Absolute path of `MEMORY.md`, the file `/memory editor` opens.
+    #[cfg(feature = "memory")]
+    pub fn memory_editor_path(&self) -> std::path::PathBuf {
+        use crate::extras::memory::Mem;
+        Mem::open().memory_md()
+    }
+
+    /// Start the OAuth login for an MCP URL server. `open` receives the
+    /// authorization URL (the embedder opens a browser), then the engine waits
+    /// for the loopback callback and reconnects the server. Mirrors the TUI's
+    /// `/mcp login` deferred flow.
+    #[cfg(feature = "mcp")]
+    pub async fn mcp_login<F: FnOnce(String)>(
+        &mut self,
+        server: &str,
+        open: F,
+    ) -> anyhow::Result<RunOutput> {
+        use crate::extras::mcp::config::McpServerConfig;
+
+        let server = server.trim();
+        anyhow::ensure!(!server.is_empty(), "usage: /mcp login <server>");
+        let config = self
+            .cfg
+            .mcp_servers
+            .as_ref()
+            .and_then(|servers| servers.get(server))
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("unknown MCP server: '{server}'"))?;
+        let (url, settings) = match &config {
+            McpServerConfig::Url { url, oauth, .. } => {
+                let settings = oauth
+                    .as_ref()
+                    .and_then(|oauth| oauth.settings())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("server '{server}' does not have OAuth enabled")
+                    })?;
+                (url.clone(), settings)
+            }
+            McpServerConfig::Command { .. } => {
+                anyhow::bail!("server '{server}' is command-based; OAuth applies to URL servers")
+            }
+        };
+        let login = crate::extras::mcp::oauth::begin_login(server, &url, &settings).await?;
+        open(login.auth_url.clone());
+        let mut sink = StringSink::new();
+        sink.write_result(format!(
+            "waiting for authorization on 127.0.0.1:{} ...",
+            settings.redirect_port()
+        ));
+        match login
+            .wait_for_callback(std::time::Duration::from_secs(180))
+            .await
+        {
+            Ok(()) => {
+                if let Some(manager) = &mut self.mcp_manager {
+                    match manager.reconnect(server, &config).await {
+                        Ok(()) => sink.write_ok(format!("authorized '{server}' and reconnected")),
+                        Err(e) => {
+                            sink.write_error(format!("authorized, but reconnect failed: {e}"))
+                        }
+                    }
+                } else {
+                    sink.write_ok(format!("authorized '{server}' (no MCP manager attached)"));
+                }
+            }
+            Err(e) => sink.write_error(format!("login failed: {e}")),
+        }
+        Ok(RunOutput::command(sink.transcript()))
+    }
+
+    /// Forget the stored OAuth token for an MCP server (effective next start).
+    #[cfg(feature = "mcp")]
+    pub fn mcp_logout(&mut self, server: &str) -> anyhow::Result<RunOutput> {
+        let server = server.trim();
+        anyhow::ensure!(!server.is_empty(), "usage: /mcp logout <server>");
+        let mut sink = StringSink::new();
+        match crate::extras::mcp::oauth::logout(server) {
+            Ok(true) => sink.write_ok(format!(
+                "removed stored OAuth token for '{server}' (effective next start)"
+            )),
+            Ok(false) => sink.write_ok(format!("no stored OAuth token for '{server}'")),
+            Err(e) => sink.write_error(format!("logout failed: {e}")),
+        }
+        Ok(RunOutput::command(sink.transcript()))
+    }
+
     /// Run one user input string: plain message, `/` slash command, `.`
     /// dot-prompt command, or `!` shell command.
     pub async fn run_string(&mut self, input: &str) -> anyhow::Result<RunOutput> {
@@ -658,8 +965,14 @@ impl Engine {
         let mut usage = TurnUsage::default();
         let mut final_response = String::new();
         let mut turn_error: Option<String> = None;
+        if let Some(signals) = &self.status_signals {
+            signals.send_start();
+        }
 
         while let Some(event) = runner.event_rx.recv().await {
+            if let Some(tx) = &self.event_tx {
+                let _ = tx.send(event.clone());
+            }
             match event {
                 AgentEvent::Reasoning(text) => {
                     if self.show_reasoning {
@@ -750,6 +1063,9 @@ impl Engine {
         }
         self.turn_trace.clear();
         self.pending_tool_calls.clear();
+        if let Some(signals) = &self.status_signals {
+            signals.send_stop();
+        }
 
         if let Some(e) = turn_error {
             anyhow::bail!("{e}");
@@ -867,12 +1183,6 @@ impl Engine {
         if self.agent.is_some() {
             return;
         }
-        #[cfg(feature = "mcp")]
-        {
-            // Headless engines never connect MCP lazily: pass `None` like
-            // `dispatch_print` does. Callers needing MCP build the agent
-            // up front via `Engine::new(...).with_agent(...)`.
-        }
         let model = self.client.completion_model(self.session.model.to_string());
         let temperature = config::resolve_temperature(&self.cli, &self.cfg, &self.session.model);
         let extra_body = config::resolve_extra_body(&self.cfg, &self.session.model);
@@ -882,15 +1192,13 @@ impl Engine {
             &self.cfg,
             &self.context,
             self.permission.clone(),
-            // Headless: no one drains the ask channel, so an `Ask` verdict
-            // must fail closed (same as `dispatch_print`'s `None`).
-            None,
+            self.ask_tx.clone(),
             self.sandbox.clone(),
             self.reasoning_enabled,
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
-            None,
+            self.mcp_manager.as_ref(),
         )
         .await;
         self.session.overhead_tokens =
@@ -934,13 +1242,13 @@ impl Engine {
             cfg,
             context,
             permission.clone(),
-            None,
+            self.ask_tx.clone(),
             sandbox.clone(),
             self.reasoning_enabled,
             temperature,
             extra_body,
             #[cfg(feature = "mcp")]
-            None,
+            self.mcp_manager.as_ref(),
         )
         .await;
         self.agent = Some(agent);
@@ -1783,10 +2091,7 @@ impl Engine {
                 }
             }
             #[cfg(feature = "mcp")]
-            "/mcp" => {
-                sink.write_error("/mcp needs the TUI runtime (connection notices render there)");
-                Ok(SlashFlow::Done)
-            }
+            "/mcp" => self.slash_mcp(parts, sink).await,
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -2480,6 +2785,87 @@ impl Engine {
             }
             _ => Ok(SlashFlow::Done),
         }
+    }
+
+    /// `/mcp` — list configured servers with connection state and tool counts.
+    /// `/mcp <server>` — list that server's tools. Login/logout stay with the
+    /// embedder: the OAuth flow needs a browser and an interactive wait.
+    #[cfg(feature = "mcp")]
+    async fn slash_mcp(
+        &mut self,
+        parts: &[&str],
+        sink: &mut StringSink,
+    ) -> anyhow::Result<SlashFlow> {
+        use crate::extras::mcp::config::McpServerConfig;
+
+        let Some(servers) = self.cfg.mcp_servers.as_ref().filter(|s| !s.is_empty()) else {
+            sink.write_ok("no MCP servers configured");
+            return Ok(SlashFlow::Done);
+        };
+
+        if parts.len() > 1 {
+            let name = parts[1].trim();
+            if let Some(manager) = &self.mcp_manager
+                && let Some(handle) = manager.get_handle(name).await
+            {
+                match handle.read().await.list_tools().await {
+                    Ok(tools) if tools.is_empty() => {
+                        sink.write_ok(format!("server '{name}' has no tools"));
+                    }
+                    Ok(tools) => {
+                        sink.write_ok(format!("tools on '{name}':"));
+                        for tool in &tools {
+                            let desc = tool.description.as_deref().unwrap_or("");
+                            sink.write_result(format!("  {}  {}", tool.name, desc));
+                        }
+                    }
+                    Err(e) => sink.write_error(format!("error listing tools on '{name}': {e}")),
+                }
+                return Ok(SlashFlow::Done);
+            }
+            let oauth = matches!(
+                servers.get(name),
+                Some(McpServerConfig::Url { oauth: Some(o), .. }) if o.settings().is_some()
+            );
+            let message = if oauth {
+                format!("server '{name}' is not connected (run /mcp login {name})")
+            } else if servers.contains_key(name) {
+                format!("server '{name}' is not connected")
+            } else {
+                format!("unknown MCP server: '{name}'")
+            };
+            sink.write_error(message);
+            return Ok(SlashFlow::Done);
+        }
+
+        sink.write_ok("MCP servers:");
+        let mut names: Vec<&String> = servers.keys().collect();
+        names.sort();
+        for name in names {
+            let handle = match &self.mcp_manager {
+                Some(manager) => manager.get_handle(name).await,
+                None => None,
+            };
+            match handle {
+                Some(handle) => match handle.read().await.list_tools().await {
+                    Ok(tools) => sink.write_ok(format!("  + {name} ({} tools)", tools.len())),
+                    Err(_) => sink.write_ok(format!("  + {name} (connected)")),
+                },
+                None => {
+                    let oauth = matches!(
+                        servers.get(name),
+                        Some(McpServerConfig::Url { oauth: Some(o), .. }) if o.settings().is_some()
+                    );
+                    let message = if oauth {
+                        format!("  - {name} (unauthenticated, run /mcp login {name})")
+                    } else {
+                        format!("  - {name} (not connected)")
+                    };
+                    sink.write_error(message);
+                }
+            }
+        }
+        Ok(SlashFlow::Done)
     }
 
     #[cfg(feature = "hooks")]

@@ -47,6 +47,22 @@ pub fn ensure_global() -> anyhow::Result<bool> {
     Ok(false)
 }
 
+/// Content of a bundled doc by file name, preferring the copy in the global
+/// docs directory and falling back to the embedded copy when the data dir is
+/// unavailable or mid-refresh.
+pub fn read(name: &str) -> anyhow::Result<String> {
+    ensure_global()?;
+    let path = global_docs_dir().join(name);
+    if let Ok(content) = std::fs::read_to_string(&path) {
+        return Ok(content);
+    }
+    EMBEDDED
+        .get_file(name)
+        .and_then(|file| file.contents_utf8())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("unknown doc: {name}"))
+}
+
 fn copy_embedded(dest: &Path) -> anyhow::Result<()> {
     for file in EMBEDDED.files() {
         if let Some(name) = file.path().file_name().and_then(|s| s.to_str()) {
