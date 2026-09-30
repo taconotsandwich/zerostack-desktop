@@ -41,6 +41,7 @@ pub(super) enum Operation {
     AddContextFile {
         path: PathBuf,
     },
+    AddContextFiles(Vec<PathBuf>),
     DropContextFile {
         path: PathBuf,
     },
@@ -199,14 +200,27 @@ struct Request {
     reply: oneshot::Sender<Reply>,
 }
 
-#[derive(Clone)]
-pub(super) struct Worker(mpsc::UnboundedSender<Request>);
+#[derive(Debug, Clone)]
+pub(super) struct Worker {
+    sender: mpsc::UnboundedSender<Request>,
+    stopped: tokio::sync::watch::Receiver<bool>,
+}
+
+struct Stopped(tokio::sync::watch::Sender<bool>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
 
 impl Worker {
     pub fn start(cli: Cli, directory: Option<String>) -> (Self, oneshot::Receiver<Reply>) {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Request>();
         let (ready, result) = oneshot::channel();
+        let (finished, stopped) = tokio::sync::watch::channel(false);
         std::thread::spawn(move || {
+            let _finished = Stopped(finished);
             if let Some(directory) = directory
                 && let Err(error) = std::env::set_current_dir(&directory)
             {
@@ -414,14 +428,23 @@ impl Worker {
                 }
             });
         });
-        (Self(sender), result)
+        (Self { sender, stopped }, result)
+    }
+
+    pub async fn stop(self) {
+        let Self {
+            sender,
+            mut stopped,
+        } = self;
+        drop(sender);
+        let _ = stopped.wait_for(|stopped| *stopped).await;
     }
 
     /// Send one operation; `events` receives streamed agent events and
     /// permission asks while it runs.
     pub async fn request(self, operation: Operation, events: Option<UiSender>) -> Reply {
         let (reply, receiver) = oneshot::channel();
-        self.0
+        self.sender
             .send(Request {
                 operation,
                 events,
@@ -470,6 +493,7 @@ async fn apply(
                 | Operation::SetPermissionMode { .. }
                 | Operation::SetEditSystem { .. }
                 | Operation::AddContextFile { .. }
+                | Operation::AddContextFiles(_)
                 | Operation::DropContextFile { .. }
                 | Operation::ClearContextFiles
                 | Operation::ToggleReasoning
@@ -558,8 +582,39 @@ async fn apply(
             engine.add_context_file(path).await?;
             None
         }
+        Operation::AddContextFiles(paths) => {
+            let mut errors = Vec::new();
+            for path in paths {
+                if engine.context().extra_files.contains(&path)
+                    || engine
+                        .session()
+                        .pending_media
+                        .iter()
+                        .any(|media| media.path() == path)
+                {
+                    continue;
+                }
+                if let Err(error) = engine.add_context_file(path).await {
+                    errors.push(format!("error: {error}"));
+                }
+            }
+            (!errors.is_empty()).then(|| RunOutput {
+                kind: crate::engine::RunKind::Command,
+                text: errors.join("\n"),
+                usage: None,
+            })
+        }
         Operation::DropContextFile { path } => {
-            engine.drop_context_file(path).await?;
+            if let Some(index) = engine
+                .session()
+                .pending_media
+                .iter()
+                .position(|media| media.path() == path)
+            {
+                engine.session_mut().pending_media.remove(index);
+            } else {
+                engine.drop_context_file(path).await?;
+            }
             None
         }
         Operation::ClearContextFiles => {
@@ -984,5 +1039,38 @@ mod tests {
         assert_eq!(receiver.len(), 1);
         stream.set(None);
         assert!(!stream.notify(UiEvent::OpenUrl("https://example.com".into())));
+    }
+
+    #[tokio::test]
+    async fn attachment_batches_keep_valid_files_and_report_failures() {
+        let _lock = fake_model::run_print_guard::acquire();
+        let data = Isolated::new();
+        let mut engine = engine();
+        let text = data.dir.join("notes with spaces.txt");
+        let image = data.dir.join("image.png");
+        let missing = data.dir.join("missing.txt");
+        std::fs::write(&text, "context").unwrap();
+        std::fs::write(&image, [137, 80, 78, 71]).unwrap();
+        let result = apply(
+            &mut engine,
+            Operation::AddContextFiles(vec![text.clone(), missing, image.clone(), image.clone()]),
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        assert!(result.output.unwrap().text.contains("missing.txt"));
+        assert_eq!(engine.context().extra_files, [text.canonicalize().unwrap()]);
+        assert_eq!(engine.session().pending_media.len(), 1);
+        apply(
+            &mut engine,
+            Operation::DropContextFile { path: image },
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        assert!(engine.session().pending_media.is_empty());
+        assert_eq!(engine.context().extra_files.len(), 1);
     }
 }
