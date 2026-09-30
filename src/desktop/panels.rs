@@ -10,6 +10,7 @@ impl App {
         let title = match panel {
             Panel::Context => "Context",
             Panel::Settings => "Settings",
+            Panel::Projects => "Projects",
             Panel::Form(command) => command.label,
             Panel::Delete { .. } => "Delete conversation?",
             Panel::Rewind => "Rewind to…",
@@ -21,9 +22,16 @@ impl App {
         };
         let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
+            Panel::Projects => content = content.push(self.project_picker()),
             Panel::Context => {
                 if let Some(snapshot) = &self.snapshot {
-                    for file in &snapshot.files {
+                    for file in snapshot.files.iter().map(|path| path.as_path()).chain(
+                        snapshot
+                            .session
+                            .pending_media
+                            .iter()
+                            .map(|media| media.path()),
+                    ) {
                         let path = file.display().to_string();
                         content = content.push(
                             row![
@@ -31,7 +39,9 @@ impl App {
                                 components::action(
                                     "Remove",
                                     (!self.busy).then_some(Message::Operate(
-                                        Operation::DropContextFile { path: file.clone() },
+                                        Operation::DropContextFile {
+                                            path: file.to_path_buf()
+                                        },
                                     )),
                                 )
                             ]
@@ -40,7 +50,11 @@ impl App {
                         );
                     }
                 }
-                for syntax in ["/add", "/drop-all", "/compress"] {
+                content = content.push(components::action(
+                    "Attach files…",
+                    (!self.busy && !self.picking).then_some(Message::PickFiles),
+                ));
+                for syntax in ["/drop-all", "/compress"] {
                     if let Some(command) = commands::find(syntax) {
                         content = content.push(
                             components::action(

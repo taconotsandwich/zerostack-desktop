@@ -6,9 +6,11 @@ mod layout;
 mod live;
 mod operations;
 mod panels;
+mod preferences;
 mod style;
 mod view;
 mod worker;
+mod workspace;
 
 use app::App;
 
