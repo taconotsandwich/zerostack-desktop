@@ -255,7 +255,12 @@ impl App {
                         .color(style::MUTED),
                 );
             }
-            pane = pane.push(container(scrollable(files)).max_height(layout::PICKER_HEIGHT));
+            pane = pane.push(
+                container(scrollable(
+                    container(files).padding(iced::Padding::ZERO.right(layout::LG)),
+                ))
+                .max_height(layout::PICKER_HEIGHT),
+            );
         }
         if self.review.loading {
             pane = pane.push(text("Loading…").size(style::CAPTION).color(style::MUTED));
