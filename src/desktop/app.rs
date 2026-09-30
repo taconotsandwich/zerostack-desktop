@@ -205,6 +205,7 @@ impl App {
         let Some(worker) = self.worker.clone() else {
             return Task::none();
         };
+        self.remember_draft();
         self.busy = true;
         self.error.clear();
         self.command_output.clear();
@@ -324,7 +325,10 @@ impl App {
                             self.panel = None;
                             self.preferences.drafts.remove(id);
                             if snapshot.session.id.as_str() == id {
-                                if let Some(next) = snapshot.sessions.first() {
+                                if let Some(next) = snapshot.sessions.iter().find(|session| {
+                                    session.working_dir == snapshot.session.working_dir
+                                        && session.id != snapshot.session.id
+                                }) {
                                     return self.dispatch(Operation::Load(next.id.to_string()));
                                 }
                                 self.worker = None;
@@ -756,6 +760,13 @@ impl App {
             Message::Cursor(point) => self.cursor = point,
             Message::Resize(size) => self.size = size,
             Message::Escape => {
+                if self.review.open
+                    && self.panel.is_none()
+                    && self.menu.is_none()
+                    && self.permission.is_none()
+                {
+                    return self.update_review(super::review_view::Event::Toggle);
+                }
                 self.submitted = None;
                 self.menu = None;
                 self.rename = None;
