@@ -10,6 +10,8 @@ mod panels;
 mod preferences;
 mod review;
 mod review_view;
+#[cfg(test)]
+mod startup_tests;
 mod style;
 mod view;
 mod worker;
