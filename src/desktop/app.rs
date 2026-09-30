@@ -46,6 +46,7 @@ pub(super) struct App {
     pub live: LiveTurn,
     /// The permission ask currently blocking a tool call, if any.
     pub permission: Option<worker::PermissionRequest>,
+    pub permission_scope_open: bool,
     /// UI sender for the running operation; dropping it ends the stream task.
     pub events: Option<UiSender>,
     /// Markdown of the document shown by [`Panel::Document`].
@@ -112,6 +113,7 @@ pub(super) enum Message {
     ToggleReasoningDetails,
     AllowOnce,
     AllowAlways,
+    ShowPermissionScope,
     Deny,
 }
 
@@ -166,6 +168,7 @@ impl App {
                 closing: None,
                 live: LiveTurn::default(),
                 permission: None,
+                permission_scope_open: false,
                 events: None,
                 document: None,
                 notices_shown: false,
@@ -225,6 +228,7 @@ impl App {
     }
 
     fn answer_permission(&mut self, decision: UserDecision) -> Task<Message> {
+        self.permission_scope_open = false;
         if let Some(request) = self.permission.take() {
             let reply = request
                 .reply
@@ -504,6 +508,7 @@ impl App {
                 if self.busy && id == self.turn_id =>
             {
                 self.permission = Some(request);
+                self.permission_scope_open = false;
                 if self.follow_output {
                     return operation::snap_to_end("conversation");
                 }
@@ -522,10 +527,15 @@ impl App {
             }
             Message::AllowOnce => return self.answer_permission(UserDecision::AllowOnce),
             Message::AllowAlways => {
-                if let Some(request) = &self.permission {
-                    let pattern = crate::ui::utils::suggest_pattern(&request.tool, &request.input);
+                if self.permission_scope_open
+                    && let Some(request) = &self.permission
+                {
+                    let pattern = super::approval::Approval::new(request).pattern;
                     return self.answer_permission(UserDecision::AllowAlways(pattern));
                 }
+            }
+            Message::ShowPermissionScope => {
+                self.permission_scope_open = !self.permission_scope_open
             }
             Message::Deny => return self.answer_permission(UserDecision::Deny),
             Message::Scrolled(at_bottom) => self.follow_output = at_bottom,
