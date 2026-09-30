@@ -2,6 +2,7 @@ mod app;
 mod approval;
 mod commands;
 mod components;
+mod history;
 mod layout;
 mod live;
 mod operations;
