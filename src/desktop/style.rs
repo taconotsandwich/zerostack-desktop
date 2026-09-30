@@ -20,7 +20,7 @@ pub(super) const RAISED: Color = Color::from_rgb8(43, 43, 43);
 pub(super) const SELECTED: Color = Color::from_rgb8(58, 58, 58);
 pub(super) const INK: Color = Color::from_rgb8(236, 236, 236);
 pub(super) const MUTED: Color = Color::from_rgb8(179, 179, 179);
-pub(super) const ACCENT: Color = Color::from_rgb8(165, 204, 129);
+pub(super) const ACCENT: Color = INK;
 
 pub(super) fn theme() -> Theme {
     Theme::custom(
@@ -30,8 +30,8 @@ pub(super) fn theme() -> Theme {
             text: INK,
             primary: ACCENT,
             success: ACCENT,
-            warning: Color::from_rgb8(224, 186, 115),
-            danger: Color::from_rgb8(255, 180, 173),
+            warning: INK,
+            danger: INK,
         },
     )
 }
@@ -81,7 +81,12 @@ pub(super) fn theme_for(colors: Option<&crate::config::ColorsConfig>) -> Theme {
 
 /// The color the TUI would render `role` in, translated for the desktop.
 pub(super) fn role_color(role: crate::ui::feed::BlockStyle) -> Color {
-    from_ansi(crate::ui::roles::color(role))
+    let color = crate::ui::roles::color(role);
+    if color == crate::ui::roles::default_color(role) {
+        INK
+    } else {
+        from_ansi(color)
+    }
 }
 
 /// Translate a terminal color (the language themes and roles are written in)
@@ -250,6 +255,7 @@ pub(super) enum Icon {
     Folder,
     Attachment,
     Close,
+    Changes,
 }
 
 pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
@@ -265,6 +271,7 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         Icon::Folder => include_bytes!("icons/folder-open.svg"),
         Icon::Attachment => include_bytes!("icons/paper-clip.svg"),
         Icon::Close => include_bytes!("icons/x-mark.svg"),
+        Icon::Changes => include_bytes!("icons/code-bracket.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
         .width(ICON_SIZE)

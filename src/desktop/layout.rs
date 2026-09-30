@@ -17,6 +17,8 @@ pub(super) const EDITOR_HEIGHT: f32 = 64.0;
 pub(super) const MESSAGE_WIDTH: f32 = 620.0;
 pub(super) const COMMAND_COLUMN: f32 = 144.0;
 pub(super) const PICKER_HEIGHT: f32 = 180.0;
+pub(super) const REVIEW_WIDTH: f32 = 440.0;
+pub(super) const REVIEW_SPLIT_WIDTH: f32 = 1200.0;
 
 #[derive(Clone, Copy)]
 pub(super) struct Layout {

@@ -16,7 +16,11 @@ use crate::ui::feed::BlockStyle;
 
 impl App {
     fn layout(&self) -> Layout {
-        Layout::new(self.size, self.sidebar)
+        let mut size = self.size;
+        if self.review.open && size.width >= layout::REVIEW_SPLIT_WIDTH {
+            size.width -= layout::REVIEW_WIDTH;
+        }
+        Layout::new(size, self.sidebar)
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -27,7 +31,14 @@ impl App {
             .unwrap_or_else(|| "zerostack".into());
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
-            text(title).size(style::LABEL)
+            text(title).size(style::LABEL).width(Fill),
+            icon_button(
+                Icon::Changes,
+                "Changes",
+                self.snapshot
+                    .as_ref()
+                    .map(|_| Message::Review(super::review_view::Event::Toggle))
+            ),
         ]
         .spacing(layout::SM)
         .align_y(Center)
@@ -39,6 +50,19 @@ impl App {
         if self.snapshot.is_some() {
             main = main.push(self.composer());
         }
+        let main: Element<'_, Message> = if self.review.open {
+            if self.size.width >= layout::REVIEW_SPLIT_WIDTH {
+                row![
+                    main,
+                    container(self.review_view()).width(layout::REVIEW_WIDTH)
+                ]
+                .into()
+            } else {
+                self.review_view()
+            }
+        } else {
+            main.into()
+        };
         let layout = if self.sidebar {
             row![self.sidebar_view(), main]
         } else {
