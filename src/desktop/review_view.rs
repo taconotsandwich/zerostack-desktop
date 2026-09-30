@@ -49,9 +49,12 @@ impl App {
             Event::Toggle => {
                 self.review.open = !self.review.open;
                 self.review.generation += 1;
-                if self.review.open {
-                    return self.update_review(Event::Refresh);
-                }
+                let refresh = if self.review.open {
+                    self.update_review(Event::Refresh)
+                } else {
+                    Task::none()
+                };
+                return Task::batch([refresh, self.follow_review_layout()]);
             }
             Event::Refresh => {
                 if self.snapshot.is_none() {
@@ -131,7 +134,7 @@ impl App {
                 let generation = self.review.generation;
                 self.review.loading = true;
                 self.review.error.clear();
-                return Task::perform(
+                let preview = Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || review::file(&path))
                             .await
@@ -139,6 +142,7 @@ impl App {
                     },
                     move |result| Message::Review(Event::Previewed(generation, result)),
                 );
+                return Task::batch([preview, self.follow_review_layout()]);
             }
             Event::Previewed(generation, result) if generation == self.review.generation => {
                 self.review.loading = false;
@@ -302,5 +306,13 @@ impl App {
             .padding([0.0, layout::LG])
             .style(|_| style::surface(style::SIDEBAR, 0.0))
             .into()
+    }
+
+    fn follow_review_layout(&self) -> Task<Message> {
+        if self.follow_output {
+            iced::widget::operation::snap_to_end("conversation")
+        } else {
+            Task::none()
+        }
     }
 }
