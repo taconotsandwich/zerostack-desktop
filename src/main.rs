@@ -36,6 +36,8 @@ use clap::Parser;
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
+    logging::install_panic_hook();
+    logging::init(&cli);
     #[cfg(feature = "desktop")]
     if cli.desktop {
         return desktop::run(cli);
@@ -62,9 +64,6 @@ async fn run(cli: cli::Cli) -> anyhow::Result<()> {
 }
 
 async fn prepare(cli: cli::Cli) -> anyhow::Result<Option<startup::Startup>> {
-    logging::install_panic_hook();
-    logging::init(&cli);
-
     let (mut cfg, is_first_startup) = config::load();
 
     // CLI MCP flags override config; parse errors exit before anything runs.
