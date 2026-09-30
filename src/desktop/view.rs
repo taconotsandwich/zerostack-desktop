@@ -49,6 +49,23 @@ impl App {
             .height(Fill)
             .style(|_| style::surface(style::PAPER, 0.0))
             .into();
+        if let Some(permission) = &self.permission {
+            let sheet = container(self.permission_prompt(permission))
+                .padding(layout::XL)
+                .max_width(layout::PANEL_WIDTH)
+                .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
+            return stack![
+                base,
+                container(sheet)
+                    .center_x(Fill)
+                    .center_y(Fill)
+                    .style(|_| container::Style {
+                        background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
+                        ..Default::default()
+                    })
+            ]
+            .into();
+        }
         if let Some(panel) = &self.panel {
             let sheet = container(self.panel_view(panel))
                 .padding(layout::XL)
@@ -355,9 +372,6 @@ impl App {
             if self.busy || !self.live.blocks.is_empty() {
                 messages = messages.push(self.live_turn());
             }
-            if let Some(permission) = &self.permission {
-                messages = messages.push(self.permission_prompt(permission));
-            }
             if !self.command_output.is_empty() {
                 messages = messages.push(text(&self.command_output).size(style::BODY));
             }
@@ -412,17 +426,45 @@ impl App {
     }
 
     fn permission_prompt(&self, request: &worker::PermissionRequest) -> Element<'_, Message> {
-        let header = text(format!("[permission] {}: {}", request.tool, request.input))
-            .size(style::LABEL)
-            .font(Font::MONOSPACE)
-            .color(style::role_color(BlockStyle::Permission));
+        let approval = super::approval::Approval::new(request);
+        let mut content = column![
+            text(approval.title).size(style::TITLE),
+            container(scrollable(
+                text(approval.input)
+                    .size(style::LABEL)
+                    .font(Font::MONOSPACE)
+            ))
+            .max_height(220),
+        ]
+        .spacing(layout::LG);
+        if self.permission_scope_open {
+            content = content
+                .push(text("Allow matching requests in this conversation:").size(style::CAPTION))
+                .push(
+                    text(format!("{}: {}", request.tool, approval.pattern))
+                        .size(style::LABEL)
+                        .font(Font::MONOSPACE),
+                )
+                .push(components::action(
+                    "Confirm rule",
+                    Some(Message::AllowAlways),
+                ));
+        }
         let options = row![
             components::action("Allow once", Some(Message::AllowOnce)),
-            components::action("Allow always", Some(Message::AllowAlways)),
             components::action("Deny", Some(Message::Deny)),
+            space::horizontal(),
+            components::action(
+                if self.permission_scope_open {
+                    "Hide rule"
+                } else {
+                    "Always allow…"
+                },
+                Some(Message::ShowPermissionScope)
+            ),
         ]
         .spacing(layout::SM);
-        column![header, options].spacing(layout::SM).into()
+        content.push(options).into()
     }
 
     fn live_turn(&self) -> Element<'_, Message> {
