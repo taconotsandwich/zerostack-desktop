@@ -50,19 +50,30 @@ impl App {
         if self.snapshot.is_some() {
             main = main.push(self.composer());
         }
-        let main: Element<'_, Message> = if self.review.open {
-            if self.size.width >= layout::REVIEW_SPLIT_WIDTH {
-                row![
-                    main,
-                    container(self.review_view()).width(layout::REVIEW_WIDTH)
-                ]
-                .into()
-            } else {
-                self.review_view()
-            }
+        let narrow_review = self.review.open && self.size.width < layout::REVIEW_SPLIT_WIDTH;
+        let review: Element<'_, Message> = if self.review.open {
+            self.review_view()
         } else {
-            main.into()
+            space::horizontal().into()
         };
+        let main = row![
+            container(main)
+                .width(if narrow_review {
+                    iced::Length::Fixed(0.0)
+                } else {
+                    Fill
+                })
+                .clip(true),
+            container(review)
+                .width(if !self.review.open {
+                    iced::Length::Fixed(0.0)
+                } else if narrow_review {
+                    Fill
+                } else {
+                    iced::Length::Fixed(layout::REVIEW_WIDTH)
+                })
+                .clip(true),
+        ];
         let layout = if self.sidebar {
             row![self.sidebar_view(), main]
         } else {
@@ -303,6 +314,57 @@ impl App {
                 .iter()
                 .rposition(|message| message.role == MessageRole::Assistant);
             for (index, message) in snapshot.session.messages.iter().enumerate() {
+                if let Some(group) = super::history::tool_group(&snapshot.session.messages, index) {
+                    if group.is_empty() {
+                        continue;
+                    }
+                    let count = super::history::tool_count(group);
+                    let mut details = column![
+                        button(
+                            text(format!(
+                                "Used {count} tool{}",
+                                if count == 1 { "" } else { "s" }
+                            ))
+                            .size(style::CAPTION)
+                        )
+                        .padding(0)
+                        .style(style::flat)
+                        .on_press(Message::ToggleTool(index))
+                    ]
+                    .spacing(layout::SM);
+                    if self.expanded.contains(&index) {
+                        for record in group {
+                            let content = match &record.tool {
+                                Some(
+                                    ToolRecord::Call { name, args, .. }
+                                    | ToolRecord::SubagentCall { name, args, .. },
+                                ) => {
+                                    format!(
+                                        "{name}\n{}",
+                                        serde_json::to_string_pretty(args).unwrap_or_default()
+                                    )
+                                }
+                                _ => record.content.to_string(),
+                            };
+                            details = details
+                                .push(text(content).size(style::CAPTION).font(Font::MONOSPACE));
+                            if let Some(ToolRecord::Result {
+                                full_output_path: Some(path),
+                                ..
+                            }) = &record.tool
+                            {
+                                details = details.push(components::action(
+                                    "Open full output",
+                                    Some(Message::Review(super::review_view::Event::Open(
+                                        path.as_str().into(),
+                                    ))),
+                                ));
+                            }
+                        }
+                    }
+                    messages = messages.push(details);
+                    continue;
+                }
                 match message.role {
                     MessageRole::User => {
                         let bubble = container(
@@ -621,7 +683,10 @@ impl App {
         });
         let context = row![
             components::action(
-                format!("Context · {files} files"),
+                format!(
+                    "Context · {files} file{}",
+                    if files == 1 { "" } else { "s" }
+                ),
                 Some(Message::Show(Panel::Context))
             )
             .padding(0),
