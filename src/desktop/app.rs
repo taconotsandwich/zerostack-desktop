@@ -6,11 +6,11 @@ use iced::{Point, Size, Subscription, Task, keyboard, window};
 use tokio::sync::mpsc;
 
 use super::commands::{self, Command};
+use super::live::LiveTurn;
 use super::style;
 use super::worker::{self, Operation, Snapshot, UiEvent, UiSender, Worker};
 use crate::cli::Cli;
 use crate::engine::RunKind;
-use crate::event::AgentEvent;
 use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
@@ -51,23 +51,8 @@ pub(super) struct App {
     /// Markdown of the document shown by [`Panel::Document`].
     pub document: Option<(String, markdown::Content)>,
     notices_shown: bool,
-}
-
-/// Agent activity streamed while a turn runs, rendered until the authoritative
-/// snapshot replaces it.
-#[derive(Default)]
-pub(super) struct LiveTurn {
-    pub response: String,
-    pub reasoning: String,
-    pub tools: Vec<ToolActivity>,
-    pub notice: String,
-}
-
-/// One tool call in the live view.
-pub(super) struct ToolActivity {
-    pub call_id: String,
-    pub summary: String,
-    pub done: bool,
+    pub follow_output: bool,
+    turn_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -119,7 +104,12 @@ pub(super) enum Message {
     Quit,
     RetryStartup,
     Project(String),
-    Engine(UiEvent),
+    Engine(u64, UiEvent),
+    Completed(u64, worker::Reply),
+    Scrolled(bool),
+    Latest,
+    ToggleLive(usize),
+    ToggleReasoningDetails,
     AllowOnce,
     AllowAlways,
     Deny,
@@ -179,6 +169,8 @@ impl App {
                 events: None,
                 document: None,
                 notices_shown: false,
+                follow_output: true,
+                turn_id: 0,
             },
             task,
         )
@@ -197,6 +189,14 @@ impl App {
         self.status = "Working…".into();
         self.menu = None;
         self.live = LiveTurn::default();
+        self.turn_id += 1;
+        let turn_id = self.turn_id;
+        if matches!(operation, Operation::Prompt(_)) {
+            self.follow_output = true;
+            if submitted_is_unchanged(self.submitted.as_deref(), &self.content.text()) {
+                self.content = text_editor::Content::new();
+            }
+        }
         self.pending = Some(operation.clone());
         // The engine streams agent events and permission asks for this
         // operation through `events`; the stream task ends when both this
@@ -206,14 +206,21 @@ impl App {
         Task::batch([
             Task::stream(futures::stream::unfold(
                 receiver,
-                |mut receiver| async move {
+                move |mut receiver| async move {
                     receiver
                         .recv()
                         .await
-                        .map(|event| (Message::Engine(event), receiver))
+                        .map(|event| (Message::Engine(turn_id, event), receiver))
                 },
             )),
-            Task::perform(worker.request(operation, Some(events)), Message::Ready),
+            Task::perform(worker.request(operation, Some(events)), move |reply| {
+                Message::Completed(turn_id, reply)
+            }),
+            if self.follow_output {
+                operation::snap_to_end("conversation")
+            } else {
+                Task::none()
+            },
         ])
     }
 
@@ -229,64 +236,6 @@ impl App {
             }
         }
         Task::none()
-    }
-
-    fn handle_agent_event(&mut self, event: AgentEvent) {
-        match event {
-            AgentEvent::Token(text) => {
-                self.live
-                    .response
-                    .push_str(crate::ui::events::sanitize_output(&text).as_str());
-            }
-            AgentEvent::Reasoning(text) => {
-                let show = self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.show_reasoning);
-                if show {
-                    self.live.reasoning.push_str(&text);
-                }
-            }
-            AgentEvent::ToolCall {
-                call_id,
-                name,
-                args,
-                ..
-            } => {
-                self.live.response.clear();
-                self.live.tools.push(ToolActivity {
-                    call_id: call_id.to_string(),
-                    summary: crate::ui::utils::format_tool_call_summary(&name, &args),
-                    done: false,
-                });
-            }
-            #[cfg(any(feature = "subagents", feature = "acp"))]
-            AgentEvent::SubagentToolCall { name, args } => {
-                self.live.tools.push(ToolActivity {
-                    call_id: String::new(),
-                    summary: crate::ui::utils::format_tool_call_summary(&name, &args),
-                    done: false,
-                });
-            }
-            AgentEvent::ToolResult { call_id, .. } => {
-                if let Some(tool) = self
-                    .live
-                    .tools
-                    .iter_mut()
-                    .rev()
-                    .find(|tool| tool.call_id == call_id.as_str())
-                {
-                    tool.done = true;
-                }
-            }
-            AgentEvent::Retrying { attempt, max } => {
-                self.live.notice = format!("retrying… ({attempt}/{max})");
-            }
-            AgentEvent::Error(error) => {
-                self.live.notice = format!("error: {error}");
-            }
-            AgentEvent::CompletionCall { .. } | AgentEvent::Done { .. } => {}
-        }
     }
 
     pub fn choose(&mut self, command: Command) -> Task<Message> {
@@ -323,11 +272,13 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Completed(id, reply) if id == self.turn_id => {
+                return self.update(Message::Ready(reply));
+            }
             Message::Ready(result) => {
                 self.busy = false;
                 self.status.clear();
                 self.events = None;
-                self.live = LiveTurn::default();
                 self.permission = None;
                 let pending = self.pending.take();
                 let mut scroll = false;
@@ -336,8 +287,14 @@ impl App {
                     Err(error) => {
                         self.error = error;
                         self.after_load = None;
+                        if let Some(Operation::Prompt(prompt)) = &pending
+                            && self.content.text().is_empty()
+                        {
+                            self.content = text_editor::Content::with_text(prompt);
+                        }
                     }
                     Ok(snapshot) => {
+                        self.live = LiveTurn::default();
                         if let Some(Operation::Delete(id)) = &pending {
                             self.deleted.insert(id.clone());
                             self.panel = None;
@@ -361,6 +318,7 @@ impl App {
                             .as_ref()
                             .is_none_or(|old| old.session.id != snapshot.session.id);
                         if changed_session {
+                            self.follow_output = true;
                             scroll = true;
                             self.content = text_editor::Content::with_text(
                                 self.drafts
@@ -387,7 +345,8 @@ impl App {
                                 < snapshot.session.messages.len();
                             scroll |= new_messages;
                             if pending.as_ref().is_some_and(Operation::is_textual) {
-                                if (new_messages || output.kind == RunKind::Command)
+                                if !matches!(pending, Some(Operation::Prompt(_)))
+                                    && (new_messages || output.kind == RunKind::Command)
                                     && submitted_is_unchanged(
                                         self.submitted.as_deref(),
                                         &self.content.text(),
@@ -486,7 +445,7 @@ impl App {
                 if let Some(path) = open_path {
                     return open_path_task(path);
                 }
-                return if scroll {
+                return if scroll && self.follow_output {
                     operation::snap_to_end("conversation")
                 } else {
                     Task::none()
@@ -531,11 +490,25 @@ impl App {
                 return self.dispatch(super::operations::composer_operation(&input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
-            Message::Engine(UiEvent::Agent(event)) => self.handle_agent_event(event),
-            Message::Engine(UiEvent::Permission(request)) => {
-                self.permission = Some(request);
+            Message::Engine(id, UiEvent::Agent(event)) if self.busy && id == self.turn_id => {
+                let show = self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.show_reasoning);
+                self.live.push(event, show);
+                if self.follow_output {
+                    return operation::snap_to_end("conversation");
+                }
             }
-            Message::Engine(UiEvent::OpenUrl(url)) => {
+            Message::Engine(id, UiEvent::Permission(request))
+                if self.busy && id == self.turn_id =>
+            {
+                self.permission = Some(request);
+                if self.follow_output {
+                    return operation::snap_to_end("conversation");
+                }
+            }
+            Message::Engine(id, UiEvent::OpenUrl(url)) if self.busy && id == self.turn_id => {
                 return Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -555,6 +528,17 @@ impl App {
                 }
             }
             Message::Deny => return self.answer_permission(UserDecision::Deny),
+            Message::Scrolled(at_bottom) => self.follow_output = at_bottom,
+            Message::Latest => {
+                self.follow_output = true;
+                return operation::snap_to_end("conversation");
+            }
+            Message::ToggleLive(index) => {
+                if !self.live.expanded.remove(&index) {
+                    self.live.expanded.insert(index);
+                }
+            }
+            Message::ToggleReasoningDetails => self.live.reasoning_open = !self.live.reasoning_open,
             Message::Select(id) if !self.busy => {
                 self.menu = None;
                 self.panel = None;

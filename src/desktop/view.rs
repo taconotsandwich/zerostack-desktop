@@ -8,6 +8,7 @@ use super::app::{App, Message, Panel};
 use super::commands;
 use super::components::{self, icon_button};
 use super::layout::{self, Layout};
+use super::live::Block;
 use super::style::{self, Icon};
 use super::worker;
 use crate::session::{MessageRole, Session, ToolRecord};
@@ -229,7 +230,11 @@ impl App {
     fn conversation(&self) -> Element<'_, Message> {
         let mut messages = column![].spacing(layout::XL).width(Fill);
         if let Some(snapshot) = &self.snapshot {
-            if snapshot.session.messages.is_empty() && self.command_output.is_empty() {
+            if snapshot.session.messages.is_empty()
+                && self.command_output.is_empty()
+                && !matches!(self.pending, Some(worker::Operation::Prompt(_)))
+                && self.live.blocks.is_empty()
+            {
                 messages = messages.push(
                     container(
                         text("What would you like to work on?")
@@ -335,11 +340,23 @@ impl App {
                     }
                 }
             }
+            if let Some(worker::Operation::Prompt(prompt)) = &self.pending {
+                messages = messages.push(
+                    container(
+                        container(text(prompt).size(style::BODY))
+                            .padding([layout::MD, layout::LG])
+                            .max_width(layout::MESSAGE_WIDTH)
+                            .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS)),
+                    )
+                    .width(Fill)
+                    .align_x(Right),
+                );
+            }
+            if self.busy || !self.live.blocks.is_empty() {
+                messages = messages.push(self.live_turn());
+            }
             if let Some(permission) = &self.permission {
                 messages = messages.push(self.permission_prompt(permission));
-            }
-            if self.busy {
-                messages = messages.push(self.live_turn());
             }
             if !self.command_output.is_empty() {
                 messages = messages.push(text(&self.command_output).size(style::BODY));
@@ -377,11 +394,21 @@ impl App {
                 Some(Message::RetryStartup),
             ));
         }
-        scrollable(components::rail(messages, self.layout()))
+        let transcript = scrollable(components::rail(messages, self.layout()))
             .id("conversation")
+            .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset_reversed().y < 48.0))
             .height(Fill)
-            .width(Fill)
+            .width(Fill);
+        if self.follow_output {
+            transcript.into()
+        } else {
+            column![
+                transcript,
+                container(components::action("Latest", Some(Message::Latest))).center_x(Fill),
+            ]
+            .height(Fill)
             .into()
+        }
     }
 
     fn permission_prompt(&self, request: &worker::PermissionRequest) -> Element<'_, Message> {
@@ -398,19 +425,54 @@ impl App {
         column![header, options].spacing(layout::SM).into()
     }
 
-    /// Streamed view of the in-flight turn: tool activity, notices, then the
-    /// partial response. Replaced by the authoritative snapshot when the
-    /// operation completes.
     fn live_turn(&self) -> Element<'_, Message> {
         let mut entries: Vec<Element<'_, Message>> = Vec::new();
-        for tool in &self.live.tools {
-            let state = if tool.done { "done" } else { "running" };
-            entries.push(
-                text(format!("[{state}] {}", tool.summary))
-                    .size(style::CAPTION)
-                    .color(style::role_color(BlockStyle::Tool))
+        for (index, block) in self.live.blocks.iter().enumerate() {
+            match block {
+                Block::Response {
+                    markdown: content, ..
+                } => entries.push(
+                    markdown::view(
+                        content.items(),
+                        markdown::Settings::with_text_size(style::BODY, style::theme()),
+                    )
+                    .map(Message::Link)
                     .into(),
-            );
+                ),
+                Block::Tools(tools) => {
+                    let running = tools.iter().any(|tool| tool.output.is_none());
+                    let label = format!(
+                        "{} {} tool{}",
+                        if running { "Using" } else { "Used" },
+                        tools.len(),
+                        if tools.len() == 1 { "" } else { "s" },
+                    );
+                    let mut group = column![
+                        button(text(label).size(style::CAPTION))
+                            .padding(0)
+                            .style(style::flat)
+                            .on_press(Message::ToggleLive(index))
+                    ]
+                    .spacing(layout::SM);
+                    if self.live.expanded.contains(&index) {
+                        for tool in tools {
+                            group = group.push(text(&tool.summary).size(style::CAPTION));
+                            if let Some(output) = &tool.output {
+                                group = group.push(
+                                    container(
+                                        scrollable(
+                                            text(output).size(style::CAPTION).font(Font::MONOSPACE),
+                                        )
+                                        .height(iced::Length::Shrink),
+                                    )
+                                    .max_height(240),
+                                );
+                            }
+                        }
+                    }
+                    entries.push(group.into());
+                }
+            }
         }
         if !self.live.notice.is_empty() {
             entries.push(
@@ -422,15 +484,22 @@ impl App {
         }
         if !self.live.reasoning.is_empty() {
             entries.push(
-                text(&self.live.reasoning)
-                    .size(style::CAPTION)
-                    .color(style::role_color(BlockStyle::Reasoning))
+                button(text("Reasoning").size(style::CAPTION))
+                    .padding(0)
+                    .style(style::flat)
+                    .on_press(Message::ToggleReasoningDetails)
                     .into(),
             );
+            if self.live.reasoning_open {
+                entries.push(
+                    text(&self.live.reasoning)
+                        .size(style::CAPTION)
+                        .color(style::role_color(BlockStyle::Reasoning))
+                        .into(),
+                );
+            }
         }
-        if !self.live.response.is_empty() {
-            entries.push(text(&self.live.response).size(style::BODY).into());
-        } else if entries.is_empty() {
+        if entries.is_empty() && self.busy {
             entries.push(
                 text(&self.status)
                     .size(style::LABEL)
@@ -438,7 +507,7 @@ impl App {
                     .into(),
             );
         }
-        column(entries).spacing(layout::SM).into()
+        column(entries).spacing(layout::LG).into()
     }
 
     fn usage(&self) -> Element<'_, Message> {
