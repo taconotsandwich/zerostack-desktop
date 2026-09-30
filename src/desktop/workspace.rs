@@ -43,6 +43,7 @@ impl App {
         self.project = path.display().to_string();
         self.panel = None;
         self.snapshot = None;
+        self.review.clear();
         self.markdown.clear();
         self.content = iced::widget::text_editor::Content::new();
         self.command_output.clear();
