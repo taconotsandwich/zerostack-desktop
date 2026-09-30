@@ -7,6 +7,8 @@ mod live;
 mod operations;
 mod panels;
 mod preferences;
+mod review;
+mod review_view;
 mod style;
 mod view;
 mod worker;

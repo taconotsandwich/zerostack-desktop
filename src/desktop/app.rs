@@ -33,6 +33,7 @@ pub(super) struct App {
     pub expanded: HashSet<usize>,
     pub preferences: super::preferences::Preferences,
     pub picking: bool,
+    pub review: super::review_view::Review,
     draft_revision: u64,
     dropped_files: Vec<PathBuf>,
     pub deleted: HashSet<String>,
@@ -117,6 +118,7 @@ pub(super) enum Message {
     OpenProject(PathBuf),
     Started(Worker, worker::Reply),
     SaveDraft(u64),
+    Review(super::review_view::Event),
     Engine(u64, UiEvent),
     Completed(u64, worker::Reply),
     Scrolled(bool),
@@ -169,6 +171,7 @@ impl App {
                 expanded: HashSet::new(),
                 preferences,
                 picking: false,
+                review: super::review_view::Review::default(),
                 draft_revision: 0,
                 dropped_files: Vec::new(),
                 deleted: HashSet::new(),
@@ -445,6 +448,7 @@ impl App {
                             self.panel = Some(Panel::Document);
                         }
                         open_path = snapshot.open_path.clone();
+                        self.project = snapshot.session.working_dir.to_string();
                         self.snapshot = Some(snapshot);
                         if changed_session {
                             self.preferences
@@ -482,11 +486,17 @@ impl App {
                 if let Some(path) = open_path {
                     return open_path_task(path);
                 }
-                return if scroll && self.follow_output {
+                let scrolling = if scroll && self.follow_output {
                     operation::snap_to_end("conversation")
                 } else {
                     Task::none()
                 };
+                let review = if self.review.open {
+                    self.update_review(super::review_view::Event::Refresh)
+                } else {
+                    Task::none()
+                };
+                return Task::batch([scrolling, review]);
             }
             Message::Edit(action) => {
                 self.content.perform(action);
@@ -719,6 +729,16 @@ impl App {
                 return self.dispatch(Operation::SelectPrompt { prompt });
             }
             Message::Link(uri) => {
+                match super::review::local_link(std::path::Path::new(&self.project), &uri) {
+                    Ok(Some(path)) => {
+                        return self.update_review(super::review_view::Event::Open(path));
+                    }
+                    Err(error) => {
+                        self.error = error;
+                        return Task::none();
+                    }
+                    Ok(None) => {}
+                }
                 return Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -732,6 +752,7 @@ impl App {
                 );
             }
             Message::LinkOpened(Err(error)) => self.error = error,
+            Message::Review(event) => return self.update_review(event),
             Message::Cursor(point) => self.cursor = point,
             Message::Resize(size) => self.size = size,
             Message::Escape => {
@@ -910,7 +931,7 @@ fn open_path_task(path: String) -> Task<Message> {
     Task::perform(
         async move {
             tokio::task::spawn_blocking(move || {
-                crate::ui::renderer::open_url(&path).map_err(|error| error.to_string())
+                super::review::open_file(std::path::Path::new(&path))
             })
             .await
             .unwrap_or_else(|error| Err(error.to_string()))
