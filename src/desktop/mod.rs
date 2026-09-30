@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod components;
 mod layout;
+mod live;
 mod operations;
 mod panels;
 mod style;
