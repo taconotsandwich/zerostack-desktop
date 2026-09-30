@@ -247,6 +247,9 @@ pub(super) enum Icon {
     Revert,
     More,
     Import,
+    Folder,
+    Attachment,
+    Close,
 }
 
 pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
@@ -259,6 +262,9 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         Icon::Revert => include_bytes!("icons/arrow-uturn-left.svg"),
         Icon::More => include_bytes!("icons/ellipsis-horizontal.svg"),
         Icon::Import => include_bytes!("icons/arrow-down-tray.svg"),
+        Icon::Folder => include_bytes!("icons/folder-open.svg"),
+        Icon::Attachment => include_bytes!("icons/paper-clip.svg"),
+        Icon::Close => include_bytes!("icons/x-mark.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
         .width(ICON_SIZE)

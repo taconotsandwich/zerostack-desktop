@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-desktop = ["dep:iced"]
+desktop = ["dep:iced", "dep:rfd", "multimodal"]
 default = ['loop', 'git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'multithread', 'export']
 status-signals = []
 loop = []
@@ -38,6 +38,7 @@ rtk = []
 
 [dependencies]
 iced = { version = "0.14", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "tokio", "svg", "markdown", "advanced", "x11", "wayland"] }
+rfd = { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 rig = { version = "0.40", features = ["rmcp"] }
 rmcp = { version = "3.1", optional = true, default-features = false, features = [
     "client",
