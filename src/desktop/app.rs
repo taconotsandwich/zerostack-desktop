@@ -1,4 +1,5 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::widget::{markdown, operation, text_editor};
@@ -30,7 +31,10 @@ pub(super) struct App {
     pub panel: Option<Panel>,
     pub fields: Vec<String>,
     pub expanded: HashSet<usize>,
-    pub drafts: HashMap<String, String>,
+    pub preferences: super::preferences::Preferences,
+    pub picking: bool,
+    draft_revision: u64,
+    dropped_files: Vec<PathBuf>,
     pub deleted: HashSet<String>,
     pub cursor: Point,
     pub size: Size,
@@ -64,6 +68,7 @@ pub(super) enum Panel {
     Delete { id: String, title: String },
     Rewind,
     Document,
+    Projects,
 }
 
 #[derive(Debug, Clone)]
@@ -103,8 +108,15 @@ pub(super) enum Message {
     RenameSelected,
     Close(window::Id),
     Quit,
-    RetryStartup,
-    Project(String),
+    PickProject,
+    PickFiles,
+    ProjectPicked(Option<PathBuf>),
+    FilesPicked(Vec<PathBuf>),
+    FileDropped(PathBuf),
+    AttachDroppedFiles,
+    OpenProject(PathBuf),
+    Started(Worker, worker::Reply),
+    SaveDraft(u64),
     Engine(u64, UiEvent),
     Completed(u64, worker::Reply),
     Scrolled(bool),
@@ -119,6 +131,7 @@ pub(super) enum Message {
 
 impl App {
     pub fn new(cli: Cli) -> (Self, Task<Message>) {
+        let preferences = super::preferences::Preferences::load();
         let pick_project = std::env::var_os("ZS_DESKTOP_PICK_PROJECT").is_some();
         let (worker, task) = if pick_project {
             (None, Task::none())
@@ -154,7 +167,10 @@ impl App {
                 panel: None,
                 fields: Vec::new(),
                 expanded: HashSet::new(),
-                drafts: HashMap::new(),
+                preferences,
+                picking: false,
+                draft_revision: 0,
+                dropped_files: Vec::new(),
                 deleted: HashSet::new(),
                 cursor: Point::ORIGIN,
                 size: Size::new(1040.0, 760.0),
@@ -198,6 +214,7 @@ impl App {
             self.follow_output = true;
             if submitted_is_unchanged(self.submitted.as_deref(), &self.content.text()) {
                 self.content = text_editor::Content::new();
+                self.remember_draft();
             }
         }
         self.pending = Some(operation.clone());
@@ -302,7 +319,7 @@ impl App {
                         if let Some(Operation::Delete(id)) = &pending {
                             self.deleted.insert(id.clone());
                             self.panel = None;
-                            self.drafts.remove(id);
+                            self.preferences.drafts.remove(id);
                             if snapshot.session.id.as_str() == id {
                                 if let Some(next) = snapshot.sessions.first() {
                                     return self.dispatch(Operation::Load(next.id.to_string()));
@@ -325,7 +342,8 @@ impl App {
                             self.follow_output = true;
                             scroll = true;
                             self.content = text_editor::Content::with_text(
-                                self.drafts
+                                self.preferences
+                                    .drafts
                                     .get(snapshot.session.id.as_str())
                                     .map(String::as_str)
                                     .unwrap_or(""),
@@ -341,6 +359,14 @@ impl App {
                                     .filter_map(|line| line.strip_prefix("error: "))
                                     .collect::<Vec<_>>()
                                     .join("\n");
+                            }
+                            if let Some(Operation::Prompt(prompt)) = &pending
+                                && let Some(error) = prompt_error(prompt, &output.text)
+                            {
+                                self.error = error.to_string();
+                                if self.content.text().is_empty() {
+                                    self.content = text_editor::Content::with_text(prompt);
+                                }
                             }
                             let new_messages = self
                                 .snapshot
@@ -420,6 +446,13 @@ impl App {
                         }
                         open_path = snapshot.open_path.clone();
                         self.snapshot = Some(snapshot);
+                        if changed_session {
+                            self.preferences
+                                .remember_project(PathBuf::from(&self.project));
+                            if let Err(error) = self.preferences.save() {
+                                self.error = error;
+                            }
+                        }
                         // Re-arm the global semantic role colors the TUI also
                         // uses, so themed text matches across both front ends.
                         match self
@@ -459,8 +492,20 @@ impl App {
                 self.content.perform(action);
                 self.slash_selection = 0;
                 self.slash_dismissed = false;
+                self.draft_revision += 1;
+                let revision = self.draft_revision;
+                return Task::perform(
+                    async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        revision
+                    },
+                    Message::SaveDraft,
+                );
             }
-            Message::Send if !self.busy => {
+            Message::SaveDraft(revision) if revision == self.draft_revision => {
+                self.remember_draft()
+            }
+            Message::Send if !self.busy && !self.picking => {
                 let matches = self.slash_commands();
                 if let Some(command) = matches.get(self.slash_selection).copied() {
                     return self.choose(command);
@@ -556,8 +601,7 @@ impl App {
                     if snapshot.session.id.as_str() == id {
                         return Task::none();
                     }
-                    self.drafts
-                        .insert(snapshot.session.id.to_string(), self.content.text());
+                    self.remember_draft();
                 }
                 return self.dispatch(Operation::Load(id));
             }
@@ -721,6 +765,7 @@ impl App {
                 }
             }
             Message::Close(id) => {
+                self.remember_draft();
                 if self.busy {
                     self.closing = Some(id);
                     self.status = "Waiting for the current operation before closing…".into();
@@ -729,15 +774,75 @@ impl App {
                 }
             }
             Message::Quit => return window::latest().and_then(|id| Task::done(Message::Close(id))),
-            Message::RetryStartup if !self.busy => {
-                let (worker, ready) = Worker::start(self.cli.clone(), Some(self.project.clone()));
+            Message::OpenProject(path) if !self.busy => return self.open_project(path),
+            Message::Started(worker, reply) => {
                 self.worker = Some(worker);
-                self.busy = true;
-                self.error.clear();
-                self.status = "Loading…".into();
-                return Task::perform(worker::receive(ready), Message::Ready);
+                return self.update(Message::Ready(reply));
             }
-            Message::Project(project) => self.project = project,
+            Message::PickProject if !self.busy && !self.picking => {
+                self.picking = true;
+                let directory = self.project.clone();
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_directory(directory)
+                            .set_title("Open project")
+                            .pick_folder()
+                            .await
+                            .map(|folder| folder.path().to_path_buf())
+                    },
+                    Message::ProjectPicked,
+                );
+            }
+            Message::ProjectPicked(path) => {
+                self.picking = false;
+                if let Some(path) = path {
+                    return self.open_project(path);
+                }
+            }
+            Message::PickFiles if !self.busy && !self.picking && self.snapshot.is_some() => {
+                self.picking = true;
+                let directory = self.project.clone();
+                return Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_directory(directory)
+                            .set_title("Attach files")
+                            .pick_files()
+                            .await
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|file| file.path().to_path_buf())
+                            .collect()
+                    },
+                    Message::FilesPicked,
+                );
+            }
+            Message::FilesPicked(paths) => {
+                self.picking = false;
+                if !paths.is_empty() && self.snapshot.is_some() {
+                    if self.busy {
+                        self.error = "Attach files after the current turn finishes.".into();
+                    } else {
+                        return self.dispatch(Operation::AddContextFiles(paths));
+                    }
+                }
+            }
+            Message::FileDropped(path) => {
+                self.dropped_files.push(path);
+                if self.dropped_files.len() == 1 {
+                    return Task::perform(
+                        async {
+                            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        },
+                        |_| Message::AttachDroppedFiles,
+                    );
+                }
+            }
+            Message::AttachDroppedFiles => {
+                let paths = std::mem::take(&mut self.dropped_files);
+                return self.update(Message::FilesPicked(paths));
+            }
             _ => {}
         }
         Task::none()
@@ -773,6 +878,9 @@ impl App {
                     Some(Message::Cursor(position))
                 }
                 iced::Event::Window(window::Event::Resized(size)) => Some(Message::Resize(size)),
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path))
+                }
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     match key.as_ref() {
                         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
@@ -837,9 +945,35 @@ fn command_text(input: &str, output: &str) -> String {
         .to_string()
 }
 
+fn prompt_error<'a>(prompt: &str, output: &'a str) -> Option<&'a str> {
+    let echo = prompt
+        .trim()
+        .lines()
+        .map(|line| format!("> {line}\n"))
+        .collect::<String>();
+    output
+        .strip_prefix(&echo)?
+        .trim_start()
+        .strip_prefix("error: ")
+        .map(str::trim)
+}
+
 #[cfg(test)]
 mod tests {
     use super::submitted_is_unchanged;
+
+    #[test]
+    fn failed_prompts_are_recognized_without_treating_response_text_as_an_error() {
+        assert_eq!(
+            super::prompt_error("hello", "> hello\nerror: unavailable\n"),
+            Some("unavailable")
+        );
+        assert_eq!(
+            super::prompt_error("hello", "error: an example from your log"),
+            None
+        );
+        assert_eq!(super::prompt_error("hello", "A normal answer"), None);
+    }
 
     #[test]
     fn command_echo_is_not_presented_as_content() {

@@ -147,7 +147,9 @@ impl App {
                 list = list.push(self.session_row(&snapshot.session));
             }
             for session in &snapshot.sessions {
-                if !self.deleted.contains(session.id.as_str()) {
+                if !self.deleted.contains(session.id.as_str())
+                    && session.working_dir == snapshot.session.working_dir
+                {
                     list = list.push(self.session_row(session));
                 }
             }
@@ -171,6 +173,11 @@ impl App {
             container(text(directory).size(style::CAPTION).color(style::MUTED))
                 .width(Fill)
                 .padding([0.0, layout::MD]),
+            icon_button(
+                Icon::Folder,
+                "Open project",
+                (!self.busy).then_some(Message::Show(Panel::Projects))
+            ),
             icon_button(
                 Icon::Settings,
                 "Settings",
@@ -389,24 +396,7 @@ impl App {
             if !self.error.is_empty() {
                 messages = messages.push(text(&self.error).size(style::LABEL));
             }
-            messages = messages.push(
-                text("Use the existing zerostack configuration and provider credentials.")
-                    .size(style::LABEL)
-                    .color(style::MUTED),
-            );
-            messages = messages.push(
-                components::field("Project directory", &self.project)
-                    .on_input(Message::Project)
-                    .on_submit(Message::RetryStartup),
-            );
-            messages = messages.push(components::action(
-                if self.error.is_empty() {
-                    "Open"
-                } else {
-                    "Retry"
-                },
-                Some(Message::RetryStartup),
-            ));
+            messages = messages.push(self.project_picker());
         }
         let transcript = scrollable(components::rail(messages, self.layout()))
             .id("conversation")
@@ -602,10 +592,9 @@ impl App {
         } else {
             tooltip(usage_button, self.usage(), tooltip::Position::Top).into()
         };
-        let files = self
-            .snapshot
-            .as_ref()
-            .map_or(0, |snapshot| snapshot.files.len());
+        let files = self.snapshot.as_ref().map_or(0, |snapshot| {
+            snapshot.files.len() + snapshot.session.pending_media.len()
+        });
         let context = row![
             components::action(
                 format!("Context · {files} files"),
@@ -637,7 +626,13 @@ impl App {
                 }
                 _ => text_editor::Binding::from_key_press(press),
             });
-        let mut tools = row![].spacing(layout::MD).align_y(Center);
+        let mut tools = row![icon_button(
+            Icon::Attachment,
+            "Attach files",
+            (!self.busy && !self.picking).then_some(Message::PickFiles)
+        )]
+        .spacing(layout::SM)
+        .align_y(Center);
         if let Some(snapshot) = &self.snapshot {
             tools = tools.push(components::choice(
                 snapshot.prompts.clone(),
@@ -665,13 +660,19 @@ impl App {
         tools = tools.push(icon_button(
             Icon::Send,
             "Send",
-            (!self.busy && self.snapshot.is_some() && !self.content.text().trim().is_empty())
-                .then_some(Message::Send),
+            (!self.busy
+                && !self.picking
+                && self.snapshot.is_some()
+                && !self.content.text().trim().is_empty())
+            .then_some(Message::Send),
         ));
         let composer = container(column![editor, tools].spacing(layout::SM))
             .padding(layout::LG)
             .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
         let mut area = column![].spacing(layout::SM);
+        if files > 0 {
+            area = area.push(self.attachments());
+        }
         let matches = self.slash_commands();
         if !matches.is_empty() {
             let picker_height =
