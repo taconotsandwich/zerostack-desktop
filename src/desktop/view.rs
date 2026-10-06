@@ -74,12 +74,14 @@ impl App {
                 })
                 .clip(true),
         ];
-        let layout = if self.sidebar {
-            row![self.sidebar_view(), main]
+        // Every branch keeps the same widget shape around the transcript:
+        // a different shape rebuilds its state and resets the scroll offset.
+        let sidebar: Element<'_, Message> = if self.sidebar {
+            self.sidebar_view()
         } else {
-            row![main]
+            space().into()
         };
-        let base: Element<'_, Message> = container(layout)
+        let base: Element<'_, Message> = container(row![sidebar, main])
             .width(Fill)
             .height(Fill)
             .style(|_| style::surface(style::PAPER, 0.0))
@@ -89,34 +91,14 @@ impl App {
                 .padding(layout::XL)
                 .max_width(layout::PANEL_WIDTH)
                 .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
-            return stack![
-                base,
-                container(sheet)
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    .style(|_| container::Style {
-                        background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
-                        ..Default::default()
-                    })
-            ]
-            .into();
+            return stack![base, scrim(sheet)].into();
         }
         if let Some(panel) = &self.panel {
             let sheet = container(self.panel_view(panel))
                 .padding(layout::XL)
                 .max_width(layout::PANEL_WIDTH)
                 .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
-            return stack![
-                base,
-                container(sheet)
-                    .center_x(Fill)
-                    .center_y(Fill)
-                    .style(|_| container::Style {
-                        background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
-                        ..Default::default()
-                    })
-            ]
-            .into();
+            return stack![base, scrim(sheet)].into();
         }
         if let Some((id, position)) = &self.menu {
             let mut menu = column![];
@@ -153,7 +135,7 @@ impl App {
             .on_press(Message::ClosePanel);
             return stack![base, overlay].into();
         }
-        base
+        stack![base, space()].into()
     }
 
     fn sidebar_view(&self) -> Element<'_, Message> {
@@ -464,16 +446,22 @@ impl App {
             .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset_reversed().y < 48.0))
             .height(Fill)
             .width(Fill);
-        if self.follow_output {
-            transcript.into()
+        // The pill floats over a fixed stack so the scrollable keeps its tree
+        // position: swapping the root widget would rebuild it and reset the
+        // scroll offset to the top.
+        let latest: Element<'_, Message> = if self.follow_output {
+            space().into()
         } else {
-            column![
-                transcript,
-                container(components::action("Latest", Some(Message::Latest))).center_x(Fill),
-            ]
-            .height(Fill)
+            container(
+                container(components::action("Latest", Some(Message::Latest)))
+                    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
+            )
+            .center_x(Fill)
+            .align_bottom(Fill)
+            .padding(layout::SM)
             .into()
-        }
+        };
+        stack![transcript, latest].into()
     }
 
     fn permission_prompt(&self, request: &worker::PermissionRequest) -> Element<'_, Message> {
@@ -768,4 +756,15 @@ impl App {
         area = area.push(composer);
         components::rail(area, self.layout())
     }
+}
+
+fn scrim<'a>(sheet: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(sheet)
+        .center_x(Fill)
+        .center_y(Fill)
+        .style(|_| container::Style {
+            background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
+            ..Default::default()
+        })
+        .into()
 }
