@@ -1,5 +1,5 @@
 use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor, text_input};
-use iced::{Border, Color, Theme};
+use iced::{Border, Color, Shadow, Theme, Vector};
 
 // Typography roles are shared by labels, fields, buttons, and message bodies.
 pub(super) const CAPTION: f32 = 12.0;
@@ -18,6 +18,7 @@ pub(super) const PAPER: Color = Color::from_rgb8(25, 25, 25);
 pub(super) const SIDEBAR: Color = Color::from_rgb8(38, 38, 38);
 pub(super) const RAISED: Color = Color::from_rgb8(43, 43, 43);
 pub(super) const SELECTED: Color = Color::from_rgb8(58, 58, 58);
+pub(super) const LIFTED: Color = Color::from_rgb8(74, 74, 74);
 pub(super) const INK: Color = Color::from_rgb8(236, 236, 236);
 pub(super) const MUTED: Color = Color::from_rgb8(179, 179, 179);
 pub(super) const ACCENT: Color = INK;
@@ -187,6 +188,27 @@ pub(super) fn flat(_theme: &Theme, status: button::Status) -> button::Style {
         border: Border {
             radius: CONTROL_RADIUS.into(),
             ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// A control floating over the transcript (the `Latest` pill), lifted off
+/// whatever scrolls beneath it, raised bubbles included.
+pub(super) fn floating(_theme: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(if hovered { LIFTED } else { SELECTED }.into()),
+        text_color: INK,
+        border: Border {
+            radius: CONTROL_RADIUS.into(),
+            width: 1.0,
+            color: LIFTED,
+        },
+        shadow: Shadow {
+            color: Color::BLACK.scale_alpha(0.4),
+            offset: Vector::new(0.0, 2.0),
+            blur_radius: 8.0,
         },
         ..button::Style::default()
     }
