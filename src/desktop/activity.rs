@@ -117,24 +117,56 @@ impl Activity {
         self.kind != Kind::Read && (self.input != Input::None || !self.report().is_empty())
     }
 
+    /// A short reason when the call failed: a command's non-zero exit, a
+    /// denied permission, a write or edit that never reached its success
+    /// line. `None` while running and for calls that look fine.
+    pub fn failure(&self) -> Option<String> {
+        let output = self.output.as_deref()?;
+        let first = output.lines().next().unwrap_or_default();
+        if first.contains("Permission denied") {
+            return Some("Denied".into());
+        }
+        match self.kind {
+            Kind::Command => output
+                .lines()
+                .rev()
+                .find_map(|line| line.strip_prefix("Exit code: "))
+                .and_then(|code| code.trim().parse::<i64>().ok())
+                .filter(|code| *code != 0)
+                .map(|code| format!("Exit {code}")),
+            Kind::Write | Kind::Edit => self.success_end().is_none().then(|| "Failed".into()),
+            _ => None,
+        }
+    }
+
     /// Output worth showing: all of it for most tools; for writes and edits,
     /// whose input already shows the change, only what follows the success
     /// line (notes, diagnostics) or the whole of a failure.
     pub fn report(&self) -> &str {
         let output = self.output.as_deref().unwrap_or_default();
+        match self.kind {
+            Kind::Write | Kind::Edit => self
+                .success_end()
+                .map_or(output, |end| output[end..].trim()),
+            _ => output,
+        }
+    }
+
+    /// Where the success line of a write or edit ends in its output.
+    fn success_end(&self) -> Option<usize> {
         let success = match self.kind {
             Kind::Write => "Written ",
             Kind::Edit => "Applied ",
-            _ => return output,
+            _ => return None,
         };
         let mut end = 0;
-        for line in output.split_inclusive('\n') {
+        for line in self.output.as_deref()?.split_inclusive('\n') {
             end += line.len();
             if line.starts_with(success) {
-                return output[end..].trim();
+                return Some(end);
             }
         }
-        output
+        None
     }
 }
 
@@ -561,6 +593,34 @@ mod tests {
         assert_eq!(hunks[1].removed, ["fn a() {", "}"]);
         assert!(hunks[1].added.is_empty());
         assert_eq!(row("edit", json!({"path": "a"})).input, Input::None);
+    }
+
+    #[test]
+    fn failures_name_the_exit_code_the_denial_or_the_missing_success() {
+        let with = |name: &str, output: &str| {
+            let mut activity = row(name, json!({"command": "x", "path": "a"}));
+            activity.output = Some(output.into());
+            activity.failure()
+        };
+        assert_eq!(with("bash", "boom\nExit code: 2"), Some("Exit 2".into()));
+        assert_eq!(with("bash", "Exit code: 0\nok"), None);
+        assert_eq!(with("bash", "all good"), None);
+        assert_eq!(
+            with("bash", "Permission denied by user"),
+            Some("Denied".into())
+        );
+        assert_eq!(
+            with(
+                "write",
+                "Toolset error: Permission denied: outside the project"
+            ),
+            Some("Denied".into())
+        );
+        assert_eq!(with("edit", "Applied 1 edit(s) to a"), None);
+        assert_eq!(with("edit", "search text not found"), Some("Failed".into()));
+        assert_eq!(with("write", "Written 3 bytes to a"), None);
+        assert_eq!(with("grep", "no matches"), None);
+        assert_eq!(row("bash", json!({"command": "x"})).failure(), None);
     }
 
     #[test]
