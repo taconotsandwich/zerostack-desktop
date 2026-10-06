@@ -442,8 +442,10 @@ impl App {
             messages = messages.push(self.project_picker());
         }
         let transcript = scrollable(components::rail(messages, self.layout()))
-            .id("conversation")
-            .on_scroll(|viewport| Message::Scrolled(viewport.absolute_offset_reversed().y < 48.0))
+            .id(super::scroll::CONVERSATION)
+            .on_scroll(|viewport| {
+                Message::Scrolled(viewport.absolute_offset_reversed().y < super::scroll::END_SLACK)
+            })
             .height(Fill)
             .width(Fill);
         // The pill floats over a fixed stack so the scrollable keeps its tree
