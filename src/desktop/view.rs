@@ -322,54 +322,15 @@ impl App {
                 .rposition(|message| message.role == MessageRole::Assistant);
             for (index, message) in snapshot.session.messages.iter().enumerate() {
                 if let Some(group) = super::history::tool_group(&snapshot.session.messages, index) {
-                    if group.is_empty() {
-                        continue;
+                    if !group.is_empty() {
+                        messages = messages.push(super::activity_view::group(
+                            &self.activity[index],
+                            self.expanded.contains(&index),
+                            Message::ToggleTool(index),
+                            |row| self.expanded_rows.contains(&(index, row)),
+                            move |row| Message::ToggleToolRow(index, row),
+                        ));
                     }
-                    let count = super::history::tool_count(group);
-                    let mut details = column![
-                        button(
-                            text(format!(
-                                "Used {count} tool{}",
-                                if count == 1 { "" } else { "s" }
-                            ))
-                            .size(style::CAPTION)
-                        )
-                        .padding(0)
-                        .style(style::flat)
-                        .on_press(Message::ToggleTool(index))
-                    ]
-                    .spacing(layout::SM);
-                    if self.expanded.contains(&index) {
-                        for record in group {
-                            let content = match &record.tool {
-                                Some(
-                                    ToolRecord::Call { name, args, .. }
-                                    | ToolRecord::SubagentCall { name, args, .. },
-                                ) => {
-                                    format!(
-                                        "{name}\n{}",
-                                        serde_json::to_string_pretty(args).unwrap_or_default()
-                                    )
-                                }
-                                _ => record.content.to_string(),
-                            };
-                            details = details
-                                .push(text(content).size(style::CAPTION).font(Font::MONOSPACE));
-                            if let Some(ToolRecord::Result {
-                                full_output_path: Some(path),
-                                ..
-                            }) = &record.tool
-                            {
-                                details = details.push(components::action(
-                                    "Open full output",
-                                    Some(Message::Review(super::review_view::Event::Open(
-                                        path.as_str().into(),
-                                    ))),
-                                ));
-                            }
-                        }
-                    }
-                    messages = messages.push(details);
                     continue;
                 }
                 match message.role {
@@ -571,39 +532,13 @@ impl App {
                     .map(Message::Link)
                     .into(),
                 ),
-                Block::Tools(tools) => {
-                    let running = tools.iter().any(|tool| tool.output.is_none());
-                    let label = format!(
-                        "{} {} tool{}",
-                        if running { "Using" } else { "Used" },
-                        tools.len(),
-                        if tools.len() == 1 { "" } else { "s" },
-                    );
-                    let mut group = column![
-                        button(text(label).size(style::CAPTION))
-                            .padding(0)
-                            .style(style::flat)
-                            .on_press(Message::ToggleLive(index))
-                    ]
-                    .spacing(layout::SM);
-                    if self.live.expanded.contains(&index) {
-                        for tool in tools {
-                            group = group.push(text(&tool.summary).size(style::CAPTION));
-                            if let Some(output) = &tool.output {
-                                group = group.push(
-                                    container(
-                                        scrollable(
-                                            text(output).size(style::CAPTION).font(Font::MONOSPACE),
-                                        )
-                                        .height(iced::Length::Shrink),
-                                    )
-                                    .max_height(240),
-                                );
-                            }
-                        }
-                    }
-                    entries.push(group.into());
-                }
+                Block::Tools(tools) => entries.push(super::activity_view::group(
+                    tools,
+                    !self.live.collapsed.contains(&index),
+                    Message::ToggleLive(index),
+                    |row| self.live.open_rows.contains(&(index, row)),
+                    move |row| Message::ToggleLiveRow(index, row),
+                )),
             }
         }
         if !self.live.notice.is_empty() {

@@ -1,5 +1,8 @@
+use std::path::Path;
+
 use iced::widget::markdown;
 
+use super::activity::Activity;
 use crate::event::AgentEvent;
 
 #[derive(Default)]
@@ -7,7 +10,10 @@ pub(super) struct LiveTurn {
     pub blocks: Vec<Block>,
     pub reasoning: String,
     pub notice: String,
-    pub expanded: std::collections::HashSet<usize>,
+    /// Tool groups stay open while the turn runs unless folded here.
+    pub collapsed: std::collections::HashSet<usize>,
+    /// Rows opened to their detail, by (block, row).
+    pub open_rows: std::collections::HashSet<(usize, usize)>,
     pub reasoning_open: bool,
 }
 
@@ -16,17 +22,11 @@ pub(super) enum Block {
         text: String,
         markdown: markdown::Content,
     },
-    Tools(Vec<Tool>),
-}
-
-pub(super) struct Tool {
-    pub id: String,
-    pub summary: String,
-    pub output: Option<String>,
+    Tools(Vec<Activity>),
 }
 
 impl LiveTurn {
-    pub fn push(&mut self, event: AgentEvent, show_reasoning: bool) {
+    pub fn push(&mut self, event: AgentEvent, show_reasoning: bool, root: &Path) {
         match event {
             AgentEvent::Token(token) => {
                 let token = crate::ui::events::sanitize_output(&token);
@@ -48,11 +48,11 @@ impl LiveTurn {
                 name,
                 args,
             } => {
-                self.add_tool(call_id.to_string(), &name, &args);
+                self.add_tool(Activity::new(call_id.to_string(), &name, &args, root));
             }
             #[cfg(any(feature = "subagents", feature = "acp"))]
             AgentEvent::SubagentToolCall { name, args } => {
-                self.add_tool(String::new(), &name, &args);
+                self.add_tool(Activity::new(String::new(), &name, &args, root));
             }
             AgentEvent::ToolResult {
                 call_id, output, ..
@@ -73,16 +73,12 @@ impl LiveTurn {
         }
     }
 
-    fn add_tool(&mut self, id: String, name: &str, args: &serde_json::Value) {
+    fn add_tool(&mut self, activity: Activity) {
         if !matches!(self.blocks.last(), Some(Block::Tools(_))) {
             self.blocks.push(Block::Tools(Vec::new()));
         }
         if let Some(Block::Tools(tools)) = self.blocks.last_mut() {
-            tools.push(Tool {
-                id,
-                summary: crate::ui::utils::format_tool_call_summary(name, args),
-                output: None,
-            });
+            tools.push(activity);
         }
         self.notice.clear();
     }
@@ -98,6 +94,7 @@ mod tests {
         turn.push(
             AgentEvent::Token("I’ll inspect **both** files.".into()),
             false,
+            Path::new("/"),
         );
         for id in ["a", "b"] {
             turn.push(
@@ -107,6 +104,7 @@ mod tests {
                     args: serde_json::json!({"path": id}),
                 },
                 false,
+                Path::new("/"),
             );
         }
         turn.push(
@@ -116,9 +114,14 @@ mod tests {
                 output: "second file".into(),
             },
             false,
+            Path::new("/"),
         );
-        turn.push(AgentEvent::Token("The answer is ".into()), false);
-        turn.push(AgentEvent::Token("`42`.".into()), false);
+        turn.push(
+            AgentEvent::Token("The answer is ".into()),
+            false,
+            Path::new("/"),
+        );
+        turn.push(AgentEvent::Token("`42`.".into()), false, Path::new("/"));
         assert!(
             matches!(&turn.blocks[0], Block::Response { text, .. } if text == "I’ll inspect **both** files.")
         );
