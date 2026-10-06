@@ -59,6 +59,17 @@ pub(super) fn draft_key(session: &crate::session::Session) -> &str {
 
 const NEW_DRAFT: &str = "new";
 
+/// The key `old`'s draft has to leave when `new` replaces it: a new
+/// conversation's draft follows it to its own key once its first message
+/// lands, so the next new conversation starts empty.
+pub(super) fn stale_draft_key<'a>(
+    old: &'a crate::session::Session,
+    new: &crate::session::Session,
+) -> Option<&'a str> {
+    let key = draft_key(old);
+    (old.id == new.id && key != draft_key(new)).then_some(key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +89,20 @@ mod tests {
         );
         session.add_message(crate::session::MessageRole::User, "hello");
         assert_eq!(draft_key(&session), session.id.as_str());
+    }
+
+    #[test]
+    fn a_new_conversation_draft_leaves_the_shared_key_with_its_first_message() {
+        let empty = crate::session::Session::new("anthropic", "model", 1000, "");
+        let mut sent = empty.clone();
+        sent.add_message(crate::session::MessageRole::User, "hello");
+        let mut replied = sent.clone();
+        replied.add_message(crate::session::MessageRole::Assistant, "hi");
+        let other = crate::session::Session::new("anthropic", "model", 1000, "");
+        assert_eq!(stale_draft_key(&empty, &sent), Some(NEW_DRAFT));
+        assert_eq!(stale_draft_key(&sent, &replied), None);
+        assert_eq!(stale_draft_key(&empty, &other), None);
+        assert_eq!(stale_draft_key(&sent, &other), None);
     }
 
     #[test]

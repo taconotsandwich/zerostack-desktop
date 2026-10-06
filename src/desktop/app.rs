@@ -375,6 +375,13 @@ impl App {
                             .snapshot
                             .as_ref()
                             .is_none_or(|old| old.session.id != snapshot.session.id);
+                        let stale_draft = self
+                            .snapshot
+                            .as_ref()
+                            .and_then(|old| {
+                                super::preferences::stale_draft_key(&old.session, &snapshot.session)
+                            })
+                            .map(str::to_string);
                         if changed_session {
                             self.follow_output = true;
                             scroll = true;
@@ -493,6 +500,10 @@ impl App {
                         open_path = snapshot.open_path.clone();
                         self.project = snapshot.session.working_dir.to_string();
                         self.snapshot = Some(snapshot);
+                        if let Some(key) = stale_draft {
+                            self.preferences.drafts.remove(&key);
+                            self.remember_draft();
+                        }
                         if changed_session {
                             self.preferences
                                 .remember_project(PathBuf::from(&self.project));
