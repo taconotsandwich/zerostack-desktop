@@ -307,6 +307,7 @@ impl App {
                     if !group.is_empty() {
                         messages = messages.push(super::activity_view::group(
                             &self.activity[index],
+                            false,
                             self.expanded.contains(&index),
                             Message::ToggleTool(index),
                             |row| self.expanded_rows.contains(&(index, row)),
@@ -521,6 +522,7 @@ impl App {
                 ),
                 Block::Tools(tools) => entries.push(super::activity_view::group(
                     tools,
+                    true,
                     !self.live.collapsed.contains(&index),
                     Message::ToggleLive(index),
                     |row| self.live.open_rows.contains(&(index, row)),
