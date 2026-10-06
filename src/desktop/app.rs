@@ -88,6 +88,7 @@ pub(super) enum Message {
     Edit(text_editor::Action),
     Send,
     Unqueue(String),
+    EditQueued(String),
     Copy(String),
     Reply(String),
     Select(String),
@@ -606,6 +607,7 @@ impl App {
             Message::Unqueue(text) => {
                 self.unqueue(&text);
             }
+            Message::EditQueued(text) => return self.edit_queued(text),
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Reply(excerpt) => {
                 let draft = super::reply::quote(&self.content.text(), &excerpt);
