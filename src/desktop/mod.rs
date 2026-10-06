@@ -13,6 +13,7 @@ mod preferences;
 mod reply;
 mod review;
 mod review_view;
+mod scroll;
 #[cfg(test)]
 mod startup_tests;
 mod style;
