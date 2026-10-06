@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -51,6 +51,8 @@ pub(super) struct App {
     pub slash_dismissed: bool,
     pub usage_open: bool,
     pub pending: Option<Operation>,
+    /// Prompts typed while a turn runs, sent one by one as turns end.
+    pub queued: VecDeque<String>,
     submitted: Option<String>,
     pub after_load: Option<Command>,
     pub model_input: String,
@@ -85,6 +87,7 @@ pub(super) enum Message {
     Ready(worker::Reply),
     Edit(text_editor::Action),
     Send,
+    Unqueue(String),
     Copy(String),
     Reply(String),
     Select(String),
@@ -206,6 +209,7 @@ impl App {
                 slash_dismissed: false,
                 usage_open: false,
                 pending: None,
+                queued: VecDeque::new(),
                 submitted: None,
                 after_load: None,
                 model_input: String::new(),
@@ -518,11 +522,12 @@ impl App {
                     }
                 }
                 self.submitted = None;
+                let queued = self.send_queued();
                 if let Some(id) = self.closing.take() {
                     return window::close(id);
                 }
                 if let Some(path) = open_path {
-                    return open_path_task(path);
+                    return Task::batch([open_path_task(path), queued]);
                 }
                 let scrolling = if self.follow_output {
                     if scroll {
@@ -543,7 +548,7 @@ impl App {
                 } else {
                     Task::none()
                 };
-                return Task::batch([scrolling, review, focus]);
+                return Task::batch([scrolling, review, focus, queued]);
             }
             Message::Edit(action) => {
                 self.content.perform(action);
@@ -594,6 +599,12 @@ impl App {
                     return task;
                 }
                 return self.dispatch(super::operations::composer_operation(&input));
+            }
+            Message::Send if self.busy && !self.picking && self.snapshot.is_some() => {
+                self.queue_composer()
+            }
+            Message::Unqueue(text) => {
+                self.unqueue(&text);
             }
             Message::Copy(value) => return iced::clipboard::write(value),
             Message::Reply(excerpt) => {
