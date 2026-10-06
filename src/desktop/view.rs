@@ -23,6 +23,17 @@ impl App {
         Layout::new(size, self.sidebar)
     }
 
+    /// An empty conversation with nothing on its way: the composer waits
+    /// centered under the greeting for the first message.
+    fn starting(&self) -> bool {
+        self.snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.session.messages.is_empty()
+                && self.command_output.is_empty()
+                && !matches!(self.pending, Some(worker::Operation::Prompt(_)))
+                && self.live.blocks.is_empty()
+        })
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let title = self
             .snapshot
@@ -44,12 +55,30 @@ impl App {
         .align_y(Center)
         .padding([0.0, layout::XL])
         .height(layout::HEADER_HEIGHT);
-        let mut main = column![header, self.conversation()]
-            .width(Fill)
-            .height(Fill);
+        // A new conversation centers the greeting and composer between two
+        // fillers. The composer keeps its place in the tree either way, so it
+        // stays focused when the first message docks it to the bottom.
+        let (above, below): (Element<'_, Message>, Element<'_, Message>) = if self.starting() {
+            let greeting = text("What would you like to work on?")
+                .size(style::TITLE)
+                .color(style::MUTED);
+            (
+                container(components::rail(
+                    container(greeting).center_x(Fill),
+                    self.layout(),
+                ))
+                .align_bottom(Fill)
+                .into(),
+                space().height(Fill).into(),
+            )
+        } else {
+            (self.conversation(), space().into())
+        };
+        let mut main = column![header, above].width(Fill).height(Fill);
         if self.snapshot.is_some() {
             main = main.push(self.composer());
         }
+        main = main.push(below);
         let narrow_review = self.review.open && self.size.width < layout::REVIEW_SPLIT_WIDTH;
         let review: Element<'_, Message> = if self.review.open {
             self.review_view()
@@ -184,12 +213,7 @@ impl App {
         let directory = self
             .snapshot
             .as_ref()
-            .map(|snapshot| {
-                std::path::Path::new(snapshot.session.working_dir.as_str())
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| snapshot.session.working_dir.to_string())
-            })
+            .map(|snapshot| folder_name(&snapshot.session.working_dir))
             .unwrap_or_default();
         let brand = container(text("zerostack").size(style::TITLE))
             .height(layout::HEADER_HEIGHT)
@@ -281,20 +305,6 @@ impl App {
     fn conversation(&self) -> Element<'_, Message> {
         let mut messages = column![].spacing(layout::XL).width(Fill);
         if let Some(snapshot) = &self.snapshot {
-            if snapshot.session.messages.is_empty()
-                && self.command_output.is_empty()
-                && !matches!(self.pending, Some(worker::Operation::Prompt(_)))
-                && self.live.blocks.is_empty()
-            {
-                messages = messages.push(
-                    container(
-                        text("What would you like to work on?")
-                            .size(style::TITLE)
-                            .color(style::MUTED),
-                    )
-                    .padding([layout::HEADER_HEIGHT, 0.0]),
-                );
-            }
             let latest_user = snapshot
                 .session
                 .messages
@@ -655,6 +665,21 @@ impl App {
                 Message::Prompt,
                 iced::Length::Shrink,
             ));
+            if self.starting() {
+                let project = row![
+                    style::icon(Icon::Folder, !self.busy),
+                    text(folder_name(&snapshot.session.working_dir)).size(style::LABEL),
+                ]
+                .spacing(layout::SM)
+                .align_y(Center);
+                tools = tools.push(
+                    button(container(project).center_y(Fill))
+                        .height(layout::CONTROL_HEIGHT)
+                        .padding([0.0, layout::MD])
+                        .style(style::flat)
+                        .on_press_maybe((!self.busy).then_some(Message::Show(Panel::Projects))),
+                );
+            }
             tools = tools.push(space::horizontal());
             let mut models = snapshot.models.clone();
             if !models
@@ -742,6 +767,13 @@ impl App {
         area = area.push(composer);
         components::rail(area, self.layout())
     }
+}
+
+fn folder_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn scrim<'a>(sheet: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
