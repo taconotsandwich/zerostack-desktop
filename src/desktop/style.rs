@@ -21,6 +21,8 @@ pub(super) const SELECTED: Color = Color::from_rgb8(58, 58, 58);
 pub(super) const INK: Color = Color::from_rgb8(236, 236, 236);
 pub(super) const MUTED: Color = Color::from_rgb8(179, 179, 179);
 pub(super) const ACCENT: Color = INK;
+pub(super) const ADDED: Color = Color::from_rgb8(134, 205, 150);
+pub(super) const REMOVED: Color = Color::from_rgb8(236, 140, 140);
 
 pub(super) fn theme() -> Theme {
     Theme::custom(
@@ -147,6 +149,18 @@ fn from_ansi(color: crossterm::style::Color) -> Color {
         }
         Ansi::Reset => INK,
     }
+}
+
+/// `color` washed over the raised surface, mixed in sRGB so the wash reads
+/// as faint as it is (alpha blending over dark grey looks far heavier).
+pub(super) fn tint(color: Color) -> Color {
+    const WASH: f32 = 0.12;
+    let mix = |base: f32, over: f32| base + (over - base) * WASH;
+    Color::from_rgb(
+        mix(RAISED.r, color.r),
+        mix(RAISED.g, color.g),
+        mix(RAISED.b, color.b),
+    )
 }
 
 pub(super) fn surface(color: Color, radius: f32) -> container::Style {
