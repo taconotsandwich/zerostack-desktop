@@ -1,5 +1,5 @@
-use iced::widget::{column, container, row, text, text_editor};
-use iced::{Center, Element, Task};
+use iced::widget::{column, container, mouse_area, operation, row, text, text_editor};
+use iced::{Center, Element, Task, mouse};
 
 use super::app::{App, Message};
 use super::components::{self, icon_button};
@@ -55,13 +55,27 @@ impl App {
             return self.dispatch(Operation::Prompt(next));
         }
         if !self.queued.is_empty() {
-            let draft = self.content.text();
-            self.content = text_editor::Content::with_text(&restore(&draft, self.queued.drain(..)));
-            self.content
-                .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-            self.remember_draft();
+            let queued = std::mem::take(&mut self.queued);
+            self.restore_into_composer(queued);
         }
         Task::none()
+    }
+
+    /// Moves a queued `text` back into the composer to edit.
+    pub(super) fn edit_queued(&mut self, text: String) -> Task<Message> {
+        if !self.unqueue(&text) {
+            return Task::none();
+        }
+        self.restore_into_composer([text]);
+        operation::focus("composer")
+    }
+
+    fn restore_into_composer(&mut self, queued: impl IntoIterator<Item = String>) {
+        let draft = self.content.text();
+        self.content = text_editor::Content::with_text(&restore(&draft, queued));
+        self.content
+            .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        self.remember_draft();
     }
 
     pub(super) fn queued_view(&self) -> Element<'_, Message> {
@@ -72,7 +86,9 @@ impl App {
             list = list.push(
                 container(
                     row![
-                        components::row_label(label),
+                        mouse_area(components::row_label(label))
+                            .on_press(Message::EditQueued(queued.clone()))
+                            .interaction(mouse::Interaction::Pointer),
                         icon_button(
                             Icon::Close,
                             "Remove from queue",
