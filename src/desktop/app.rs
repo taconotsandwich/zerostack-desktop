@@ -250,7 +250,7 @@ impl App {
                 Message::Completed(turn_id, reply)
             }),
             if self.follow_output {
-                operation::snap_to_end("conversation")
+                operation::snap_to_end(super::scroll::CONVERSATION)
             } else {
                 Task::none()
             },
@@ -504,10 +504,14 @@ impl App {
                 if let Some(path) = open_path {
                     return open_path_task(path);
                 }
-                let scrolling = if scroll && self.follow_output {
-                    operation::snap_to_end("conversation")
+                let scrolling = if self.follow_output {
+                    if scroll {
+                        operation::snap_to_end(super::scroll::CONVERSATION)
+                    } else {
+                        Task::none()
+                    }
                 } else {
-                    Task::none()
+                    super::scroll::measure()
                 };
                 let review = if self.review.open {
                     self.update_review(super::review_view::Event::Refresh)
@@ -583,7 +587,7 @@ impl App {
                 self.live
                     .push(event, show, std::path::Path::new(&self.project));
                 if self.follow_output {
-                    return operation::snap_to_end("conversation");
+                    return operation::snap_to_end(super::scroll::CONVERSATION);
                 }
             }
             Message::Engine(id, UiEvent::Permission(request))
@@ -592,7 +596,7 @@ impl App {
                 self.permission = Some(request);
                 self.permission_scope_open = false;
                 if self.follow_output {
-                    return operation::snap_to_end("conversation");
+                    return operation::snap_to_end(super::scroll::CONVERSATION);
                 }
             }
             Message::Engine(id, UiEvent::OpenUrl(url)) if self.busy && id == self.turn_id => {
@@ -623,11 +627,20 @@ impl App {
             Message::Scrolled(at_bottom) => self.follow_output = at_bottom,
             Message::Latest => {
                 self.follow_output = true;
-                return operation::snap_to_end("conversation");
+                return operation::snap_to_end(super::scroll::CONVERSATION);
             }
-            Message::ToggleLive(index) => toggle(&mut self.live.collapsed, index),
-            Message::ToggleLiveRow(block, row) => toggle(&mut self.live.open_rows, (block, row)),
-            Message::ToggleReasoningDetails => self.live.reasoning_open = !self.live.reasoning_open,
+            Message::ToggleLive(index) => {
+                toggle(&mut self.live.collapsed, index);
+                return super::scroll::measure();
+            }
+            Message::ToggleLiveRow(block, row) => {
+                toggle(&mut self.live.open_rows, (block, row));
+                return super::scroll::measure();
+            }
+            Message::ToggleReasoningDetails => {
+                self.live.reasoning_open = !self.live.reasoning_open;
+                return super::scroll::measure();
+            }
             Message::Select(id) if !self.busy => {
                 self.menu = None;
                 self.panel = None;
@@ -727,8 +740,14 @@ impl App {
                 self.sidebar = !self.sidebar;
                 self.menu = None;
             }
-            Message::ToggleTool(index) => toggle(&mut self.expanded, index),
-            Message::ToggleToolRow(group, row) => toggle(&mut self.expanded_rows, (group, row)),
+            Message::ToggleTool(index) => {
+                toggle(&mut self.expanded, index);
+                return super::scroll::measure();
+            }
+            Message::ToggleToolRow(group, row) => {
+                toggle(&mut self.expanded_rows, (group, row));
+                return super::scroll::measure();
+            }
             Message::ToggleUsage => self.usage_open = !self.usage_open,
             Message::Model(model) if !self.busy => {
                 return self.dispatch(Operation::SelectModel { selection: model });
@@ -775,7 +794,12 @@ impl App {
             Message::LinkOpened(Err(error)) => self.error = error,
             Message::Review(event) => return self.update_review(event),
             Message::Cursor(point) => self.cursor = point,
-            Message::Resize(size) => self.size = size,
+            Message::Resize(size) => {
+                self.size = size;
+                if !self.follow_output {
+                    return super::scroll::measure();
+                }
+            }
             Message::Escape => {
                 if self.review.open
                     && self.panel.is_none()

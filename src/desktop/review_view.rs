@@ -315,7 +315,7 @@ impl App {
 
     fn follow_review_layout(&self) -> Task<Message> {
         if self.follow_output {
-            iced::widget::operation::snap_to_end("conversation")
+            iced::widget::operation::snap_to_end(super::scroll::CONVERSATION)
         } else {
             Task::none()
         }
