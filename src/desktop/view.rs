@@ -146,13 +146,11 @@ impl App {
             space::horizontal()
         ]
         .align_y(Center);
-        if let Some(command) = commands::find("/new-conversation") {
-            heading = heading.push(icon_button(
-                Icon::NewChat,
-                "New conversation",
-                (!self.busy).then_some(Message::Choose(command)),
-            ));
-        }
+        heading = heading.push(icon_button(
+            Icon::NewChat,
+            "New conversation",
+            (!self.busy).then_some(Message::NewConversation),
+        ));
         if let Some(command) = commands::find("/import") {
             heading = heading.push(icon_button(
                 Icon::Import,
@@ -161,8 +159,13 @@ impl App {
             ));
         }
         let mut list = column![].spacing(layout::XS);
+        // A conversation is listed once it has a message; a new one shows up
+        // when its first message is sent.
         if let Some(snapshot) = &self.snapshot {
-            if !self.deleted.contains(snapshot.session.id.as_str())
+            let listed = |session: &Session| {
+                !session.messages.is_empty() && !self.deleted.contains(session.id.as_str())
+            };
+            if listed(&snapshot.session)
                 && !snapshot
                     .sessions
                     .iter()
@@ -171,9 +174,7 @@ impl App {
                 list = list.push(self.session_row(&snapshot.session));
             }
             for session in &snapshot.sessions {
-                if !self.deleted.contains(session.id.as_str())
-                    && session.working_dir == snapshot.session.working_dir
-                {
+                if listed(session) && session.working_dir == snapshot.session.working_dir {
                     list = list.push(self.session_row(session));
                 }
             }
