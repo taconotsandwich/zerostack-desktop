@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use iced::widget::{
     button, column, container, hover, mouse_area, row, scrollable, space, text, tooltip,
 };
-use iced::{Center, Color, Element, Fill, Padding, Right, Theme};
+use iced::{Center, Color, Element, Fill, Left, Padding, Point, Right, Theme};
 
 use super::app::{App, Message, Panel};
 use super::commands;
@@ -159,6 +159,44 @@ impl App {
         .width(layout::SIDEBAR_WIDTH)
         .height(Fill)
         .style(|_| style::surface(style::SIDEBAR, 0.0))
+        .into()
+    }
+
+    /// The actions of a conversation row, at `position`; a press anywhere
+    /// else closes it.
+    pub(super) fn row_menu<'a>(&self, id: &'a str, position: Point) -> Element<'a, Message> {
+        let mut menu = column![];
+        for (label, syntax) in [
+            ("Export", "/export"),
+            ("Share", "/share"),
+            ("Clear messages", "/clear"),
+        ] {
+            if commands::find(syntax).is_some() {
+                menu = menu.push(
+                    components::action(label, Some(Message::RowAction(id.to_string(), syntax)))
+                        .width(Fill),
+                );
+            }
+        }
+        menu = menu
+            .push(components::action("Delete", Some(Message::Delete(id.to_string()))).width(Fill));
+        let menu = container(menu)
+            .width(layout::MENU_WIDTH)
+            .padding(layout::XS)
+            .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
+        mouse_area(
+            container(menu)
+                .width(Fill)
+                .height(Fill)
+                .align_x(Left)
+                .padding(Padding {
+                    top: position.y,
+                    left: position.x,
+                    right: 0.0,
+                    bottom: 0.0,
+                }),
+        )
+        .on_press(Message::ClosePanel)
         .into()
     }
 

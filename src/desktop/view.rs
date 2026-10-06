@@ -1,11 +1,9 @@
 use iced::widget::{
-    button, column, container, markdown, mouse_area, row, scrollable, space, stack, text,
-    text_editor, tooltip,
+    button, column, container, markdown, row, scrollable, space, stack, text, text_editor, tooltip,
 };
-use iced::{Center, Color, Element, Fill, Font, Left, Padding, Right, Theme, keyboard};
+use iced::{Center, Color, Element, Fill, Font, Right, Theme, keyboard};
 
 use super::app::{App, Message, Panel};
-use super::commands;
 use super::components::{self, icon_button};
 use super::layout::{self, Layout};
 use super::live::Block;
@@ -130,39 +128,7 @@ impl App {
             return stack![base, scrim(sheet)].into();
         }
         if let Some((id, position)) = &self.menu {
-            let mut menu = column![];
-            for (label, syntax) in [
-                ("Export", "/export"),
-                ("Share", "/share"),
-                ("Clear messages", "/clear"),
-            ] {
-                if commands::find(syntax).is_some() {
-                    menu = menu.push(
-                        components::action(label, Some(Message::RowAction(id.clone(), syntax)))
-                            .width(Fill),
-                    );
-                }
-            }
-            menu = menu
-                .push(components::action("Delete", Some(Message::Delete(id.clone()))).width(Fill));
-            let menu = container(menu)
-                .width(layout::MENU_WIDTH)
-                .padding(layout::XS)
-                .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
-            let overlay = mouse_area(
-                container(menu)
-                    .width(Fill)
-                    .height(Fill)
-                    .align_x(Left)
-                    .padding(Padding {
-                        top: position.y,
-                        left: position.x,
-                        right: 0.0,
-                        bottom: 0.0,
-                    }),
-            )
-            .on_press(Message::ClosePanel);
-            return stack![base, overlay].into();
+            return stack![base, self.row_menu(id, *position)].into();
         }
         stack![base, space()].into()
     }
