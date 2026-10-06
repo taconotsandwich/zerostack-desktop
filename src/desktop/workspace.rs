@@ -12,16 +12,8 @@ use super::{layout, style};
 impl App {
     pub(super) fn remember_draft(&mut self) {
         if let Some(snapshot) = &self.snapshot {
-            self.preferences
-                .set_draft(snapshot.session.id.to_string(), self.content.text());
-            if !self.busy
-                && !self.cli.no_session
-                && snapshot.session.messages.is_empty()
-                && !self.content.text().is_empty()
-                && let Err(error) = crate::session::storage::save_session(&snapshot.session)
-            {
-                self.error = format!("Could not save draft conversation: {error}");
-            }
+            let key = super::preferences::draft_key(&snapshot.session).to_string();
+            self.preferences.set_draft(key, self.content.text());
         }
         if let Err(error) = self.preferences.save() {
             self.error = error;

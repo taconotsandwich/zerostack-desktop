@@ -92,6 +92,7 @@ pub(super) enum Message {
     Delete(String),
     Confirm,
     Choose(Command),
+    NewConversation,
     Operate(Operation),
     Field(usize, String),
     Show(Panel),
@@ -334,17 +335,15 @@ impl App {
                             self.panel = None;
                             self.preferences.drafts.remove(id);
                             if snapshot.session.id.as_str() == id {
-                                if let Some(next) = snapshot.sessions.iter().find(|session| {
+                                let next = snapshot.sessions.iter().find(|session| {
                                     session.working_dir == snapshot.session.working_dir
                                         && session.id != snapshot.session.id
-                                }) {
-                                    return self.dispatch(Operation::Load(next.id.to_string()));
-                                }
-                                self.worker = None;
-                                self.snapshot = None;
-                                self.content = text_editor::Content::new();
-                                self.markdown.clear();
-                                return Task::none();
+                                        && !session.messages.is_empty()
+                                });
+                                return self.dispatch(match next {
+                                    Some(next) => Operation::Load(next.id.to_string()),
+                                    None => Operation::NewSession,
+                                });
                             }
                         }
                         if matches!(pending, Some(Operation::Rename { .. })) {
@@ -360,10 +359,13 @@ impl App {
                             self.content = text_editor::Content::with_text(
                                 self.preferences
                                     .drafts
-                                    .get(snapshot.session.id.as_str())
+                                    .get(super::preferences::draft_key(&snapshot.session))
                                     .map(String::as_str)
                                     .unwrap_or(""),
                             );
+                            self.content.perform(text_editor::Action::Move(
+                                text_editor::Motion::DocumentEnd,
+                            ));
                             self.expanded.clear();
                             self.expanded_rows.clear();
                             self.usage_open = false;
@@ -719,6 +721,18 @@ impl App {
                 _ => {}
             },
             Message::Choose(command) if !self.busy => return self.choose(command),
+            Message::NewConversation if !self.busy => {
+                self.menu = None;
+                self.panel = None;
+                if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.session.messages.is_empty())
+                {
+                    return operation::focus("composer");
+                }
+                return self.dispatch(Operation::NewSession);
+            }
             Message::Operate(operation) if !self.busy => return self.dispatch(operation),
             Message::Field(index, value) => {
                 if let Some(field) = self.fields.get_mut(index) {

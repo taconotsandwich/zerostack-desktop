@@ -46,9 +46,39 @@ impl Preferences {
     }
 }
 
+/// Where a conversation's unsent draft is kept. A new conversation is not
+/// saved until its first message, so its draft sits under one fixed key that
+/// outlives the id it happens to get this launch.
+pub(super) fn draft_key(session: &crate::session::Session) -> &str {
+    if session.messages.is_empty() {
+        NEW_DRAFT
+    } else {
+        session.id.as_str()
+    }
+}
+
+const NEW_DRAFT: &str = "new";
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_conversations_share_one_draft_and_saved_ones_keep_their_own() {
+        let mut session = crate::session::Session::new("anthropic", "model", 1000, "");
+        assert_eq!(draft_key(&session), NEW_DRAFT);
+        assert_eq!(
+            draft_key(&crate::session::Session::new(
+                "anthropic",
+                "model",
+                1000,
+                ""
+            )),
+            NEW_DRAFT
+        );
+        session.add_message(crate::session::MessageRole::User, "hello");
+        assert_eq!(draft_key(&session), session.id.as_str());
+    }
 
     #[test]
     fn drafts_and_recent_projects_survive_restart_without_empty_drafts() {
