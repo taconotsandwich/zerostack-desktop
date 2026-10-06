@@ -514,7 +514,15 @@ impl App {
                 keyboard::Key::Named(keyboard::key::Named::ArrowUp) if slash_open => {
                     Some(text_editor::Binding::Custom(Message::SlashMove(-1)))
                 }
-                _ => text_editor::Binding::from_key_press(press),
+                _ => {
+                    let command = press.modifiers.command();
+                    match text_editor::Binding::from_key_press(press) {
+                        // iced types the letter of a shortcut it does not
+                        // know, so Cmd+N would leave an "n" behind.
+                        Some(text_editor::Binding::Insert(_)) if command => None,
+                        binding => binding,
+                    }
+                }
             });
         let mut tools = row![icon_button(
             Icon::Attachment,
