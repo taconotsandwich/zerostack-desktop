@@ -21,6 +21,7 @@ pub(super) fn composer_operation(input: &str) -> Operation {
 /// Anything without a structured equivalent remains an explicit command.
 pub(super) fn fieldless_operation(command: &Command) -> Operation {
     match command.syntax {
+        "/new-conversation" => Operation::NewSession,
         "/clear" | "/new" => Operation::ClearMessages,
         "/undo" => Operation::Undo,
         "/redo" => Operation::Redo,
@@ -44,6 +45,7 @@ pub(super) fn fieldless_operation(command: &Command) -> Operation {
 pub(super) fn typed_operation(input: &str) -> Option<Operation> {
     let mut words = input.split_whitespace();
     match words.next()? {
+        "/new-conversation" if words.next().is_none() => Some(Operation::NewSession),
         "/tutor" | "/welcome" | "/tutorial" if words.next().is_none() => {
             Some(Operation::OpenDocument {
                 name: "GET_STARTED.md".into(),
@@ -304,6 +306,11 @@ mod tests {
     #[test]
     fn typed_desktop_commands_map_to_structured_operations() {
         assert!(matches!(
+            typed_operation("/new-conversation"),
+            Some(Operation::NewSession)
+        ));
+        assert!(typed_operation("/new-conversation extra").is_none());
+        assert!(matches!(
             typed_operation("/tutor"),
             Some(Operation::OpenDocument { .. })
         ));
@@ -356,6 +363,10 @@ mod tests {
 
     #[test]
     fn forms_cover_the_desktop_owned_commands() {
+        assert!(matches!(
+            fieldless_operation(&command("/new-conversation")),
+            Operation::NewSession
+        ));
         assert!(matches!(
             form_operation(&command("/docs"), &[String::new()], None).unwrap(),
             Operation::OpenDocument { .. }

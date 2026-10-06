@@ -256,6 +256,7 @@ pub(super) enum Icon {
     Attachment,
     Close,
     Changes,
+    NewChat,
 }
 
 pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
@@ -272,6 +273,7 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         Icon::Attachment => include_bytes!("icons/paper-clip.svg"),
         Icon::Close => include_bytes!("icons/x-mark.svg"),
         Icon::Changes => include_bytes!("icons/code-bracket.svg"),
+        Icon::NewChat => include_bytes!("icons/plus.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
         .width(ICON_SIZE)
