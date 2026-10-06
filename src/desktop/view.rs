@@ -410,11 +410,18 @@ impl App {
                             markdown::Settings::with_text_size(style::BODY, style::theme()),
                         )
                         .map(Message::Link);
-                        let mut actions = row![icon_button(
-                            Icon::Copy,
-                            "Copy response",
-                            Some(Message::Copy(message.content.to_string()))
-                        )]
+                        let mut actions = row![
+                            icon_button(
+                                Icon::Copy,
+                                "Copy response",
+                                Some(Message::Copy(message.content.to_string()))
+                            ),
+                            icon_button(
+                                Icon::Reply,
+                                "Reply with a quote",
+                                Some(Message::Reply(message.content.to_string()))
+                            )
+                        ]
                         .spacing(layout::XS);
                         if latest_assistant == Some(index) {
                             actions = actions.push(icon_button(
