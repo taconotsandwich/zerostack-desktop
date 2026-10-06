@@ -146,17 +146,19 @@ impl App {
             space::horizontal()
         ]
         .align_y(Center);
-        heading = heading.push(icon_button(
-            Icon::NewChat,
-            "New conversation",
-            (!self.busy).then_some(Message::NewConversation),
-        ));
-        if let Some(command) = commands::find("/import") {
+        if self.snapshot.is_some() {
             heading = heading.push(icon_button(
-                Icon::Import,
-                "Import conversation",
-                (!self.busy).then_some(Message::Choose(command)),
+                Icon::NewChat,
+                "New conversation",
+                (!self.busy).then_some(Message::NewConversation),
             ));
+            if let Some(command) = commands::find("/import") {
+                heading = heading.push(icon_button(
+                    Icon::Import,
+                    "Import conversation",
+                    (!self.busy).then_some(Message::Choose(command)),
+                ));
+            }
         }
         let mut list = column![].spacing(layout::XS);
         // A conversation is listed once it has a message; a new one shows up
