@@ -78,6 +78,7 @@ pub(super) enum Message {
     Edit(text_editor::Action),
     Send,
     Copy(String),
+    Reply(String),
     Select(String),
     More(String),
     Rename(String),
@@ -553,6 +554,14 @@ impl App {
                 return self.dispatch(super::operations::composer_operation(&input));
             }
             Message::Copy(value) => return iced::clipboard::write(value),
+            Message::Reply(excerpt) => {
+                let draft = super::reply::quote(&self.content.text(), &excerpt);
+                self.content = text_editor::Content::with_text(&draft);
+                self.content
+                    .perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+                self.remember_draft();
+                return operation::focus("composer");
+            }
             Message::Engine(id, UiEvent::Agent(event)) if self.busy && id == self.turn_id => {
                 let show = self
                     .snapshot
