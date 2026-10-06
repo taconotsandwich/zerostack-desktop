@@ -318,14 +318,6 @@ impl App {
                 }
                 match message.role {
                     MessageRole::User => {
-                        let bubble = container(
-                            text(message.content.as_str())
-                                .size(style::BODY)
-                                .color(style::role_color(BlockStyle::User)),
-                        )
-                        .padding([layout::MD, layout::LG])
-                        .max_width(layout::MESSAGE_WIDTH)
-                        .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
                         let mut actions = row![icon_button(
                             Icon::Copy,
                             "Copy message",
@@ -342,7 +334,7 @@ impl App {
                         }
                         messages = messages.push(
                             column![
-                                container(bubble).width(Fill).align_x(Right),
+                                super::bubble::user(message.content.as_str()),
                                 container(actions).width(Fill).align_x(Right)
                             ]
                             .spacing(layout::XS),
@@ -409,16 +401,7 @@ impl App {
                 }
             }
             if let Some(worker::Operation::Prompt(prompt)) = &self.pending {
-                messages = messages.push(
-                    container(
-                        container(text(prompt).size(style::BODY))
-                            .padding([layout::MD, layout::LG])
-                            .max_width(layout::MESSAGE_WIDTH)
-                            .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS)),
-                    )
-                    .width(Fill)
-                    .align_x(Right),
-                );
+                messages = messages.push(super::bubble::user(prompt));
             }
             if self.busy || !self.live.blocks.is_empty() {
                 messages = messages.push(self.live_turn());
