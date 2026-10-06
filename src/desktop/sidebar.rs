@@ -70,8 +70,20 @@ impl App {
         .align_y(Center);
         let mut list = column![].spacing(layout::XS);
         let mut top = column![];
-        if let Some(snapshot) = &self.snapshot {
-            let starting = self.starting();
+        // While the worker restarts in another project the list stays, marking
+        // the conversation being opened.
+        let shown = match (&self.snapshot, &self.switching) {
+            (Some(snapshot), _) => Some((
+                snapshot,
+                Some(snapshot.session.id.as_str()),
+                self.starting(),
+            )),
+            (None, Some((snapshot, opening))) => {
+                Some((snapshot, opening.as_deref(), opening.is_none()))
+            }
+            (None, None) => None,
+        };
+        if let Some((snapshot, selected, starting)) = shown {
             let new = components::icon_action(
                 Icon::NewChat,
                 "New conversation",
@@ -121,13 +133,13 @@ impl App {
                 .into_iter()
                 .chain(&snapshot.sessions)
                 .filter(|session| !self.deleted.contains(session.id.as_str()));
-            for group in groups(sessions, current.working_dir.as_str()) {
-                list = list.push(
-                    self.project_heading(group.project, group.project == current.working_dir),
-                );
+            for group in groups(sessions, &self.project) {
+                list =
+                    list.push(self.project_heading(group.project, group.project == self.project));
                 for session in group.sessions {
+                    let active = selected == Some(session.id.as_str());
                     list = list.push(
-                        container(self.session_row(session))
+                        container(self.session_row(session, active))
                             .padding(Padding::ZERO.left(ROW_INDENT)),
                     );
                 }
@@ -235,7 +247,7 @@ impl App {
         )
     }
 
-    fn session_row<'a>(&'a self, session: &'a Session) -> Element<'a, Message> {
+    fn session_row<'a>(&'a self, session: &'a Session, active: bool) -> Element<'a, Message> {
         let id = session.id.to_string();
         if let Some((editing, name)) = &self.rename
             && editing == &id
@@ -246,10 +258,6 @@ impl App {
                 .on_submit(Message::SaveName)
                 .into();
         }
-        let active = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.session.id == session.id);
         let title = worker::title(session);
         let label = mouse_area(components::row_label(title))
             .on_press(Message::Select(id.clone()))

@@ -33,10 +33,17 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let opening = self.switching.as_ref().map(|(snapshot, opening)| {
+            opening
+                .as_deref()
+                .and_then(|id| snapshot.sessions.iter().find(|session| session.id == id))
+                .map_or_else(|| "New conversation".into(), worker::title)
+        });
         let title = self
             .snapshot
             .as_ref()
             .map(|snapshot| worker::title(&snapshot.session))
+            .or(opening)
             .unwrap_or_else(|| "zerostack".into());
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
