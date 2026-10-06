@@ -8,6 +8,7 @@ mod live;
 mod operations;
 mod panels;
 mod preferences;
+mod reply;
 mod review;
 mod review_view;
 #[cfg(test)]
