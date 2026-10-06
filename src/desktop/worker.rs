@@ -510,6 +510,7 @@ async fn apply(
             ));
     let before = serde_json::to_vec(engine.session())?;
     let had_messages = !engine.session().messages.is_empty();
+    let conversation = engine.session().id.clone();
     let mut document = None;
     // Only the `memory` build assigns it, so keep the `mut` quiet otherwise.
     #[allow(unused_mut)]
@@ -705,6 +706,11 @@ async fn apply(
             max_iterations,
         } => Some(engine.run_loop(Some(prompt), max_iterations).await?),
     };
+    // Attached files are not saved with any conversation, so they end with the
+    // one they were attached in rather than carrying into the next.
+    if engine.session().id != conversation {
+        engine.clear_context_files().await?;
+    }
     // A conversation reaches disk with its first message: a new one stays in
     // memory until then, so starting or abandoning it leaves no empty entry.
     // One emptied by clear or undo is still saved, so the change sticks.
@@ -1123,5 +1129,55 @@ mod tests {
         .unwrap();
         assert!(engine.session().pending_media.is_empty());
         assert_eq!(engine.context().extra_files.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn attachments_end_with_the_conversation_they_were_added_in() {
+        let _lock = fake_model::run_print_guard::acquire();
+        let data = Isolated::new();
+        let mut engine = engine();
+        let text = data.dir.join("notes.txt");
+        let image = data.dir.join("image.png");
+        std::fs::write(&text, "context").unwrap();
+        std::fs::write(&image, [137, 80, 78, 71]).unwrap();
+        let attach = || Operation::AddContextFiles(vec![text.clone(), image.clone()]);
+        let attached = |engine: &Engine| {
+            engine.context().extra_files.len() + engine.session().pending_media.len()
+        };
+
+        apply(&mut engine, attach(), false, &stream())
+            .await
+            .unwrap();
+        apply(
+            &mut engine,
+            Operation::SelectModel {
+                selection: "claude-opus-4-1".into(),
+            },
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attached(&engine), 2);
+
+        apply(&mut engine, Operation::NewSession, false, &stream())
+            .await
+            .unwrap();
+        assert_eq!(attached(&engine), 0);
+
+        let other = Session::new("anthropic", "claude-sonnet-4-5", 200_000, "Other");
+        storage::save_session(&other).unwrap();
+        apply(&mut engine, attach(), false, &stream())
+            .await
+            .unwrap();
+        apply(
+            &mut engine,
+            Operation::Load(other.id.to_string()),
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(attached(&engine), 0);
     }
 }
