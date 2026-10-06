@@ -668,6 +668,15 @@ impl App {
                     if snapshot.session.id.as_str() == id {
                         return Task::none();
                     }
+                    // A conversation from another project opens in that
+                    // project, so its tools run where it was started.
+                    let elsewhere = self
+                        .session_by_id(&id)
+                        .filter(|session| session.working_dir != snapshot.session.working_dir)
+                        .map(|session| PathBuf::from(session.working_dir.as_str()));
+                    if let Some(project) = elsewhere {
+                        return self.open_project(project, Some(id));
+                    }
                     self.remember_draft();
                 }
                 return self.dispatch(Operation::Load(id));
@@ -879,7 +888,7 @@ impl App {
                 }
             }
             Message::Quit => return window::latest().and_then(|id| Task::done(Message::Close(id))),
-            Message::OpenProject(path) if !self.busy => return self.open_project(path),
+            Message::OpenProject(path) if !self.busy => return self.open_project(path, None),
             Message::Started(worker, reply) => {
                 self.worker = Some(worker);
                 return self.update(Message::Ready(reply));
@@ -902,7 +911,7 @@ impl App {
             Message::ProjectPicked(path) => {
                 self.picking = false;
                 if let Some(path) = path {
-                    return self.open_project(path);
+                    return self.open_project(path, None);
                 }
             }
             Message::PickFiles if !self.busy && !self.picking && self.snapshot.is_some() => {
