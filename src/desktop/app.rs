@@ -21,6 +21,8 @@ pub(super) struct App {
     pub snapshot: Option<Arc<Snapshot>>,
     pub content: text_editor::Content,
     pub markdown: Vec<markdown::Content>,
+    /// Tool rows of each saved tool group, aligned with the messages.
+    pub activity: Vec<Vec<super::activity::Activity>>,
     pub busy: bool,
     pub error: String,
     pub status: String,
@@ -31,6 +33,8 @@ pub(super) struct App {
     pub panel: Option<Panel>,
     pub fields: Vec<String>,
     pub expanded: HashSet<usize>,
+    /// Saved tool rows opened to their detail, by (group, row).
+    pub expanded_rows: HashSet<(usize, usize)>,
     pub preferences: super::preferences::Preferences,
     pub picking: bool,
     pub review: super::review_view::Review,
@@ -94,6 +98,7 @@ pub(super) enum Message {
     ClosePanel,
     ToggleSidebar,
     ToggleTool(usize),
+    ToggleToolRow(usize, usize),
     ToggleUsage,
     Model(String),
     ModelInput(String),
@@ -125,6 +130,7 @@ pub(super) enum Message {
     Scrolled(bool),
     Latest,
     ToggleLive(usize),
+    ToggleLiveRow(usize, usize),
     ToggleReasoningDetails,
     AllowOnce,
     AllowAlways,
@@ -156,6 +162,7 @@ impl App {
                 snapshot: None,
                 content: text_editor::Content::new(),
                 markdown: Vec::new(),
+                activity: Vec::new(),
                 busy: !pick_project,
                 error: String::new(),
                 status: if pick_project {
@@ -170,6 +177,7 @@ impl App {
                 panel: None,
                 fields: Vec::new(),
                 expanded: HashSet::new(),
+                expanded_rows: HashSet::new(),
                 preferences,
                 picking: false,
                 review: super::review_view::Review::default(),
@@ -357,6 +365,7 @@ impl App {
                                     .unwrap_or(""),
                             );
                             self.expanded.clear();
+                            self.expanded_rows.clear();
                             self.usage_open = false;
                         }
                         if let Some(output) = &snapshot.output {
@@ -440,6 +449,10 @@ impl App {
                             .iter()
                             .map(|message| markdown::Content::parse(message.content.as_str()))
                             .collect();
+                        self.activity = super::activity::history(
+                            &snapshot.session.messages,
+                            std::path::Path::new(&self.project),
+                        );
                         self.model_input = snapshot.session.model.to_string();
                         if !self.notices_shown && !snapshot.notices.is_empty() {
                             self.notices_shown = true;
@@ -567,7 +580,8 @@ impl App {
                     .snapshot
                     .as_ref()
                     .is_some_and(|snapshot| snapshot.show_reasoning);
-                self.live.push(event, show);
+                self.live
+                    .push(event, show, std::path::Path::new(&self.project));
                 if self.follow_output {
                     return operation::snap_to_end("conversation");
                 }
@@ -611,11 +625,8 @@ impl App {
                 self.follow_output = true;
                 return operation::snap_to_end("conversation");
             }
-            Message::ToggleLive(index) => {
-                if !self.live.expanded.remove(&index) {
-                    self.live.expanded.insert(index);
-                }
-            }
+            Message::ToggleLive(index) => toggle(&mut self.live.collapsed, index),
+            Message::ToggleLiveRow(block, row) => toggle(&mut self.live.open_rows, (block, row)),
             Message::ToggleReasoningDetails => self.live.reasoning_open = !self.live.reasoning_open,
             Message::Select(id) if !self.busy => {
                 self.menu = None;
@@ -716,11 +727,8 @@ impl App {
                 self.sidebar = !self.sidebar;
                 self.menu = None;
             }
-            Message::ToggleTool(index) => {
-                if !self.expanded.remove(&index) {
-                    self.expanded.insert(index);
-                }
-            }
+            Message::ToggleTool(index) => toggle(&mut self.expanded, index),
+            Message::ToggleToolRow(group, row) => toggle(&mut self.expanded_rows, (group, row)),
             Message::ToggleUsage => self.usage_open = !self.usage_open,
             Message::Model(model) if !self.busy => {
                 return self.dispatch(Operation::SelectModel { selection: model });
@@ -939,6 +947,12 @@ impl App {
             }),
             window::close_requests().map(Message::Close),
         ])
+    }
+}
+
+fn toggle<T: std::hash::Hash + Eq>(set: &mut HashSet<T>, key: T) {
+    if !set.remove(&key) {
+        set.insert(key);
     }
 }
 

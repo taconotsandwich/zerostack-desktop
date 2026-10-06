@@ -45,8 +45,10 @@ impl App {
         self.snapshot = None;
         self.follow_output = true;
         self.expanded.clear();
+        self.expanded_rows.clear();
         self.review.clear();
         self.markdown.clear();
+        self.activity.clear();
         self.content = iced::widget::text_editor::Content::new();
         self.command_output.clear();
         self.error.clear();
