@@ -11,6 +11,7 @@ mod live;
 mod operations;
 mod panels;
 mod preferences;
+mod queue;
 mod reply;
 mod review;
 mod review_view;

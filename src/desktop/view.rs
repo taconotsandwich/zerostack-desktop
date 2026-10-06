@@ -471,7 +471,11 @@ impl App {
         let slash_open = !self.slash_commands().is_empty();
         let editor = text_editor(&self.content)
             .id("composer")
-            .placeholder("Ask anything")
+            .placeholder(if self.busy && self.snapshot.is_some() {
+                "Queue a follow-up"
+            } else {
+                "Ask anything"
+            })
             .height(layout::EDITOR_HEIGHT)
             .padding(0)
             .size(style::BODY)
@@ -535,14 +539,17 @@ impl App {
         } else {
             tools = tools.push(space::horizontal());
         }
+        // While a turn runs, sending queues the text behind it.
+        let input = self.content.text();
+        let (label, ready) = if self.busy {
+            ("Queue message", super::queue::queueable(&input))
+        } else {
+            ("Send", !input.trim().is_empty())
+        };
         tools = tools.push(icon_button(
             Icon::Send,
-            "Send",
-            (!self.busy
-                && !self.picking
-                && self.snapshot.is_some()
-                && !self.content.text().trim().is_empty())
-            .then_some(Message::Send),
+            label,
+            (ready && !self.picking && self.snapshot.is_some()).then_some(Message::Send),
         ));
         let composer = container(column![editor, tools].spacing(layout::SM))
             .padding(layout::LG)
@@ -595,6 +602,9 @@ impl App {
         }
         if self.usage_open {
             area = area.push(container(self.usage()).width(Fill).align_x(Right));
+        }
+        if !self.queued.is_empty() {
+            area = area.push(self.queued_view());
         }
         area = area.push(context);
         if !self.error.is_empty() && self.snapshot.is_some() && self.panel.is_none() {
