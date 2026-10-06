@@ -19,6 +19,7 @@ pub(super) enum Operation {
         name: String,
     },
     Delete(String),
+    NewSession,
     ClearMessages,
     Undo,
     Redo,
@@ -482,6 +483,7 @@ async fn apply(
             Operation::Prompt(_)
                 | Operation::Command(_)
                 | Operation::Load(_)
+                | Operation::NewSession
                 | Operation::ClearMessages
                 | Operation::Undo
                 | Operation::Redo
@@ -543,6 +545,10 @@ async fn apply(
         Operation::Delete(id) => {
             validate_id(&id)?;
             storage::delete_session(&id)?;
+            None
+        }
+        Operation::NewSession => {
+            engine.new_session();
             None
         }
         Operation::ClearMessages => {
@@ -1006,6 +1012,32 @@ mod tests {
                 .messages
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn new_session_starts_a_fresh_saved_conversation() {
+        let _lock = fake_model::run_print_guard::acquire();
+        let _data = Isolated::new();
+        let mut engine = engine();
+        apply(
+            &mut engine,
+            Operation::Prompt("Explain the code".into()),
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        let previous = engine.session().id.clone();
+
+        apply(&mut engine, Operation::NewSession, false, &stream())
+            .await
+            .unwrap();
+        let session = engine.session();
+        assert_ne!(session.id, previous);
+        assert!(session.messages.is_empty());
+        assert_eq!(session.model.as_str(), "claude-sonnet-4-5");
+        assert!(saved_session(&session.id).is_ok());
+        assert_eq!(saved_session(&previous).unwrap().messages.len(), 2);
     }
 
     #[test]

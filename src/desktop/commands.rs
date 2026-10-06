@@ -51,6 +51,7 @@ const fn command(
 
 pub(super) fn available() -> Vec<Command> {
     vec![
+        command("New conversation", "/new-conversation", &[], false, None),
         command(
             "Clear messages",
             "/clear",
@@ -351,7 +352,7 @@ mod palette_tests {
 
     #[test]
     fn palette_exposes_desktop_owned_commands() {
-        for syntax in ["/rewind", "/docs", "/tutor"] {
+        for syntax in ["/rewind", "/docs", "/tutor", "/new-conversation"] {
             assert!(find(syntax).is_some(), "{syntax}");
         }
         #[cfg(feature = "git-worktree")]

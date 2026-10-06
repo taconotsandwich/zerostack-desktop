@@ -164,6 +164,13 @@ impl App {
             space::horizontal()
         ]
         .align_y(Center);
+        if let Some(command) = commands::find("/new-conversation") {
+            heading = heading.push(icon_button(
+                Icon::NewChat,
+                "New conversation",
+                (!self.busy).then_some(Message::Choose(command)),
+            ));
+        }
         if let Some(command) = commands::find("/import") {
             heading = heading.push(icon_button(
                 Icon::Import,
