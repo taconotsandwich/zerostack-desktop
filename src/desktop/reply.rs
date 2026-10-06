@@ -31,9 +31,61 @@ pub(super) fn quote(draft: &str, excerpt: &str) -> String {
     format!("{draft}{separator}{marker}\n{quoted}\n\n")
 }
 
+/// One piece of a sent message: a passage it replied to, or its own words.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Part {
+    Quote(String),
+    Text(String),
+}
+
+/// Read a sent message back as the quotes it replied to and its own text,
+/// without the reply markers. A blockquote with no marker is the author's
+/// own text and stays as written.
+pub(super) fn parts(message: &str) -> Vec<Part> {
+    let mut parts = Vec::new();
+    let mut text: Vec<&str> = Vec::new();
+    let mut quote: Option<Vec<&str>> = None;
+    for line in message.lines() {
+        if let Some(lines) = &mut quote {
+            if let Some(rest) = line.strip_prefix('>') {
+                lines.push(rest.strip_prefix(' ').unwrap_or(rest));
+                continue;
+            }
+            push_quote(&mut parts, lines);
+            quote = None;
+        }
+        if line.starts_with(MARKER) && line.trim_end().ends_with("-->") {
+            push_text(&mut parts, &mut text);
+            quote = Some(Vec::new());
+        } else {
+            text.push(line);
+        }
+    }
+    if let Some(lines) = &quote {
+        push_quote(&mut parts, lines);
+    }
+    push_text(&mut parts, &mut text);
+    parts
+}
+
+fn push_quote(parts: &mut Vec<Part>, lines: &[&str]) {
+    if !lines.is_empty() {
+        parts.push(Part::Quote(lines.join("\n")));
+    }
+}
+
+fn push_text(parts: &mut Vec<Part>, lines: &mut Vec<&str>) {
+    let joined = lines.join("\n");
+    let text = joined.trim_end().trim_start_matches(['\n', '\r']);
+    if !text.is_empty() {
+        parts.push(Part::Text(text.to_string()));
+    }
+    lines.clear();
+}
+
 #[cfg(test)]
 mod tests {
-    use super::quote;
+    use super::{Part, parts, quote};
 
     #[test]
     fn first_quote_is_unnumbered_and_keeps_blank_lines_inside_the_quote() {
@@ -50,6 +102,36 @@ mod tests {
         assert_eq!(
             quote(&draft, "Two"),
             "<!-- reply -->\n> One\n\nMy answer\n\n<!-- reply 2 -->\n> Two\n\n"
+        );
+    }
+
+    #[test]
+    fn replies_read_back_as_quotes_and_text_without_markers() {
+        let message = quote("", "6 passed.\n\n- Skipped: totals");
+        let message = format!("{message}Add the totals line.\n");
+        let message = quote(&message, "Second");
+        let message = format!("{message}And this.");
+        assert_eq!(
+            parts(&message),
+            [
+                Part::Quote("6 passed.\n\n- Skipped: totals".into()),
+                Part::Text("Add the totals line.".into()),
+                Part::Quote("Second".into()),
+                Part::Text("And this.".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn plain_messages_and_unmarked_blockquotes_stay_text() {
+        assert_eq!(
+            parts("> my own quote\n\nreply"),
+            [Part::Text("> my own quote\n\nreply".into())]
+        );
+        assert_eq!(parts("hi"), [Part::Text("hi".into())]);
+        assert_eq!(
+            parts("<!-- reply -->\nno quote"),
+            [Part::Text("no quote".into())]
         );
     }
 }
