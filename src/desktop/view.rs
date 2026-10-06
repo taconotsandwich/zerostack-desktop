@@ -547,6 +547,8 @@ impl App {
         let composer = container(column![editor, tools].spacing(layout::SM))
             .padding(layout::LG)
             .style(|_| style::surface(style::RAISED, style::BUBBLE_RADIUS));
+        // Rows that come and go stay in their own column: the editor keeps its
+        // place in the tree, and with it focus, when the picker opens.
         let mut area = column![].spacing(layout::SM);
         if files > 0 {
             area = area.push(self.attachments());
@@ -602,8 +604,7 @@ impl App {
                     .color(style::theme().palette().danger),
             );
         }
-        area = area.push(composer);
-        components::rail(area, self.layout())
+        components::rail(column![area, composer].spacing(layout::SM), self.layout())
     }
 }
 
