@@ -142,11 +142,20 @@ pub(super) enum Message {
 impl App {
     pub fn new(cli: Cli) -> (Self, Task<Message>) {
         let preferences = super::preferences::Preferences::load();
-        let pick_project = std::env::var_os("ZS_DESKTOP_PICK_PROJECT").is_some();
+        // A bundled app has no meaningful working directory: it reopens the
+        // last project, and asks for one only when there is none left.
+        let directory = std::env::var_os("ZS_DESKTOP_PICK_PROJECT").map(|_| {
+            preferences
+                .projects
+                .iter()
+                .find(|project| project.is_dir())
+                .map(|project| project.display().to_string())
+        });
+        let pick_project = matches!(directory, Some(None));
         let (worker, task) = if pick_project {
             (None, Task::none())
         } else {
-            let (worker, ready) = Worker::start(cli.clone(), None);
+            let (worker, ready) = Worker::start(cli.clone(), directory.clone().flatten());
             (
                 Some(worker),
                 Task::perform(worker::receive(ready), Message::Ready),
@@ -155,10 +164,12 @@ impl App {
         (
             Self {
                 worker,
-                project: std::env::current_dir()
-                    .unwrap_or_default()
-                    .display()
-                    .to_string(),
+                project: directory.flatten().unwrap_or_else(|| {
+                    std::env::current_dir()
+                        .unwrap_or_default()
+                        .display()
+                        .to_string()
+                }),
                 cli,
                 snapshot: None,
                 content: text_editor::Content::new(),
@@ -317,6 +328,7 @@ impl App {
                 self.permission = None;
                 let pending = self.pending.take();
                 let mut scroll = false;
+                let mut focus = false;
                 let mut open_path: Option<String> = None;
                 match result {
                     Err(error) => {
@@ -356,6 +368,7 @@ impl App {
                         if changed_session {
                             self.follow_output = true;
                             scroll = true;
+                            focus = true;
                             self.content = text_editor::Content::with_text(
                                 self.preferences
                                     .drafts
@@ -520,7 +533,12 @@ impl App {
                 } else {
                     Task::none()
                 };
-                return Task::batch([scrolling, review]);
+                let focus = if focus {
+                    operation::focus("composer")
+                } else {
+                    Task::none()
+                };
+                return Task::batch([scrolling, review, focus]);
             }
             Message::Edit(action) => {
                 self.content.perform(action);
@@ -976,6 +994,9 @@ impl App {
                         }
                         keyboard::Key::Character("k") if modifiers.command() => {
                             Some(Message::Commands)
+                        }
+                        keyboard::Key::Character("n") if modifiers.command() => {
+                            Some(Message::NewConversation)
                         }
                         keyboard::Key::Character("q") if modifiers.command() => Some(Message::Quit),
                         _ => None,
