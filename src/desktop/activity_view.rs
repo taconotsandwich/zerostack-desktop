@@ -9,21 +9,23 @@ use super::layout;
 use super::style::{self, Icon};
 
 /// One tool group: a summary line that discloses a row per call, each row
-/// disclosing its own detail.
+/// disclosing its own detail. Only a `live` group has calls still running;
+/// a saved call without a result was cut off, not pending.
 pub(super) fn group<'a>(
     rows: &'a [Activity],
+    live: bool,
     open: bool,
     toggle: Message,
     row_open: impl Fn(usize) -> bool,
     toggle_row: impl Fn(usize) -> Message,
 ) -> Element<'a, Message> {
+    let failed = rows.iter().filter(|row| row.failure().is_some()).count();
     let header = button(
-        row![
-            text(activity::summary(rows)).size(style::LABEL),
-            style::chevron(open),
-        ]
-        .spacing(layout::XS)
-        .align_y(Center),
+        row![text(activity::summary(rows)).size(style::LABEL)]
+            .push((failed > 0).then(|| mark(format!("{failed} failed"), style::REMOVED)))
+            .push(style::chevron(open))
+            .spacing(layout::XS)
+            .align_y(Center),
     )
     .padding([layout::XS, layout::SM])
     .style(style::flat)
@@ -34,7 +36,7 @@ pub(super) fn group<'a>(
     let entries = column(
         rows.iter()
             .enumerate()
-            .map(|(index, activity)| entry(activity, row_open(index), toggle_row(index))),
+            .map(|(index, activity)| entry(activity, live, row_open(index), toggle_row(index))),
     )
     .spacing(layout::XS);
     column![
@@ -53,7 +55,12 @@ pub(super) fn group<'a>(
     .into()
 }
 
-fn entry(activity: &Activity, open: bool, toggle: Message) -> Element<'_, Message> {
+fn entry(activity: &Activity, live: bool, open: bool, toggle: Message) -> Element<'_, Message> {
+    let status = match activity.failure() {
+        Some(reason) => Some(mark(reason, style::REMOVED)),
+        None if live && activity.output.is_none() => Some(mark("Running…", style::MUTED)),
+        None => None,
+    };
     let line = row![
         text(&activity.verb).size(style::LABEL),
         container(
@@ -65,6 +72,7 @@ fn entry(activity: &Activity, open: bool, toggle: Message) -> Element<'_, Messag
         .width(Fill)
         .clip(true),
     ]
+    .push(status)
     .spacing(layout::SM)
     .align_y(Center);
     if !activity.expandable() {
@@ -138,6 +146,11 @@ fn detail(activity: &Activity) -> Element<'_, Message> {
     .spacing(layout::XS)
     .padding(iced::Padding::ZERO.left(layout::SM))
     .into()
+}
+
+/// A status word at the end of a row or summary.
+fn mark<'a>(label: impl text::IntoFragment<'a>, color: iced::Color) -> text::Text<'a> {
+    text(label).size(style::CAPTION).color(color)
 }
 
 fn code<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a> {
