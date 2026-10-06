@@ -19,6 +19,10 @@ pub(super) struct App {
     pub project: String,
     pub cli: Cli,
     pub snapshot: Option<Arc<Snapshot>>,
+    /// While the worker restarts in another project: the last snapshot, which
+    /// keeps the sidebar listed, and the conversation being opened (none for a
+    /// new one).
+    pub switching: Option<(Arc<Snapshot>, Option<String>)>,
     pub content: text_editor::Content,
     pub markdown: Vec<markdown::Content>,
     /// Tool rows of each saved tool group, aligned with the messages.
@@ -214,6 +218,7 @@ impl App {
                 notices_shown: false,
                 follow_output: true,
                 turn_id: 0,
+                switching: None,
             },
             task,
         )
@@ -891,6 +896,7 @@ impl App {
             Message::OpenProject(path) if !self.busy => return self.open_project(path, None),
             Message::Started(worker, reply) => {
                 self.worker = Some(worker);
+                self.switching = None;
                 return self.update(Message::Ready(reply));
             }
             Message::PickProject if !self.busy && !self.picking => {

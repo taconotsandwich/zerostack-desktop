@@ -36,7 +36,10 @@ impl App {
         self.remember_draft();
         self.project = path.display().to_string();
         self.panel = None;
-        self.snapshot = None;
+        self.switching = self
+            .snapshot
+            .take()
+            .map(|snapshot| (snapshot, session.clone()));
         self.follow_output = true;
         self.expanded.clear();
         self.expanded_rows.clear();
