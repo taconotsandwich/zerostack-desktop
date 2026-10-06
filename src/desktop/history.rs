@@ -22,19 +22,6 @@ pub(super) fn tool_group(messages: &[SessionMessage], index: usize) -> Option<&[
     Some(&messages[index..index + count])
 }
 
-pub(super) fn tool_count(messages: &[SessionMessage]) -> usize {
-    messages
-        .iter()
-        .filter(|message| {
-            matches!(
-                message.role,
-                MessageRole::ToolCall | MessageRole::SubagentToolCall
-            )
-        })
-        .count()
-        .max(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,7 +45,6 @@ mod tests {
         });
         let group = tool_group(&messages, 1).unwrap();
         assert_eq!(group.len(), 4);
-        assert_eq!(tool_count(group), 2);
         assert!(tool_group(&messages, 2).unwrap().is_empty());
         assert!(tool_group(&messages, 5).is_none());
         assert_eq!(tool_group(&messages, 6).unwrap().len(), 1);

@@ -1,3 +1,5 @@
+mod activity;
+mod activity_view;
 mod app;
 mod approval;
 mod commands;

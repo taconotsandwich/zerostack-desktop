@@ -289,6 +289,19 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         })
 }
 
+/// Disclosure chevron sized to sit beside label text.
+pub(super) fn chevron<'a>(open: bool) -> svg::Svg<'a, Theme> {
+    let bytes: &[u8] = if open {
+        include_bytes!("icons/chevron-down.svg")
+    } else {
+        include_bytes!("icons/chevron-right.svg")
+    };
+    svg(svg::Handle::from_memory(bytes))
+        .width(CAPTION)
+        .height(CAPTION)
+        .style(|_, _| svg::Style { color: Some(MUTED) })
+}
+
 pub(super) fn usage_ring<'a>(fraction: f64) -> svg::Svg<'a, Theme> {
     let fraction = if fraction.is_finite() {
         fraction.clamp(0.0, 1.0)
