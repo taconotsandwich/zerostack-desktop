@@ -1,8 +1,8 @@
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, row, rule, text};
+use iced::widget::{button, column, container, row, rule, space, text};
 use iced::{Center, Element, Fill, Font};
 
-use super::activity::{self, Activity};
+use super::activity::{self, Activity, Hunk, Input};
 use super::app::Message;
 use super::components::{self, icon_button};
 use super::layout;
@@ -88,35 +88,38 @@ fn entry(activity: &Activity, open: bool, toggle: Message) -> Element<'_, Messag
 }
 
 fn detail(activity: &Activity) -> Element<'_, Message> {
-    let excerpt = activity.excerpt();
-    let hidden = (excerpt.hidden > 0).then(|| {
-        text(format!(
-            "{} {} line{}",
-            excerpt.hidden,
-            if excerpt.from_end { "earlier" } else { "more" },
-            if excerpt.hidden == 1 { "" } else { "s" }
-        ))
-        .size(style::CAPTION)
-        .color(style::MUTED)
-    });
-    let body = text(excerpt.text)
-        .size(style::CAPTION)
-        .font(Font::MONOSPACE);
-    let mut lines = column![].spacing(layout::XS);
-    if excerpt.from_end {
-        lines = lines.push(hidden).push(body);
-    } else {
-        lines = lines.push(body).push(hidden);
+    let report = activity.report();
+    let mut sections = column![].spacing(layout::SM);
+    match &activity.input {
+        Input::None => {}
+        Input::Command(command) => {
+            sections = sections.push(code(format!("$ {command}")).color(style::INK));
+        }
+        Input::Content(content) => {
+            sections = sections.push(lines(activity::excerpt(content, false), style::INK));
+        }
+        Input::Diff(hunks) => sections = sections.push(diff(hunks)),
     }
-    let mut actions = row![icon_button(
-        Icon::Copy,
-        "Copy output",
-        activity
-            .output
-            .as_ref()
-            .map(|output| Message::Copy(output.clone())),
-    )]
-    .align_y(Center);
+    if !report.is_empty() {
+        let color = if activity.input == Input::None {
+            style::INK
+        } else {
+            style::MUTED
+        };
+        let from_end = activity.kind == activity::Kind::Command;
+        sections = sections.push(lines(activity::excerpt(report, from_end), color));
+    }
+    let mut actions = row![].align_y(Center);
+    if !report.is_empty() {
+        actions = actions.push(icon_button(
+            Icon::Copy,
+            "Copy output",
+            activity
+                .output
+                .as_ref()
+                .map(|output| Message::Copy(output.clone())),
+        ));
+    }
     if let Some(path) = &activity.full_output {
         actions = actions.push(components::action(
             "Open full output",
@@ -126,7 +129,7 @@ fn detail(activity: &Activity) -> Element<'_, Message> {
         ));
     }
     column![
-        container(lines)
+        container(sections)
             .width(Fill)
             .padding([layout::SM, layout::MD])
             .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
@@ -135,4 +138,73 @@ fn detail(activity: &Activity) -> Element<'_, Message> {
     .spacing(layout::XS)
     .padding(iced::Padding::ZERO.left(layout::SM))
     .into()
+}
+
+fn code<'a>(content: impl text::IntoFragment<'a>) -> text::Text<'a> {
+    text(content).size(style::CAPTION).font(Font::MONOSPACE)
+}
+
+/// An excerpt with a note for the lines it leaves out, on the side they were
+/// left out.
+fn lines<'a>(excerpt: activity::Excerpt<'a>, color: iced::Color) -> Element<'a, Message> {
+    let body = code(excerpt.text).color(color);
+    let hidden = (excerpt.hidden > 0).then(|| {
+        let side = if excerpt.from_end { "earlier" } else { "more" };
+        hidden_note(excerpt.hidden, side)
+    });
+    if excerpt.from_end {
+        column![hidden, body]
+    } else {
+        column![body, hidden]
+    }
+    .spacing(layout::XS)
+    .into()
+}
+
+fn hidden_note<'a>(count: usize, side: &str) -> text::Text<'a> {
+    let plural = if count == 1 { "" } else { "s" };
+    text(format!("{count} {side} line{plural}"))
+        .size(style::CAPTION)
+        .color(style::MUTED)
+}
+
+/// Removed and added lines on tinted rows, hunks set apart, capped at
+/// `DIFF_LINES`.
+fn diff(hunks: &[Hunk]) -> Element<'_, Message> {
+    let changes = hunks.iter().enumerate().flat_map(|(index, hunk)| {
+        let removed = hunk.removed.iter().map(move |line| (index, '-', line));
+        removed.chain(hunk.added.iter().map(move |line| (index, '+', line)))
+    });
+    let total = changes.clone().count();
+    let mut body = column![];
+    let mut previous = 0;
+    for (index, mark, line) in changes.take(activity::DIFF_LINES) {
+        if index != previous {
+            body = body.push(space().height(layout::XS));
+            previous = index;
+        }
+        let color = if mark == '-' {
+            style::REMOVED
+        } else {
+            style::ADDED
+        };
+        body = body.push(
+            container(
+                code(format!("{mark} {line}"))
+                    .color(color)
+                    .wrapping(Wrapping::None),
+            )
+            .width(Fill)
+            .clip(true)
+            .padding([0.0, layout::XS])
+            .style(move |_| container::Style {
+                background: Some(style::tint(color).into()),
+                ..container::Style::default()
+            }),
+        );
+    }
+    let hidden = total.saturating_sub(activity::DIFF_LINES);
+    body.push((hidden > 0).then(|| hidden_note(hidden, "more")))
+        .spacing(0)
+        .into()
 }
