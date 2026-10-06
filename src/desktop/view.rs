@@ -454,14 +454,11 @@ impl App {
         let latest: Element<'_, Message> = if self.follow_output {
             space().into()
         } else {
-            container(
-                container(components::action("Latest", Some(Message::Latest)))
-                    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
-            )
-            .center_x(Fill)
-            .align_bottom(Fill)
-            .padding(layout::SM)
-            .into()
+            container(components::action("Latest", Some(Message::Latest)).style(style::floating))
+                .center_x(Fill)
+                .align_bottom(Fill)
+                .padding(layout::SM)
+                .into()
         };
         stack![transcript, latest].into()
     }
