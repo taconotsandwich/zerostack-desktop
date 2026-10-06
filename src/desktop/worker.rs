@@ -482,8 +482,6 @@ async fn apply(
             operation,
             Operation::Prompt(_)
                 | Operation::Command(_)
-                | Operation::Load(_)
-                | Operation::NewSession
                 | Operation::ClearMessages
                 | Operation::Undo
                 | Operation::Redo
@@ -511,6 +509,7 @@ async fn apply(
                 Operation::MergeWorktree { .. } | Operation::ExitWorktree
             ));
     let before = serde_json::to_vec(engine.session())?;
+    let had_messages = !engine.session().messages.is_empty();
     let mut document = None;
     // Only the `memory` build assigns it, so keep the `mut` quiet otherwise.
     #[allow(unused_mut)]
@@ -706,7 +705,11 @@ async fn apply(
             max_iterations,
         } => Some(engine.run_loop(Some(prompt), max_iterations).await?),
     };
-    if persist && before != serde_json::to_vec(engine.session())? {
+    // A conversation reaches disk with its first message: a new one stays in
+    // memory until then, so starting or abandoning it leaves no empty entry.
+    // One emptied by clear or undo is still saved, so the change sticks.
+    let kept = had_messages || !engine.session().messages.is_empty();
+    if persist && kept && before != serde_json::to_vec(engine.session())? {
         storage::save_session(engine.session())?;
     }
     Ok(Applied {
@@ -811,7 +814,7 @@ pub(super) fn title(session: &Session) -> String {
         .find(|message| message.role == crate::session::MessageRole::User)
         .and_then(|message| message.content.lines().find(|line| !line.trim().is_empty()))
         .map(|line| line.trim().chars().take(72).collect())
-        .unwrap_or_else(|| "Untitled conversation".into())
+        .unwrap_or_else(|| "New conversation".into())
 }
 
 #[cfg(test)]
@@ -1015,10 +1018,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_session_starts_a_fresh_saved_conversation() {
+    async fn new_conversations_are_saved_with_their_first_message() {
         let _lock = fake_model::run_print_guard::acquire();
         let _data = Isolated::new();
         let mut engine = engine();
+        let first = engine.session().id.clone();
+        assert!(saved_session(&first).is_err());
         apply(
             &mut engine,
             Operation::Prompt("Explain the code".into()),
@@ -1027,17 +1032,31 @@ mod tests {
         )
         .await
         .unwrap();
-        let previous = engine.session().id.clone();
+        assert_eq!(saved_session(&first).unwrap().messages.len(), 2);
+
+        apply(&mut engine, Operation::ClearMessages, false, &stream())
+            .await
+            .unwrap();
+        assert!(saved_session(&first).unwrap().messages.is_empty());
 
         apply(&mut engine, Operation::NewSession, false, &stream())
             .await
             .unwrap();
-        let session = engine.session();
-        assert_ne!(session.id, previous);
-        assert!(session.messages.is_empty());
-        assert_eq!(session.model.as_str(), "claude-sonnet-4-5");
-        assert!(saved_session(&session.id).is_ok());
-        assert_eq!(saved_session(&previous).unwrap().messages.len(), 2);
+        apply(
+            &mut engine,
+            Operation::SelectModel {
+                selection: "claude-opus-4-1".into(),
+            },
+            false,
+            &stream(),
+        )
+        .await
+        .unwrap();
+        let fresh = engine.session();
+        assert_ne!(fresh.id, first);
+        assert!(fresh.messages.is_empty());
+        assert_eq!(fresh.model.as_str(), "claude-opus-4-1");
+        assert!(saved_session(&fresh.id).is_err());
     }
 
     #[test]
