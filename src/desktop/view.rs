@@ -555,7 +555,9 @@ impl App {
                 );
             }
         }
-        if entries.is_empty() && self.busy {
+        // The one busy indicator: it trails the turn, so it reads as the
+        // turn's progress and never shifts the composer under the cursor.
+        if self.busy {
             entries.push(
                 text(&self.status)
                     .size(style::LABEL)
@@ -744,9 +746,6 @@ impl App {
             area = area.push(container(self.usage()).width(Fill).align_x(Right));
         }
         area = area.push(context);
-        if !self.status.is_empty() {
-            area = area.push(text(&self.status).size(style::CAPTION).color(style::MUTED));
-        }
         if !self.error.is_empty() && self.snapshot.is_some() && self.panel.is_none() {
             area = area.push(
                 text(&self.error)
