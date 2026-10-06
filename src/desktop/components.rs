@@ -43,6 +43,25 @@ pub(super) fn action<'a>(
         .style(style::flat)
 }
 
+/// An action led by an icon.
+pub(super) fn icon_action<'a>(
+    icon: Icon,
+    label: impl Into<std::borrow::Cow<'a, str>>,
+    message: Option<Message>,
+) -> button::Button<'a, Message> {
+    let content = row![
+        style::icon(icon, message.is_some()),
+        text(label.into()).size(style::LABEL)
+    ]
+    .spacing(layout::SM)
+    .align_y(Center);
+    button(container(content).center_y(Fill))
+        .height(layout::CONTROL_HEIGHT)
+        .padding([0.0, layout::MD])
+        .on_press_maybe(message)
+        .style(style::flat)
+}
+
 pub(super) fn choice<'a>(
     options: Vec<String>,
     selected: Option<String>,

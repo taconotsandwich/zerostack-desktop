@@ -15,6 +15,7 @@ mod reply;
 mod review;
 mod review_view;
 mod scroll;
+mod sidebar;
 #[cfg(test)]
 mod startup_tests;
 mod style;

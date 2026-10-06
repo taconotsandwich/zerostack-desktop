@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, column, container, hover, markdown, mouse_area, row, scrollable, space, stack, text,
+    button, column, container, markdown, mouse_area, row, scrollable, space, stack, text,
     text_editor, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Font, Left, Padding, Right, Theme, keyboard};
@@ -11,7 +11,7 @@ use super::layout::{self, Layout};
 use super::live::Block;
 use super::style::{self, Icon};
 use super::worker;
-use crate::session::{MessageRole, Session, ToolRecord};
+use crate::session::{MessageRole, ToolRecord};
 use crate::ui::feed::BlockStyle;
 
 impl App {
@@ -25,7 +25,7 @@ impl App {
 
     /// An empty conversation with nothing on its way: the composer waits
     /// centered under the greeting for the first message.
-    fn starting(&self) -> bool {
+    pub(super) fn starting(&self) -> bool {
         self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.session.messages.is_empty()
                 && self.command_output.is_empty()
@@ -165,141 +165,6 @@ impl App {
             return stack![base, overlay].into();
         }
         stack![base, space()].into()
-    }
-
-    fn sidebar_view(&self) -> Element<'_, Message> {
-        let mut heading = row![
-            text("Conversations")
-                .size(style::CAPTION)
-                .color(style::MUTED),
-            space::horizontal()
-        ]
-        .align_y(Center);
-        if self.snapshot.is_some() {
-            heading = heading.push(icon_button(
-                Icon::NewChat,
-                "New conversation",
-                (!self.busy).then_some(Message::NewConversation),
-            ));
-            if let Some(command) = commands::find("/import") {
-                heading = heading.push(icon_button(
-                    Icon::Import,
-                    "Import conversation",
-                    (!self.busy).then_some(Message::Choose(command)),
-                ));
-            }
-        }
-        let mut list = column![].spacing(layout::XS);
-        // A conversation is listed once it has a message; a new one shows up
-        // when its first message is sent.
-        if let Some(snapshot) = &self.snapshot {
-            let listed = |session: &Session| {
-                !session.messages.is_empty() && !self.deleted.contains(session.id.as_str())
-            };
-            if listed(&snapshot.session)
-                && !snapshot
-                    .sessions
-                    .iter()
-                    .any(|session| session.id == snapshot.session.id)
-            {
-                list = list.push(self.session_row(&snapshot.session));
-            }
-            for session in &snapshot.sessions {
-                if listed(session) && session.working_dir == snapshot.session.working_dir {
-                    list = list.push(self.session_row(session));
-                }
-            }
-        }
-        let directory = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| folder_name(&snapshot.session.working_dir))
-            .unwrap_or_default();
-        let brand = container(text("zerostack").size(style::TITLE))
-            .height(layout::HEADER_HEIGHT)
-            .width(Fill)
-            .align_y(Center)
-            .padding([0.0, layout::XL]);
-        let footer = row![
-            container(text(directory).size(style::CAPTION).color(style::MUTED))
-                .width(Fill)
-                .padding([0.0, layout::MD]),
-            icon_button(
-                Icon::Folder,
-                "Open project",
-                (!self.busy).then_some(Message::Show(Panel::Projects))
-            ),
-            icon_button(
-                Icon::Settings,
-                "Settings",
-                Some(Message::Show(Panel::Settings))
-            ),
-        ]
-        .align_y(Center)
-        .height(layout::CONTROL_HEIGHT);
-        container(column![
-            brand,
-            container(
-                column![
-                    container(heading)
-                        .padding([0.0, layout::MD])
-                        .height(layout::CONTROL_HEIGHT),
-                    scrollable(list).height(Fill),
-                    footer,
-                ]
-                .spacing(layout::SM)
-            )
-            .padding(layout::MD)
-            .height(Fill),
-        ])
-        .width(layout::SIDEBAR_WIDTH)
-        .height(Fill)
-        .style(|_| style::surface(style::SIDEBAR, 0.0))
-        .into()
-    }
-
-    fn session_row<'a>(&'a self, session: &'a Session) -> Element<'a, Message> {
-        let id = session.id.to_string();
-        if let Some((editing, name)) = &self.rename
-            && editing == &id
-        {
-            return components::field("Conversation name", name)
-                .id("conversation-name")
-                .on_input(Message::RenameValue)
-                .on_submit(Message::SaveName)
-                .into();
-        }
-        let active = self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.session.id == session.id);
-        let title = worker::title(session);
-        let label = mouse_area(components::row_label(title))
-            .on_press(Message::Select(id.clone()))
-            .on_double_click(Message::Rename(id.clone()));
-        let more = icon_button(
-            Icon::More,
-            "More",
-            (!self.busy).then_some(Message::More(id.clone())),
-        );
-        let base = container(row![label, space::horizontal().width(layout::ICON_TARGET)])
-            .width(Fill)
-            .style(move |_| {
-                style::surface(
-                    if active {
-                        style::SELECTED
-                    } else {
-                        Color::TRANSPARENT
-                    },
-                    style::CONTROL_RADIUS,
-                )
-            });
-        let overlay = container(more)
-            .width(Fill)
-            .height(Fill)
-            .align_x(Right)
-            .align_y(Center);
-        hover(base, overlay)
     }
 
     fn conversation(&self) -> Element<'_, Message> {
@@ -666,19 +531,11 @@ impl App {
                 iced::Length::Shrink,
             ));
             if self.starting() {
-                let project = row![
-                    style::icon(Icon::Folder, !self.busy),
-                    text(folder_name(&snapshot.session.working_dir)).size(style::LABEL),
-                ]
-                .spacing(layout::SM)
-                .align_y(Center);
-                tools = tools.push(
-                    button(container(project).center_y(Fill))
-                        .height(layout::CONTROL_HEIGHT)
-                        .padding([0.0, layout::MD])
-                        .style(style::flat)
-                        .on_press_maybe((!self.busy).then_some(Message::Show(Panel::Projects))),
-                );
+                tools = tools.push(components::icon_action(
+                    Icon::Folder,
+                    super::sidebar::folder_name(&snapshot.session.working_dir),
+                    (!self.busy).then_some(Message::Show(Panel::Projects)),
+                ));
             }
             tools = tools.push(space::horizontal());
             let mut models = snapshot.models.clone();
@@ -767,13 +624,6 @@ impl App {
         area = area.push(composer);
         components::rail(area, self.layout())
     }
-}
-
-fn folder_name(path: &str) -> String {
-    std::path::Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string())
 }
 
 fn scrim<'a>(sheet: impl Into<Element<'a, Message>>) -> Element<'a, Message> {

@@ -20,7 +20,9 @@ impl App {
         }
     }
 
-    pub(super) fn open_project(&mut self, path: PathBuf) -> Task<Message> {
+    /// Restarts the worker in `path`, on `session` when given, else on a new
+    /// conversation.
+    pub(super) fn open_project(&mut self, path: PathBuf, session: Option<String>) -> Task<Message> {
         if self.busy {
             return Task::none();
         }
@@ -47,7 +49,8 @@ impl App {
         self.busy = true;
         self.status = "Opening project…".into();
         let previous = self.worker.take();
-        let cli = self.cli.clone();
+        let mut cli = self.cli.clone();
+        cli.session = session;
         let directory = self.project.clone();
         Task::perform(
             async move {
