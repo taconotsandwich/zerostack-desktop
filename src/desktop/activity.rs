@@ -64,6 +64,26 @@ pub(super) struct Activity {
     pub output: Option<String>,
     /// Where the untruncated output was saved, for long results.
     pub full_output: Option<String>,
+    /// What the call was asked to do, where that says more than the row.
+    pub input: Input,
+}
+
+/// The part of a call's arguments worth reading: the whole command, the
+/// content written, the lines an edit swaps.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) enum Input {
+    #[default]
+    None,
+    Command(String),
+    Content(String),
+    Diff(Vec<Hunk>),
+}
+
+/// One replacement in an edit: the lines taken out and the lines put in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct Hunk {
+    pub removed: Vec<String>,
+    pub added: Vec<String>,
 }
 
 impl Activity {
@@ -87,17 +107,34 @@ impl Activity {
             target: target(name, args, root),
             output: None,
             full_output: None,
+            input: input(kind, args),
         }
     }
 
     /// Rows with nothing beyond their one line (a plain file read) do not
     /// expand.
     pub fn expandable(&self) -> bool {
-        self.kind != Kind::Read
-            && self
-                .output
-                .as_deref()
-                .is_some_and(|output| !output.is_empty())
+        self.kind != Kind::Read && (self.input != Input::None || !self.report().is_empty())
+    }
+
+    /// Output worth showing: all of it for most tools; for writes and edits,
+    /// whose input already shows the change, only what follows the success
+    /// line (notes, diagnostics) or the whole of a failure.
+    pub fn report(&self) -> &str {
+        let output = self.output.as_deref().unwrap_or_default();
+        let success = match self.kind {
+            Kind::Write => "Written ",
+            Kind::Edit => "Applied ",
+            _ => return output,
+        };
+        let mut end = 0;
+        for line in output.split_inclusive('\n') {
+            end += line.len();
+            if line.starts_with(success) {
+                return output[end..].trim();
+            }
+        }
+        output
     }
 }
 
@@ -114,32 +151,32 @@ pub(super) struct Excerpt<'a> {
     pub from_end: bool,
 }
 
-impl Activity {
-    pub fn excerpt(&self) -> Excerpt<'_> {
-        let output = self.output.as_deref().unwrap_or_default().trim_end();
-        let from_end = self.kind == Kind::Command;
-        let total = output.lines().count();
-        let hidden = total.saturating_sub(EXCERPT_LINES);
-        let text = if hidden == 0 {
-            output
-        } else if from_end {
-            let start = output
-                .match_indices('\n')
-                .nth(hidden - 1)
-                .map_or(0, |(index, _)| index + 1);
-            &output[start..]
-        } else {
-            let end = output
-                .match_indices('\n')
-                .nth(EXCERPT_LINES - 1)
-                .map_or(output.len(), |(index, _)| index);
-            &output[..end]
-        };
-        Excerpt {
-            text,
-            hidden,
-            from_end,
-        }
+/// Lines of a diff shown inline.
+pub(super) const DIFF_LINES: usize = 40;
+
+pub(super) fn excerpt(output: &str, from_end: bool) -> Excerpt<'_> {
+    let output = output.trim_end();
+    let total = output.lines().count();
+    let hidden = total.saturating_sub(EXCERPT_LINES);
+    let text = if hidden == 0 {
+        output
+    } else if from_end {
+        let start = output
+            .match_indices('\n')
+            .nth(hidden - 1)
+            .map_or(0, |(index, _)| index + 1);
+        &output[start..]
+    } else {
+        let end = output
+            .match_indices('\n')
+            .nth(EXCERPT_LINES - 1)
+            .map_or(output.len(), |(index, _)| index);
+        &output[..end]
+    };
+    Excerpt {
+        text,
+        hidden,
+        from_end,
     }
 }
 
@@ -219,10 +256,106 @@ fn group_rows(group: &[SessionMessage], root: &Path) -> Vec<Activity> {
                 target: first_line(message.content.as_str()).to_string(),
                 output: None,
                 full_output: None,
+                input: Input::None,
             }),
         }
     }
     rows
+}
+
+fn input(kind: Kind, args: &serde_json::Value) -> Input {
+    let field = |key: &str| args.get(key).and_then(serde_json::Value::as_str);
+    match kind {
+        Kind::Command => field("command").map_or(Input::None, |command| {
+            Input::Command(command.trim().to_string())
+        }),
+        Kind::Write => {
+            field("content").map_or(Input::None, |content| Input::Content(content.to_string()))
+        }
+        Kind::Edit => {
+            let hunks = match field("block") {
+                Some(block) => search_replace(block),
+                None => tagged_edits(args),
+            };
+            if hunks.is_empty() {
+                Input::None
+            } else {
+                Input::Diff(hunks)
+            }
+        }
+        _ => Input::None,
+    }
+}
+
+/// Hunks of aider-style SEARCH/REPLACE blocks. An unclosed block is left
+/// out rather than guessed at; the tool rejects it anyway.
+fn search_replace(block: &str) -> Vec<Hunk> {
+    let mut hunks = Vec::new();
+    let mut open: Option<Hunk> = None;
+    let mut replacing = false;
+    for line in block.lines() {
+        match line.trim() {
+            "<<<<<<< SEARCH" => {
+                open = Some(Hunk::default());
+                replacing = false;
+            }
+            "=======" if open.is_some() && !replacing => replacing = true,
+            ">>>>>>> REPLACE" if replacing => {
+                hunks.extend(open.take());
+                replacing = false;
+            }
+            _ => {
+                if let Some(hunk) = &mut open {
+                    let side = if replacing {
+                        &mut hunk.added
+                    } else {
+                        &mut hunk.removed
+                    };
+                    side.push(line.to_string());
+                }
+            }
+        }
+    }
+    hunks
+}
+
+/// Hunks of hashedit edits: the tagged lines replaced, read without their
+/// tags, and the text put in their place.
+fn tagged_edits(args: &serde_json::Value) -> Vec<Hunk> {
+    let edits = args
+        .get("edits")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    edits
+        .iter()
+        .map(|edit| {
+            let field = |key: &str| edit.get(key).and_then(serde_json::Value::as_str);
+            let tagged = field("line").or(field("lines")).unwrap_or_default();
+            Hunk {
+                removed: tagged
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .map(|line| untag(line).to_string())
+                    .collect(),
+                added: field("text")
+                    .unwrap_or_default()
+                    .lines()
+                    .map(String::from)
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
+/// "12|1a2b3c4d     let x = 1;" reads as "    let x = 1;".
+fn untag(line: &str) -> &str {
+    let stripped = line.trim_start_matches([' ', '\t']);
+    let (tag, content) = stripped.split_once(' ').unwrap_or((stripped, ""));
+    match tag.split_once('|') {
+        Some((number, _)) if number.parse::<usize>().is_ok() => content,
+        _ => line,
+    }
 }
 
 fn target(name: &str, args: &serde_json::Value, root: &Path) -> String {
@@ -370,25 +503,83 @@ mod tests {
     }
 
     #[test]
-    fn excerpts_keep_the_end_of_command_output_and_the_start_of_the_rest() {
+    fn excerpts_keep_the_end_or_the_start_of_long_output() {
         let output: String = (1..=20).map(|line| format!("{line}\n")).collect();
-        let mut command = row("bash", json!({"command": "make"}));
-        command.output = Some(output.clone());
-        let excerpt = command.excerpt();
-        assert_eq!((excerpt.hidden, excerpt.from_end), (4, true));
-        assert!(excerpt.text.starts_with("5\n") && excerpt.text.ends_with("\n20"));
+        let tail = excerpt(&output, true);
+        assert_eq!((tail.hidden, tail.from_end), (4, true));
+        assert!(tail.text.starts_with("5\n") && tail.text.ends_with("\n20"));
 
-        let mut search = row("grep", json!({"pattern": "x"}));
-        search.output = Some(output);
-        let excerpt = search.excerpt();
-        assert_eq!((excerpt.hidden, excerpt.from_end), (4, false));
-        assert!(excerpt.text.starts_with("1\n") && excerpt.text.ends_with("\n16"));
+        let head = excerpt(&output, false);
+        assert_eq!((head.hidden, head.from_end), (4, false));
+        assert!(head.text.starts_with("1\n") && head.text.ends_with("\n16"));
 
-        search.output = Some("one\ntwo\n".into());
+        let short = excerpt("one\ntwo\n", false);
+        assert_eq!((short.text, short.hidden), ("one\ntwo", 0));
+    }
+
+    #[test]
+    fn inputs_show_the_command_the_content_and_the_lines_an_edit_swaps() {
         assert_eq!(
-            (search.excerpt().text, search.excerpt().hidden),
-            ("one\ntwo", 0)
+            row("bash", json!({"command": "  cargo test\n"})).input,
+            Input::Command("cargo test".into())
         );
+        assert_eq!(
+            row("write", json!({"path": "a", "content": "x\ny\n"})).input,
+            Input::Content("x\ny\n".into())
+        );
+        assert_eq!(row("read", json!({"path": "a"})).input, Input::None);
+
+        let block = "<<<<<<< SEARCH\nold\n=======\nnew\n=======\n>>>>>>> REPLACE\n\
+                     <<<<<<< SEARCH\ngone\n=======\n>>>>>>> REPLACE\n\
+                     <<<<<<< SEARCH\nunclosed\n";
+        let Input::Diff(hunks) = row("edit", json!({"path": "a", "block": block})).input else {
+            panic!("no diff")
+        };
+        assert_eq!(
+            hunks,
+            [
+                Hunk {
+                    removed: vec!["old".into()],
+                    added: vec!["new".into(), "=======".into()],
+                },
+                Hunk {
+                    removed: vec!["gone".into()],
+                    added: vec![],
+                },
+            ]
+        );
+
+        let edits = json!({"path": "a", "file_crc": "0", "edits": [
+            {"line": "3|0a1b2c3d     let x = 1;", "text": "    let x = 2;"},
+            {"lines": "7|00000000 fn a() {\n8|11111111 }", "text": ""},
+        ]});
+        let Input::Diff(hunks) = row("edit", edits).input else {
+            panic!("no diff")
+        };
+        assert_eq!(hunks[0].removed, ["    let x = 1;"]);
+        assert_eq!(hunks[0].added, ["    let x = 2;"]);
+        assert_eq!(hunks[1].removed, ["fn a() {", "}"]);
+        assert!(hunks[1].added.is_empty());
+        assert_eq!(row("edit", json!({"path": "a"})).input, Input::None);
+    }
+
+    #[test]
+    fn writes_and_edits_report_only_what_follows_success() {
+        let mut edit = row("edit", json!({"path": "a", "block": ""}));
+        edit.output = Some("Applied 1 edit(s) to a".into());
+        assert_eq!(edit.report(), "");
+        edit.output = Some("Read it first.\n\nApplied 1 edit(s) to a\n  Note: fuzzy\n".into());
+        assert_eq!(edit.report(), "Note: fuzzy");
+        edit.output = Some("search text not found in 'a'.".into());
+        assert_eq!(edit.report(), "search text not found in 'a'.");
+
+        let mut command = row("bash", json!({"command": "ls"}));
+        command.output = Some("Applied nothing".into());
+        assert_eq!(command.report(), "Applied nothing");
+        assert!(command.expandable());
+        command.output = None;
+        assert!(command.expandable(), "the command itself is worth opening");
+        assert!(!row("grep", json!({"pattern": "x"})).expandable());
     }
 
     #[test]
