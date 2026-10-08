@@ -380,3 +380,117 @@ async fn run_string_btw_usage_without_message() {
     // `/btw` never touches the session.
     assert!(engine.session().messages.is_empty());
 }
+
+fn engine_with_permission(
+    mode: crate::permission::SecurityMode,
+) -> (Engine, crate::permission::checker::PermCheck) {
+    use std::sync::{Arc, Mutex};
+
+    use crate::permission::PermissionConfigs;
+    use crate::permission::checker::PermissionChecker;
+
+    isolate_data_dirs();
+    let checker = PermissionChecker::new(&PermissionConfigs::default(), mode, None, None);
+    let perm: crate::permission::checker::PermCheck = Arc::new(Mutex::new(checker));
+    let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
+    let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build());
+    let engine = Engine::new(
+        test_cli(),
+        Config::default(),
+        test_session(),
+        test_context(),
+        test_client(),
+        Some(perm.clone()),
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(agent);
+    (engine, perm)
+}
+
+#[test]
+fn set_permission_mode_accepts_every_mode_and_rejects_unknown() {
+    use crate::permission::SecurityMode;
+
+    let (mut engine, perm) = engine_with_permission(SecurityMode::Standard);
+    for (name, mode) in [
+        ("restrictive", SecurityMode::Restrictive),
+        ("readonly", SecurityMode::ReadOnly),
+        ("planwrite", SecurityMode::PlanWrite),
+        ("guarded", SecurityMode::Guarded),
+        ("yolo", SecurityMode::Yolo),
+        ("standard", SecurityMode::Standard),
+    ] {
+        engine.set_permission_mode(name).expect(name);
+        assert_eq!(perm.lock().unwrap().mode(), mode);
+    }
+    let error = engine.set_permission_mode("chaos").unwrap_err();
+    assert_eq!(error.to_string(), "unknown mode: chaos");
+    assert_eq!(perm.lock().unwrap().mode(), SecurityMode::Standard);
+}
+
+#[test]
+fn set_permission_mode_without_a_permission_system_fails() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_permission_mode("yolo").unwrap_err();
+    assert_eq!(error.to_string(), "permission system not active");
+}
+
+#[test]
+fn set_edit_system_rejects_unknown_systems() {
+    let (engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_edit_system("vim").unwrap_err();
+    assert_eq!(error.to_string(), "unknown: 'vim' (similarity|hashedit)");
+}
+
+#[tokio::test]
+async fn set_provider_rejects_unknown_providers() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_provider("nope").await.unwrap_err();
+    assert_eq!(error.to_string(), "unknown provider: 'nope'");
+    assert_eq!(engine.session().provider.as_str(), "anthropic");
+    assert!(engine.set_provider("  ").await.is_err());
+}
+
+#[tokio::test]
+async fn set_model_selection_switches_to_a_quick_model() {
+    isolate_data_dirs();
+    let cfg: Config = toml::from_str(
+        r#"
+[quick_models.fast]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+input_token_cost = 1.0
+output_token_cost = 5.0
+"#,
+    )
+    .expect("config");
+    let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
+    let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build());
+    let mut engine = Engine::new(
+        test_cli(),
+        cfg,
+        test_session(),
+        test_context(),
+        test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(agent);
+
+    engine
+        .set_model_selection("fast")
+        .await
+        .expect("quick model");
+    let session = engine.session();
+    assert_eq!(session.provider.as_str(), "anthropic");
+    assert_eq!(session.model.as_str(), "claude-haiku-4-5");
+    assert_eq!(session.input_token_cost, 1.0);
+    assert_eq!(session.output_token_cost, 5.0);
+
+    engine
+        .set_model_selection("claude-opus-4-1")
+        .await
+        .expect("raw model id");
+    assert_eq!(engine.session().model.as_str(), "claude-opus-4-1");
+    assert!(engine.set_model_selection("two words").await.is_err());
+}
