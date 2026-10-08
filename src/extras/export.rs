@@ -208,3 +208,90 @@ pub async fn share_gist(filename: &str, content: &str, description: &str) -> Res
         .map(str::to_string)
         .context("GitHub API response did not include html_url")
 }
+
+/// Write `session` to `destination` (by default an HTML file named after it
+/// in the current folder): JSONL for a `.jsonl` path, HTML otherwise.
+/// Returns the success message.
+pub fn export_session(
+    session: &Session,
+    destination: Option<std::path::PathBuf>,
+) -> Result<String> {
+    let path = destination
+        .unwrap_or_else(|| default_file_name(session).into())
+        .to_string_lossy()
+        .into_owned();
+    let (content, kind) = if path.ends_with(".jsonl") {
+        (session_to_jsonl(session), "JSONL")
+    } else {
+        (session_to_html(session), "HTML")
+    };
+    std::fs::write(&path, content).map_err(|error| anyhow::anyhow!("export failed: {error}"))?;
+    Ok(format!("exported {kind} to {path}"))
+}
+
+/// Read a session file (a saved `session.json` or a JSONL export) and save it
+/// as a session of its own. A JSONL export takes its provider, model and
+/// context window from `current`. Returns the session and the success
+/// message.
+pub fn import_session(path: &std::path::Path, current: &Session) -> Result<(Session, String)> {
+    let path = path.to_string_lossy().into_owned();
+    anyhow::ensure!(
+        !path.trim().is_empty(),
+        "usage: /import <file.jsonl|session.json>"
+    );
+    let content = std::fs::read_to_string(&path)
+        .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
+    // JSONL lines start with `{` too, so pick the format by extension.
+    let mut session = if !path.ends_with(".jsonl") {
+        serde_json::from_str::<Session>(&content)
+            .map_err(|error| anyhow::anyhow!("invalid session file: {error}"))?
+    } else {
+        let messages = parse_jsonl_import(&content)
+            .map_err(|error| anyhow::anyhow!("invalid JSONL session: {error}"))?;
+        let name = std::path::Path::new(&path)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "imported".to_string());
+        let mut session = Session::new(
+            current.provider.as_str(),
+            current.model.as_str(),
+            current.context_window,
+            &name,
+        );
+        for message in messages {
+            session.add_message(message.role, &message.content);
+        }
+        session
+    };
+    if session.name.is_empty() {
+        session.name = CompactString::new("imported");
+    }
+    let message_count = session.messages.len();
+    crate::session::storage::save_session(&session)
+        .map_err(|error| anyhow::anyhow!("failed to save session: {error}"))?;
+    Ok((
+        session,
+        format!("imported session from {path} ({message_count} msgs)"),
+    ))
+}
+
+/// Publish `session` as a secret gist. Returns the success message.
+pub async fn share_session(session: &Session) -> Result<String> {
+    let html = session_to_html(session);
+    let description = if session.name.is_empty() {
+        "zerostack session".to_string()
+    } else {
+        format!("zerostack session: {}", session.name)
+    };
+    match share_gist(&default_file_name(session), &html, &description).await {
+        Ok(url) => Ok(format!("shared as secret gist: {url}")),
+        Err(error) => anyhow::bail!("share failed: {error}"),
+    }
+}
+
+fn default_file_name(session: &Session) -> String {
+    format!(
+        "zerostack-session-{}.html",
+        &session.id[..8.min(session.id.len())]
+    )
+}
