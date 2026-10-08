@@ -232,6 +232,7 @@ impl LiveSession {
         let mut streamed = false;
         let mode_before = engine.permission_mode();
         let options_before = options::config_options(engine);
+        let name_before = engine.session().name.clone();
         let allowed: Arc<std::sync::Mutex<Vec<(CompactString, String)>>> = Arc::default();
         let out = {
             let run = engine.run_string(&text);
@@ -305,6 +306,13 @@ impl LiveSession {
                 cx,
                 &forwarder.session_id,
                 SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options_after)),
+            );
+        }
+        if engine.session().name != name_before {
+            send_update(
+                cx,
+                &forwarder.session_id,
+                store::session_info(engine.session()),
             );
         }
         send_update(cx, &forwarder.session_id, usage_update(engine.session()));
