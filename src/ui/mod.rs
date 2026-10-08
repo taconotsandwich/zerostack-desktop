@@ -151,40 +151,13 @@ pub(crate) struct WtReturn {
 /// Returns the message to show the user.
 #[cfg(feature = "git-worktree")]
 pub(crate) fn resolve_agent_merge_outcome(ret: &WtReturn) -> String {
-    use std::path::Path;
-    let main_repo = Path::new(&ret.main_path);
-    match crate::extras::git_worktree::verify_branch_merged(main_repo, &ret.target, &ret.branch) {
-        crate::extras::git_worktree::AgentMergeStatus::Merged => {
-            crate::extras::git_worktree::cleanup_worktree(
-                &ret.wt_path,
-                &ret.branch,
-                &ret.main_path,
-                ret.force,
-            );
-            format!(
-                "merged '{}' into '{}' and cleaned up; returned to main repo at {}",
-                ret.branch, ret.target, ret.main_path
-            )
-        }
-        crate::extras::git_worktree::AgentMergeStatus::Conflicts(files) => {
-            let mut msg = format!(
-                "merge has conflicts in {} file(s); worktree kept at {}:",
-                files.len(),
-                ret.wt_path
-            );
-            for f in &files {
-                msg.push_str(&format!("\n  {}", f));
-            }
-            msg
-        }
-        crate::extras::git_worktree::AgentMergeStatus::NotMerged(reason) => {
-            format!(
-                "agent run finished but '{}' is not merged into '{}' ({}); \
-                 worktree kept at {} for manual handling",
-                ret.branch, ret.target, reason, ret.wt_path
-            )
-        }
-    }
+    crate::extras::git_worktree::finish_agent_merge(
+        &ret.main_path,
+        &ret.wt_path,
+        &ret.branch,
+        &ret.target,
+        ret.force,
+    )
 }
 
 pub(super) const C_AGENT: Color = Color::White;
@@ -492,37 +465,13 @@ pub(crate) async fn spawn_merge_agent(
 ) {
     // NOTE: the agent must NOT delete the worktree or the branch itself.
     // Cleanup is conditional on verification in `resolve_agent_merge_outcome`
-    // (an aborted/failed agent run must leave both intact). The prompt says
-    // so explicitly, and the completion handler enforces it.
-    let prompt = format!(
-        "I'm in a git worktree on branch '{branch}' at '{wt_path}'. \
-         Merge it into '{target}' in the main repo at '{main_path}'.\n\n\
-         Follow these steps:\n\
-         1. cd {main_path}\n\
-         2. git fetch --all\n\
-         3. git checkout {target}\n\
-         4. git pull --ff-only (if this fails because the branch has no upstream, continue with the local branch)\n\
-         5. git merge --squash {branch}\n\
-         6. git commit --no-edit (if this says 'nothing to commit', the branch was already fully merged — treat it as success)\n\n\
-         After step 5, CHECK THE EXIT CODE and output.\n\
-         - If the merge Succeeded (no conflicts), continue to step 6.\n\
-         - If there is a MERGE CONFLICT:\n\
-           a. Run: git diff --name-only --diff-filter=U\n\
-           b. Tell the user WHICH FILES have conflicts. Show them the list.\n\
-           c. Ask the user what to do. Give them these options:\n\
-              - 'abort': run `git merge --abort` (or `git reset --merge` for squash merges), do NOT delete anything, stop here.\n\
-              - 'resolve <file>': you help them fix the conflict in that file.\n\
-              - 'leave': leave the conflict state as-is for manual resolution.\n\
-           d. WAIT for the user's response before continuing.\n\
-           e. Follow their instruction.\n\n\
-         7. If the merge succeeded (or conflicts were resolved and committed):\n\
-           - cd {main_path} and report completion.\n\
-           - Do NOT run `git worktree remove` or `git branch -d`: zerostack verifies the merge and cleans up itself.\n\n\
-         Important: Do NOT skip any step. Always check for conflicts after merge.",
-        branch = req.branch,
-        wt_path = req.wt_path,
-        target = req.target,
-        main_path = req.main_path,
+    // (an aborted/failed agent run must leave both intact). The prompt, shared
+    // with the engine's typed merge, says so explicitly.
+    let prompt = crate::extras::git_worktree::merge_prompt(
+        req.branch,
+        req.target,
+        req.main_path,
+        req.wt_path,
     );
     ui.session.add_message(MessageRole::User, &prompt);
     let history = crate::agent::runner::convert_history(ui.session);
