@@ -10,11 +10,11 @@ use permission::{ASK_ANNOUNCE_WAIT, ask_client, build_acp_permission, next_ask};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use agent_client_protocol::on_receive_request;
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{
     Agent, ByteStreams, Client, ConnectTo, ConnectionTo, Responder, Role, Stdio,
 };
+use agent_client_protocol::{on_receive_notification, on_receive_request};
 use compact_str::CompactString;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
@@ -22,7 +22,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
-use crate::engine::{Engine, RunOutput};
+use crate::engine::{CancelHandle, Engine, RunOutput};
 use crate::event::AgentEvent;
 use crate::permission::ask::{AskReceiver, AskRequest, AskSender};
 use crate::permission::checker::PermCheck;
@@ -51,7 +51,7 @@ pub(crate) struct AcpState {
     cli: Cli,
     cfg: Config,
     make_engine: EngineFactory,
-    sessions: Mutex<HashMap<SessionId, Arc<Mutex<LiveSession>>>>,
+    sessions: Mutex<HashMap<SessionId, Arc<AcpSession>>>,
 }
 
 impl AcpState {
@@ -94,7 +94,7 @@ impl AcpState {
     async fn session(
         &self,
         id: &SessionId,
-    ) -> Result<Arc<Mutex<LiveSession>>, agent_client_protocol::Error> {
+    ) -> Result<Arc<AcpSession>, agent_client_protocol::Error> {
         self.sessions
             .lock()
             .await
@@ -108,6 +108,13 @@ fn unknown_session(id: &SessionId) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(serde_json::json!({
         "message": format!("unknown session: {id}"),
     }))
+}
+
+/// A session as the server holds it. The cancel handle sits outside the
+/// lock, which a running prompt holds.
+struct AcpSession {
+    live: Mutex<LiveSession>,
+    cancel: CancelHandle,
 }
 
 /// One ACP session: its engine plus the receiving end of the engine's event
@@ -297,6 +304,16 @@ pub(crate) async fn serve_on(
             },
             on_receive_request!(),
         )
+        .on_receive_notification(
+            {
+                let state = state.clone();
+                move |notif: CancelNotification, _cx| {
+                    let state = state.clone();
+                    async move { handle_cancel(notif, &state).await }
+                }
+            },
+            on_receive_notification!(),
+        )
         .connect_to(transport)
         .await
 }
@@ -349,17 +366,20 @@ async fn handle_new_session(
         req.cwd.display()
     );
 
+    let cancel = engine.cancel_handle();
     let live = LiveSession {
         engine,
         events,
         asks,
         forwarder: EventForwarder::new(session_id.clone()),
     };
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(session_id.clone(), Arc::new(Mutex::new(live)));
+    state.sessions.lock().await.insert(
+        session_id.clone(),
+        Arc::new(AcpSession {
+            live: Mutex::new(live),
+            cancel,
+        }),
+    );
 
     responder.respond(NewSessionResponse::new(session_id))
 }
@@ -372,8 +392,8 @@ async fn handle_prompt(
 ) -> Result<(), agent_client_protocol::Error> {
     tracing::info!("ACP prompt for session {}", req.session_id);
 
-    let live = match state.session(&req.session_id).await {
-        Ok(live) => live,
+    let session = match state.session(&req.session_id).await {
+        Ok(session) => session,
         Err(e) => return responder.respond_with_error(e),
     };
     let prompt_text = req
@@ -391,11 +411,27 @@ async fn handle_prompt(
     cx.spawn({
         let cx = cx.clone();
         async move {
-            let out = live.lock().await.run(prompt_text, &cx).await;
+            let out = session.live.lock().await.run(prompt_text, &cx).await;
             match out.error {
                 Some(error) => responder.respond_with_internal_error(error),
+                None if out.cancelled => {
+                    responder.respond(PromptResponse::new(StopReason::Cancelled))
+                }
                 None => responder.respond(PromptResponse::new(StopReason::EndTurn)),
             }
         }
     })
+}
+
+/// Stop the session's running prompt; it then answers `cancelled`. The
+/// client answers its own pending permission requests as cancelled.
+async fn handle_cancel(
+    notif: CancelNotification,
+    state: &AcpState,
+) -> Result<(), agent_client_protocol::Error> {
+    tracing::info!("ACP cancel for session {}", notif.session_id);
+    if let Ok(session) = state.session(&notif.session_id).await {
+        session.cancel.cancel();
+    }
+    Ok(())
 }

@@ -33,6 +33,8 @@ mod crc_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]
+mod engine_cancel_tests;
+#[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
 mod fake_model;
