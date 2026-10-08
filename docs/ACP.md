@@ -74,8 +74,9 @@ configured one replaces it.
 During a prompt the client receives:
 
 - `agent_message_chunk` and `agent_thought_chunk` as the model streams.
-- `tool_call` for each tool call, with a title, kind (`read`, `edit`,
-  `search`, `execute`, `other`), the file it touches and the raw input.
+- `tool_call` for each tool call, with the tool name, a title, kind (`read`,
+  `edit`, `search`, `execute`, `other`), the file it touches and the raw
+  input.
 - `tool_call_update` with the result: `completed` with the output, and for
   `write` and `edit` a diff of each change, or `failed` with the reason.
 - `usage_update` after each prompt: the tokens in the context, the context
