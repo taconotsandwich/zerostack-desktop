@@ -51,6 +51,8 @@ mod edit_tests;
 #[cfg(test)]
 mod engine_cancel_tests;
 #[cfg(test)]
+mod engine_frontend_tests;
+#[cfg(test)]
 mod engine_headless_tests;
 #[cfg(test)]
 mod engine_tests;

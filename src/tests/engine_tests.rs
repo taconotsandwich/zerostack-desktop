@@ -54,7 +54,7 @@ pub(super) fn test_context() -> crate::context::ContextFiles {
     crate::context::load_with_prompts_dirs(true, &[])
 }
 
-fn engine_with_turns(turns: Vec<Vec<&str>>) -> (Engine, FakeModel) {
+pub(super) fn engine_with_turns(turns: Vec<Vec<&str>>) -> (Engine, FakeModel) {
     isolate_data_dirs();
     let model = fake_model::text_turns(turns);
     let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model.clone()).build());
