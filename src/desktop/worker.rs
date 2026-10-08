@@ -330,6 +330,12 @@ impl Worker {
                 let events_stream = stream.clone();
                 tokio::spawn(async move {
                     while let Some(event) = event_rx.recv().await {
+                        #[cfg(feature = "mcp")]
+                        if let AgentEvent::Token(text) = &event
+                            && let Some(url) = login_url(text)
+                        {
+                            events_stream.notify(UiEvent::OpenUrl(url));
+                        }
                         events_stream.notify(UiEvent::Agent(event));
                     }
                 });
@@ -408,7 +414,7 @@ impl Worker {
                 );
                 while let Some(request) = receiver.recv().await {
                     stream.set(request.events.clone());
-                    let result = apply(&mut engine, request.operation, no_session, &stream)
+                    let result = apply(&mut engine, request.operation, no_session)
                         .await
                         .and_then(|applied| {
                             adopt_session_allowlist(&mut engine, &allowed, no_session)?;
@@ -475,7 +481,6 @@ async fn apply(
     engine: &mut Engine,
     operation: Operation,
     no_session: bool,
-    stream: &UiStream,
 ) -> anyhow::Result<Applied> {
     let persist = !no_session
         && matches!(
@@ -604,11 +609,7 @@ async fn apply(
                     errors.push(format!("error: {error}"));
                 }
             }
-            (!errors.is_empty()).then(|| RunOutput {
-                kind: crate::engine::RunKind::Command,
-                text: errors.join("\n"),
-                usage: None,
-            })
+            (!errors.is_empty()).then(|| RunOutput::command(errors.join("\n")))
         }
         Operation::DropContextFile { path } => {
             if let Some(index) = engine
@@ -672,22 +673,23 @@ async fn apply(
             None
         }
         #[cfg(feature = "git-worktree")]
-        Operation::MergeWorktree { target } => Some(engine.merge_worktree(target).await?),
+        Operation::MergeWorktree { target } => {
+            let command = match target {
+                Some(target) => format!("/wt-merge {target}"),
+                None => "/wt-merge".to_string(),
+            };
+            Some(engine.run_string(&command).await?)
+        }
         #[cfg(feature = "git-worktree")]
-        Operation::ExitWorktree => Some(engine.exit_worktree().await?),
+        Operation::ExitWorktree => Some(engine.run_string("/wt-exit").await?),
         #[cfg(feature = "mcp")]
         Operation::McpLogin { server } => {
-            let stream = stream.clone();
-            Some(
-                engine
-                    .mcp_login(&server, move |url| {
-                        stream.notify(UiEvent::OpenUrl(url));
-                    })
-                    .await?,
-            )
+            Some(engine.run_string(&format!("/mcp login {server}")).await?)
         }
         #[cfg(feature = "mcp")]
-        Operation::McpLogout { server } => Some(engine.mcp_logout(&server)?),
+        Operation::McpLogout { server } => {
+            Some(engine.run_string(&format!("/mcp logout {server}")).await?)
+        }
         Operation::OpenDocument { name } => {
             let content = engine.read_doc(&name)?;
             document = Some((name, content));
@@ -823,6 +825,14 @@ pub(super) fn title(session: &Session) -> String {
         .unwrap_or_else(|| "New conversation".into())
 }
 
+/// The authorization URL that `/mcp login` prints before it waits.
+#[cfg(feature = "mcp")]
+fn login_url(text: &str) -> Option<String> {
+    let rest = text.strip_prefix("open this URL to authorize ")?;
+    let url = rest.lines().nth(1)?.trim();
+    url.starts_with("http").then(|| url.to_string())
+}
+
 #[cfg(test)]
 #[allow(unsafe_code, clippy::await_holding_lock)]
 mod tests {
@@ -870,10 +880,6 @@ mod tests {
         }
     }
 
-    fn stream() -> UiStream {
-        UiStream::default()
-    }
-
     fn engine() -> Engine {
         let model = fake_model::text_turns(vec![vec!["First reply"], vec!["Second reply"]]);
         Engine::new(
@@ -903,7 +909,6 @@ mod tests {
             &mut engine,
             Operation::Prompt("Explain the code".into()),
             false,
-            &stream(),
         )
         .await
         .unwrap()
@@ -914,18 +919,14 @@ mod tests {
             saved_session(&engine.session().id).unwrap().messages.len(),
             2
         );
-        apply(&mut engine, Operation::Undo, false, &stream())
-            .await
-            .unwrap();
+        apply(&mut engine, Operation::Undo, false).await.unwrap();
         assert!(
             saved_session(&engine.session().id)
                 .unwrap()
                 .messages
                 .is_empty()
         );
-        apply(&mut engine, Operation::Redo, false, &stream())
-            .await
-            .unwrap();
+        apply(&mut engine, Operation::Redo, false).await.unwrap();
         assert_eq!(
             saved_session(&engine.session().id).unwrap().messages.len(),
             2
@@ -947,19 +948,13 @@ mod tests {
                 name: "Renamed".into(),
             },
             false,
-            &stream(),
         )
         .await
         .unwrap();
         assert_eq!(saved_session(&other.id).unwrap().name, "Renamed");
-        apply(
-            &mut engine,
-            Operation::Delete(other.id.to_string()),
-            false,
-            &stream(),
-        )
-        .await
-        .unwrap();
+        apply(&mut engine, Operation::Delete(other.id.to_string()), false)
+            .await
+            .unwrap();
         assert!(saved_session(&other.id).is_err());
         assert_eq!(engine.session().id, active);
     }
@@ -971,21 +966,15 @@ mod tests {
         let mut engine = engine();
         let active = engine.session().id.clone();
         assert!(
-            apply(
-                &mut engine,
-                Operation::Delete("../outside".into()),
-                false,
-                &stream()
-            )
-            .await
-            .is_err()
+            apply(&mut engine, Operation::Delete("../outside".into()), false,)
+                .await
+                .is_err()
         );
         assert!(
             apply(
                 &mut engine,
                 Operation::Load(uuid::Uuid::new_v4().to_string()),
                 false,
-                &stream()
             )
             .await
             .is_err()
@@ -1002,7 +991,6 @@ mod tests {
             &mut engine,
             Operation::Prompt("Explain the code".into()),
             false,
-            &stream(),
         )
         .await
         .unwrap();
@@ -1011,7 +999,7 @@ mod tests {
             2
         );
 
-        apply(&mut engine, Operation::Rewind(0), false, &stream())
+        apply(&mut engine, Operation::Rewind(0), false)
             .await
             .unwrap();
         assert!(engine.session().messages.is_empty());
@@ -1034,18 +1022,17 @@ mod tests {
             &mut engine,
             Operation::Prompt("Explain the code".into()),
             false,
-            &stream(),
         )
         .await
         .unwrap();
         assert_eq!(saved_session(&first).unwrap().messages.len(), 2);
 
-        apply(&mut engine, Operation::ClearMessages, false, &stream())
+        apply(&mut engine, Operation::ClearMessages, false)
             .await
             .unwrap();
         assert!(saved_session(&first).unwrap().messages.is_empty());
 
-        apply(&mut engine, Operation::NewSession, false, &stream())
+        apply(&mut engine, Operation::NewSession, false)
             .await
             .unwrap();
         apply(
@@ -1054,7 +1041,6 @@ mod tests {
                 selection: "claude-opus-4-1".into(),
             },
             false,
-            &stream(),
         )
         .await
         .unwrap();
@@ -1112,7 +1098,6 @@ mod tests {
             &mut engine,
             Operation::AddContextFiles(vec![text.clone(), missing, image.clone(), image.clone()]),
             false,
-            &stream(),
         )
         .await
         .unwrap();
@@ -1123,7 +1108,6 @@ mod tests {
             &mut engine,
             Operation::DropContextFile { path: image },
             false,
-            &stream(),
         )
         .await
         .unwrap();
@@ -1145,39 +1129,41 @@ mod tests {
             engine.context().extra_files.len() + engine.session().pending_media.len()
         };
 
-        apply(&mut engine, attach(), false, &stream())
-            .await
-            .unwrap();
+        apply(&mut engine, attach(), false).await.unwrap();
         apply(
             &mut engine,
             Operation::SelectModel {
                 selection: "claude-opus-4-1".into(),
             },
             false,
-            &stream(),
         )
         .await
         .unwrap();
         assert_eq!(attached(&engine), 2);
 
-        apply(&mut engine, Operation::NewSession, false, &stream())
+        apply(&mut engine, Operation::NewSession, false)
             .await
             .unwrap();
         assert_eq!(attached(&engine), 0);
 
         let other = Session::new("anthropic", "claude-sonnet-4-5", 200_000, "Other");
         storage::save_session(&other).unwrap();
-        apply(&mut engine, attach(), false, &stream())
+        apply(&mut engine, attach(), false).await.unwrap();
+        apply(&mut engine, Operation::Load(other.id.to_string()), false)
             .await
             .unwrap();
-        apply(
-            &mut engine,
-            Operation::Load(other.id.to_string()),
-            false,
-            &stream(),
-        )
-        .await
-        .unwrap();
         assert_eq!(attached(&engine), 0);
+    }
+
+    #[cfg(feature = "mcp")]
+    #[test]
+    fn login_url_comes_from_the_mcp_login_announcement() {
+        let line = "open this URL to authorize 'docs':\nhttps://auth.example.com/x?y=1\nwaiting on 127.0.0.1:4000 ...\n";
+        assert_eq!(
+            login_url(line).as_deref(),
+            Some("https://auth.example.com/x?y=1")
+        );
+        assert_eq!(login_url("open this file"), None);
+        assert_eq!(login_url("open this URL to authorize 'docs':\n"), None);
     }
 }
