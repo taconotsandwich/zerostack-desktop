@@ -531,6 +531,9 @@ acp_servers:
 ACP mode requires setting up an LLM provider (the standard `--provider`, `--model`,
 and API key env vars apply). Without it, zerostack cannot process prompts.
 
+See [docs/ACP.md](docs/ACP.md) for the methods, session updates, permission
+asks, modes, config options and limits.
+
 ## Supported providers
 
 - OpenRouter (default)
