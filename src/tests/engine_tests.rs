@@ -494,3 +494,46 @@ output_token_cost = 5.0
     assert_eq!(engine.session().model.as_str(), "claude-opus-4-1");
     assert!(engine.set_model_selection("two words").await.is_err());
 }
+
+#[tokio::test]
+async fn context_files_add_drop_and_clear() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let dir = std::env::temp_dir().join(format!("zs-engine-ctx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "hello").unwrap();
+    let canonical = file.canonicalize().unwrap();
+
+    let added = engine.add_context_file(file.clone()).await.expect("add");
+    assert_eq!(
+        added.as_deref(),
+        Some(format!("added: {} (5B)", canonical.display()).as_str())
+    );
+    assert_eq!(engine.context().extra_files, vec![canonical.clone()]);
+
+    let again = engine.add_context_file(file.clone()).await.expect("re-add");
+    assert!(again.unwrap().starts_with("already added: "));
+    assert_eq!(engine.context().extra_files.len(), 1);
+
+    let missing = engine.add_context_file(dir.join("missing.txt")).await;
+    assert!(
+        missing
+            .unwrap_err()
+            .to_string()
+            .starts_with("file not found: ")
+    );
+    let folder = engine.add_context_file(dir.clone()).await;
+    assert!(folder.unwrap_err().to_string().starts_with("not a file: "));
+
+    let dropped = engine.drop_context_file(file.clone()).await.expect("drop");
+    assert!(dropped.unwrap().starts_with("dropped: "));
+    assert!(engine.context().extra_files.is_empty());
+    assert!(engine.drop_context_file(file.clone()).await.is_err());
+
+    assert_eq!(engine.clear_context_files().await.expect("empty"), None);
+    engine.add_context_file(file.clone()).await.expect("add");
+    let cleared = engine.clear_context_files().await.expect("clear");
+    assert_eq!(cleared.as_deref(), Some("dropped 1 file(s)"));
+    assert!(engine.context().extra_files.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
