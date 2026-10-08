@@ -1,6 +1,8 @@
 #![allow(unsafe_code)]
 
 #[cfg(all(test, feature = "acp"))]
+mod acp_command_tests;
+#[cfg(all(test, feature = "acp"))]
 mod acp_mode_tests;
 #[cfg(all(test, feature = "acp"))]
 mod acp_option_tests;
