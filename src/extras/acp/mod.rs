@@ -1,6 +1,7 @@
 pub mod config;
 mod events;
 mod permission;
+mod store;
 
 use events::EventForwarder;
 #[cfg(test)]
@@ -304,6 +305,32 @@ pub(crate) async fn serve_on(
             },
             on_receive_request!(),
         )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: LoadSessionRequest, responder, cx| {
+                    let state = state.clone();
+                    async move { store::handle_load(req, responder, cx, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            move |req: ListSessionsRequest, responder, _cx| async move {
+                store::handle_list(req, responder).await
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: DeleteSessionRequest, responder, _cx| {
+                    let state = state.clone();
+                    async move { store::handle_delete(req, responder, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
         .on_receive_notification(
             {
                 let state = state.clone();
@@ -325,7 +352,13 @@ async fn handle_initialize(
     responder: Responder<InitializeResponse>,
     _state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let caps = AgentCapabilities::new();
+    let caps = AgentCapabilities::new()
+        .load_session(true)
+        .session_capabilities(
+            SessionCapabilities::new()
+                .list(SessionListCapabilities::new())
+                .delete(SessionDeleteCapabilities::new()),
+        );
 
     let resp = InitializeResponse::new(req.protocol_version)
         .agent_capabilities(caps)
