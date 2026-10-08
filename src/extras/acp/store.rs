@@ -8,7 +8,7 @@ use super::events::{send_update, text_chunk, tool_kind, tool_path};
 use super::modes::mode_state;
 use super::options::config_options;
 use super::{AcpState, unknown_session};
-use crate::session::{MessageRole, SessionMessage, ToolRecord, storage};
+use crate::session::{MessageRole, Session, SessionMessage, ToolRecord, storage};
 use crate::ui::utils::format_tool_call_summary;
 
 /// The ACP id of a stored tool call, so a replayed result updates its call.
@@ -74,6 +74,16 @@ pub(super) fn replay(messages: &[SessionMessage]) -> Vec<SessionUpdate> {
         .collect()
 }
 
+/// The session's title and last activity, as a client lists them.
+pub(super) fn session_info(session: &Session) -> SessionUpdate {
+    let title = (!session.name.is_empty()).then(|| session.name.to_string());
+    SessionUpdate::SessionInfoUpdate(
+        SessionInfoUpdate::new()
+            .title(title)
+            .updated_at(session.updated_at.to_string()),
+    )
+}
+
 fn store_error(e: anyhow::Error) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(serde_json::json!({
         "message": e.to_string(),
@@ -107,7 +117,13 @@ pub(super) async fn handle_load(
         Err(e) => return responder.respond_with_error(e),
     };
     let modes = mode_state(session.permission.as_ref());
-    let config_options = config_options(&session.live.lock().await.engine);
+    let (config_options, info) = {
+        let live = session.live.lock().await;
+        (
+            config_options(&live.engine),
+            session_info(live.engine.session()),
+        )
+    };
 
     for update in updates {
         send_update(&cx, &req.session_id, update);
@@ -118,6 +134,7 @@ pub(super) async fn handle_load(
             .config_options(config_options),
     )?;
     send_update(&cx, &req.session_id, commands_update());
+    send_update(&cx, &req.session_id, info);
     Ok(())
 }
 
