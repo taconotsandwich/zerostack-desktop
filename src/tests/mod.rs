@@ -1,7 +1,9 @@
 #![allow(unsafe_code)]
 
 #[cfg(all(test, feature = "acp"))]
-mod acp_session_tests;
+pub(crate) mod acp_session_tests;
+#[cfg(all(test, feature = "acp"))]
+mod acp_store_tests;
 #[cfg(all(test, feature = "acp"))]
 mod acp_tests;
 #[cfg(all(test, feature = "advisor"))]
