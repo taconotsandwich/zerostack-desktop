@@ -72,7 +72,7 @@ pub(super) fn state_with_write_tool(cli: Cli, cfg: Config, model: FakeModel) -> 
     })
 }
 
-fn state_from(
+pub(super) fn state_from(
     cli: Cli,
     cfg: Config,
     agent: impl Fn(Option<PermCheck>, Option<AskSender>) -> AnyAgent + Send + Sync + 'static,
@@ -104,9 +104,14 @@ fn state_from(
     AcpState::new(cli, cfg, make_engine)
 }
 
-/// How the peer answers `session/request_permission`: a result, or a
-/// JSON-RPC error object.
-pub(super) type PermissionAnswer = Box<dyn FnMut(&Value) -> Result<Value, Value> + Send>;
+/// How the peer answers `session/request_permission`: a result, a JSON-RPC
+/// error object, or `None` to leave it pending (answer later with
+/// [`Peer::answer`]).
+pub(super) type PermissionAnswer = Box<dyn FnMut(&Value) -> Option<Result<Value, Value>> + Send>;
+
+pub(super) fn cancelled_outcome() -> Value {
+    json!({"outcome": {"outcome": "cancelled"}})
+}
 
 /// The client end: sends requests, records every `session/update`, answers
 /// permission requests.
@@ -126,7 +131,7 @@ impl Peer {
             channel,
             next_id: 0,
             received: Vec::new(),
-            on_permission: Box::new(|_| Ok(json!({"outcome": {"outcome": "cancelled"}}))),
+            on_permission: Box::new(|_| Some(Ok(cancelled_outcome()))),
         }
     }
 
@@ -137,6 +142,28 @@ impl Peer {
             .tx
             .unbounded_send(TransportFrame::Single(message))
             .expect("server is running");
+    }
+
+    pub fn notify(&self, method: &str, params: Value) {
+        self.send(json!({"jsonrpc": "2.0", "method": method, "params": params}));
+    }
+
+    /// Answer a request the server sent.
+    pub fn answer(&self, id: &Value, reply: Result<Value, Value>) {
+        self.send(match reply {
+            Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+            Err(error) => json!({"jsonrpc": "2.0", "id": id, "error": error}),
+        });
+    }
+
+    /// Process incoming messages until `stop` matches one (returned).
+    pub async fn wait_for(&mut self, stop: impl Fn(&Value) -> bool) -> Value {
+        loop {
+            let message = self.next_message().await;
+            if stop(&message) {
+                return message;
+            }
+        }
     }
 
     /// Send a request without waiting; pair with [`Peer::wait`].
@@ -170,11 +197,9 @@ impl Peer {
         };
         let message = serde_json::to_value(message).expect("serializable message");
         if message["method"] == "session/request_permission" {
-            let reply = match (self.on_permission)(&message["params"]) {
-                Ok(result) => json!({"jsonrpc": "2.0", "id": message["id"], "result": result}),
-                Err(error) => json!({"jsonrpc": "2.0", "id": message["id"], "error": error}),
-            };
-            self.send(reply);
+            if let Some(reply) = (self.on_permission)(&message["params"]) {
+                self.answer(&message["id"], reply);
+            }
         }
         self.received.push(message.clone());
         message
@@ -356,7 +381,11 @@ fn write_turns(path: &std::path::Path) -> Vec<Vec<MockStreamEvent>> {
 }
 
 fn select(option: &'static str) -> PermissionAnswer {
-    Box::new(move |_| Ok(json!({"outcome": {"outcome": "selected", "optionId": option}})))
+    Box::new(move |_| {
+        Some(Ok(
+            json!({"outcome": {"outcome": "selected", "optionId": option}}),
+        ))
+    })
 }
 
 #[tokio::test]
@@ -423,7 +452,7 @@ async fn reject_and_a_failed_answer_deny_the_call() {
     let _data = isolate_data_dirs();
     let answers: [PermissionAnswer; 2] = [
         select("reject_once"),
-        Box::new(|_| Err(json!({"code": -32603, "message": "client broke"}))),
+        Box::new(|_| Some(Err(json!({"code": -32603, "message": "client broke"})))),
     ];
     for answer in answers {
         let target = outside_file();
@@ -447,4 +476,68 @@ async fn reject_and_a_failed_answer_deny_the_call() {
             "the denial goes back to the model"
         );
     }
+}
+
+// --- cancel ---
+
+#[tokio::test]
+async fn cancel_stops_the_prompt_and_the_session_goes_on() {
+    use crate::tests::engine_cancel_tests::{StallTool, stalling_turns};
+    let _guard = fake_model::run_print_guard::acquire();
+    let _data = isolate_data_dirs();
+    let model = stalling_turns();
+    let state = state_from(test_cli(true), Config::default(), move |_, _| {
+        AnyAgent::Mock(
+            rig::agent::AgentBuilder::new(model.clone())
+                .tool(StallTool)
+                .build(),
+        )
+    });
+    let mut peer = Peer::start(state);
+    peer.initialize().await;
+    let session = peer.new_session().await;
+
+    let id = peer.submit(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "go"}]}),
+    );
+    peer.wait_for(|m| m["params"]["update"]["sessionUpdate"] == "tool_call")
+        .await;
+    peer.notify("session/cancel", json!({"sessionId": session}));
+    let result = peer.wait(id).await.expect("prompt answers");
+    assert_eq!(result["stopReason"], "cancelled");
+
+    let result = peer.prompt(&session, "again").await.expect("prompt");
+    assert_eq!(result["stopReason"], "end_turn");
+    assert!(
+        peer.agent_text().ends_with("after"),
+        "{}",
+        peer.agent_text()
+    );
+}
+
+#[tokio::test]
+async fn cancel_during_a_permission_ask_denies_nothing_runs() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let _data = isolate_data_dirs();
+    let target = outside_file();
+    let model = FakeModel::from_stream_turns(write_turns(&target));
+    let mut peer = Peer::start(state_with_write_tool(test_cli(true), guarded(), model));
+    peer.on_permission = Box::new(|_| None);
+    peer.initialize().await;
+    let session = peer.new_session().await;
+
+    let id = peer.submit(
+        "session/prompt",
+        json!({"sessionId": session, "prompt": [{"type": "text", "text": "write it"}]}),
+    );
+    let ask = peer
+        .wait_for(|m| m["method"] == "session/request_permission")
+        .await;
+    peer.notify("session/cancel", json!({"sessionId": session}));
+    peer.answer(&ask["id"], Ok(cancelled_outcome()));
+    let result = peer.wait(id).await.expect("prompt answers");
+
+    assert_eq!(result["stopReason"], "cancelled");
+    assert!(!target.exists());
 }

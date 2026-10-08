@@ -78,7 +78,32 @@ pub struct RunOutput {
     /// transcript with the error line; this is the bare message for callers
     /// that report failures out of band (ACP answers with a JSON-RPC error).
     pub error: Option<String>,
+    /// The agent turn was stopped through a [`CancelHandle`].
+    pub cancelled: bool,
 }
+
+/// Stops the agent turn an [`Engine`] is running, from outside the borrow
+/// that runs it. A cancel with no turn running does nothing.
+#[derive(Clone, Default)]
+pub struct CancelHandle(std::sync::Arc<tokio::sync::Notify>);
+
+impl CancelHandle {
+    pub fn cancel(&self) {
+        self.0.notify_waiters();
+    }
+}
+
+/// The error a cancelled turn ends with inside the engine.
+#[derive(Debug)]
+struct TurnCancelled;
+
+impl std::fmt::Display for TurnCancelled {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("cancelled")
+    }
+}
+
+impl std::error::Error for TurnCancelled {}
 
 impl RunOutput {
     fn agent(text: String, usage: TurnUsage) -> Self {
@@ -87,6 +112,7 @@ impl RunOutput {
             text,
             usage: Some(usage),
             error: None,
+            cancelled: false,
         }
     }
 
@@ -97,6 +123,7 @@ impl RunOutput {
             text: text.into(),
             usage: None,
             error: None,
+            cancelled: false,
         }
     }
 
@@ -106,6 +133,7 @@ impl RunOutput {
             text: String::new(),
             usage: None,
             error: None,
+            cancelled: false,
         }
     }
 }
@@ -131,6 +159,7 @@ pub struct Engine {
     mcp_manager: Option<McpClientManager>,
     status_signals: Option<StatusSignals>,
     event_tx: Option<UnboundedSender<AgentEvent>>,
+    cancel: CancelHandle,
     /// Mirrors `SlashState`: toggles owned by slash commands.
     show_reasoning: bool,
     reasoning_enabled: bool,
@@ -170,6 +199,7 @@ impl Engine {
             mcp_manager: None,
             status_signals: None,
             event_tx: None,
+            cancel: CancelHandle::default(),
             show_reasoning,
             reasoning_enabled: true,
             pending_tool_calls: Vec::new(),
@@ -211,6 +241,11 @@ impl Engine {
     pub fn with_events(mut self, tx: UnboundedSender<AgentEvent>) -> Self {
         self.event_tx = Some(tx);
         self
+    }
+
+    /// A handle that stops the running agent turn; see [`CancelHandle`].
+    pub fn cancel_handle(&self) -> CancelHandle {
+        self.cancel.clone()
     }
 
     /// Borrow the session (assertions, persistence).
@@ -697,6 +732,13 @@ impl Engine {
         self.sink_echo_user(text, &mut sink);
         match self.start_agent_run(text.to_string()).await {
             Ok((response, usage)) => RunOutput::agent(response, usage),
+            Err(e) if e.is::<TurnCancelled>() => {
+                // The user message stays, like a TUI abort; the interrupted
+                // reply was already recorded by `cancel_turn`.
+                let mut out = RunOutput::agent(sink.transcript(), TurnUsage::default());
+                out.cancelled = true;
+                out
+            }
             Err(e) => {
                 sink.write_error(e.to_string());
                 // Roll back the optimistic user message like the TUI does on
@@ -771,7 +813,18 @@ impl Engine {
             signals.send_start();
         }
 
-        while let Some(event) = runner.event_rx.recv().await {
+        let cancelled = self.cancel.0.clone();
+        let cancelled = cancelled.notified();
+        tokio::pin!(cancelled);
+        loop {
+            let event = tokio::select! {
+                event = runner.event_rx.recv() => event,
+                () = &mut cancelled => {
+                    self.cancel_turn(&runner);
+                    return Err(TurnCancelled.into());
+                }
+            };
+            let Some(event) = event else { break };
             if let Some(tx) = &self.event_tx {
                 let _ = tx.send(event.clone());
             }
@@ -873,6 +926,31 @@ impl Engine {
             anyhow::bail!("{e}");
         }
         Ok((final_response, usage))
+    }
+
+    /// Stop a running turn, mirroring the TUI's `abort_main_run`: abort the
+    /// runner, kill the sandbox's processes, keep what was streamed so far as
+    /// an interrupted reply, restore a one-shot prompt, save.
+    fn cancel_turn(&mut self, runner: &AgentRunner) {
+        runner.abort_handle.abort();
+        self.sandbox.kill_active();
+        let partial = std::mem::take(&mut self.response_buf);
+        let partial = partial.trim();
+        let reply = if partial.is_empty() {
+            "[interrupted]".to_string()
+        } else {
+            format!("{partial}\n\n[interrupted]")
+        };
+        self.session.add_message(MessageRole::Assistant, &reply);
+        self.turn_trace.clear();
+        self.pending_tool_calls.clear();
+        if let Some(signals) = &self.status_signals {
+            signals.send_stop();
+        }
+        if let Some(restore_name) = self.dot_prompt_restore.take() {
+            self.restore_prompt(&restore_name);
+        }
+        self.save_session_best_effort();
     }
 
     /// Fold one finished turn into the session: assistant message, token
