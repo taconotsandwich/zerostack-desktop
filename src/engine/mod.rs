@@ -449,6 +449,16 @@ impl Engine {
         }
     }
 
+    /// The active permission mode, or `None` when tools run unchecked.
+    pub fn permission_mode(&self) -> Option<SecurityMode> {
+        self.permission.as_ref().map(|permission| {
+            permission
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .mode()
+        })
+    }
+
     /// Switch the file-editing system.
     pub fn set_edit_system(&self, system: &str) -> anyhow::Result<()> {
         let system = system.trim();
