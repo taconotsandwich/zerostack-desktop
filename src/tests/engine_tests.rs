@@ -608,3 +608,38 @@ async fn run_prompt_ignores_blank_input_and_clear_messages_empties_the_session()
     assert!(engine.run_shell(" ".to_string()).await.is_err());
     assert!(engine.ask_separate_question(String::new()).await.is_err());
 }
+
+#[cfg(feature = "export")]
+#[tokio::test]
+async fn export_then_import_round_trips_the_conversation() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["hi there"]]);
+    engine.run_prompt("hello".to_string()).await;
+    let dir = std::env::temp_dir().join(format!("zs-engine-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chat.jsonl");
+
+    let message = engine
+        .export_conversation(Some(path.clone()))
+        .expect("export");
+    assert_eq!(message, format!("exported JSONL to {}", path.display()));
+
+    engine.new_session();
+    let message = engine.import_conversation(path.clone()).expect("import");
+    assert_eq!(
+        message,
+        format!("imported session from {} (2 msgs)", path.display())
+    );
+    let session = engine.session();
+    assert_eq!(session.name.as_str(), "chat");
+    assert_eq!(session.messages[0].role, MessageRole::User);
+    assert_eq!(session.messages[0].content, "hello");
+    assert!(session.messages[1].content.contains("hi there"));
+
+    assert!(
+        engine
+            .import_conversation(dir.join("missing.jsonl"))
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
