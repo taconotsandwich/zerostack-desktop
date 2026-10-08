@@ -25,7 +25,7 @@ mcp = [
     "rmcp?/transport-streamable-http-client-reqwest",
     "rmcp?/auth",
 ]
-acp = ["dep:agent-client-protocol", "dep:blocking"]
+acp = ["dep:agent-client-protocol", "dep:blocking", "dep:base64"]
 memory = []                              
 subagents = []
 archmd = []
@@ -80,6 +80,7 @@ http = { version = "1", optional = true }
 shell-words = "1.1"
 agent-client-protocol = { version = "2.2.0", optional = true }
 blocking = { version = "1", optional = true }
+base64 = { version = "0.22", optional = true }
 lsp-types = { version = "0.97", optional = true }
 mimalloc = { version = "0.1", default-features = false }
 

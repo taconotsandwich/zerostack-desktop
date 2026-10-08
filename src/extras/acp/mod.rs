@@ -3,6 +3,7 @@ mod events;
 mod modes;
 mod options;
 mod permission;
+mod prompt;
 mod store;
 
 use events::{EventForwarder, send_update};
@@ -438,6 +439,7 @@ async fn handle_initialize(
 ) -> Result<(), agent_client_protocol::Error> {
     let caps = AgentCapabilities::new()
         .load_session(true)
+        .prompt_capabilities(prompt::prompt_capabilities())
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
@@ -507,22 +509,27 @@ async fn handle_prompt(
         Ok(session) => session,
         Err(e) => return responder.respond_with_error(e),
     };
-    let prompt_text = req
-        .prompt
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text(t) => Some(t.text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let prompt = match prompt::read_prompt(req.prompt) {
+        Ok(prompt) => prompt,
+        Err(message) => {
+            return responder.respond_with_error(
+                agent_client_protocol::Error::invalid_params()
+                    .data(serde_json::json!({ "message": message })),
+            );
+        }
+    };
 
     // The turn runs off the dispatch loop: it streams updates and may wait on
     // the client, which needs the loop free.
     cx.spawn({
         let cx = cx.clone();
         async move {
-            let out = session.live.lock().await.run(prompt_text, &cx).await;
+            let mut live = session.live.lock().await;
+            #[cfg(feature = "multimodal")]
+            for attachment in prompt.media {
+                live.engine.attach_media(attachment);
+            }
+            let out = live.run(prompt.text, &cx).await;
             match out.error {
                 Some(error) => responder.respond_with_internal_error(error),
                 None if out.cancelled => {
