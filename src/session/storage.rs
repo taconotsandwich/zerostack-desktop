@@ -106,6 +106,22 @@ fn safe_path_component(value: &str) -> String {
     }
 }
 
+/// Load the session saved under exactly `id`, or `None` when there is none.
+/// An id that could name a file outside the session store is refused.
+#[cfg(any(test, feature = "acp"))]
+pub fn load_session(id: &str) -> anyhow::Result<Option<Session>> {
+    anyhow::ensure!(
+        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+        "invalid session id: '{id}'"
+    );
+    let path = session_dir().join(format!("{id}.json"));
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(&path)?;
+    Ok(Some(serde_json::from_str(&json)?))
+}
+
 pub fn delete_session(id: &str) -> anyhow::Result<()> {
     let dir = session_dir();
     let path = dir.join(format!("{}.json", id));

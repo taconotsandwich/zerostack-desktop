@@ -2,7 +2,7 @@ use crate::session::MessageRole;
 use crate::session::Session;
 use crate::session::ToolRecord;
 use crate::session::storage::{
-    delete_session, find_sessions_by_prefix, load_suffix, save_session, suffix_path,
+    delete_session, find_sessions_by_prefix, load_session, load_suffix, save_session, suffix_path,
 };
 use crate::session::{PromptRef, PromptSource};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
@@ -69,6 +69,20 @@ fn delete_session_removes_file() {
     delete_session(&s.id).unwrap();
     let found = find_sessions_by_prefix(&s.id[..8]).unwrap();
     assert!(found.is_empty());
+    drop(env);
+}
+
+#[test]
+fn load_session_finds_exactly_the_saved_id() {
+    let env = setup_test_env();
+    let s = Session::new("openai", "gpt-4", 128000, "");
+    save_session(&s).unwrap();
+
+    assert_eq!(load_session(&s.id).unwrap().unwrap().id, s.id);
+    assert!(load_session(&s.id[..8]).unwrap().is_none());
+    for bad in ["", "../x", "a/b", "a.json"] {
+        assert!(load_session(bad).is_err(), "{bad}");
+    }
     drop(env);
 }
 
