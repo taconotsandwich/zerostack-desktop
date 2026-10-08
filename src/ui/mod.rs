@@ -119,8 +119,7 @@ fn apply_mode_directive(
 /// Re-apply the current prompt's `%%mode=` directive after a context reload
 /// (which restores the raw, unstripped prompt content from disk).
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
-/// re-applies it after worktree switches, like the TUI.
-#[cfg(feature = "git-worktree")]
+/// re-applies it after folder changes, like the TUI.
 pub fn apply_current_prompt_mode(context: &mut ContextFiles, permission: &Option<PermCheck>) {
     let Some(content) = &context.current_prompt.clone() else {
         return;

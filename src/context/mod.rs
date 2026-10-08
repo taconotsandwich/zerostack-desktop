@@ -111,7 +111,6 @@ pub struct ContextFiles {
 }
 
 impl ContextFiles {
-    #[cfg(feature = "git-worktree")]
     pub fn reload(&mut self) {
         self.agents = walk_context_files().0;
         #[cfg(feature = "archmd")]
