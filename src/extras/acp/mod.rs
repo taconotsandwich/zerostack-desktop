@@ -5,6 +5,7 @@ mod modes;
 mod options;
 mod permission;
 mod prompt;
+pub(crate) mod setup;
 mod store;
 
 use events::{EventForwarder, send_update};
@@ -152,6 +153,50 @@ impl AcpState {
             permission,
         });
         Ok((session_id, session))
+    }
+}
+
+impl AcpState {
+    /// Open a session working in `cwd` with the configured MCP servers plus
+    /// `mcp_servers`, and hold it live, in place of the live session
+    /// `replacing` names (whose prompt is cancelled). The process changes
+    /// into `cwd` first, so the session's sandbox and context files are
+    /// those of that folder.
+    async fn start_session(
+        &self,
+        cwd: &std::path::Path,
+        mcp_servers: Vec<McpServer>,
+        replacing: Option<&SessionId>,
+        prepare: impl FnOnce(&mut Engine) -> anyhow::Result<()>,
+    ) -> Result<(SessionId, Arc<AcpSession>), agent_client_protocol::Error> {
+        let internal =
+            |e: anyhow::Error| agent_client_protocol::util::internal_error(e.to_string());
+        let mut sessions = self.sessions.lock().await;
+        let replaced = replacing.is_some_and(|id| sessions.contains_key(id));
+        let enter = setup::folder_to_enter(cwd, sessions.len() - usize::from(replaced))?;
+        if let Some(dir) = &enter {
+            std::env::set_current_dir(dir).map_err(|e| internal(e.into()))?;
+        }
+        let (id, session) = self
+            .open_session(|engine| {
+                prepare(engine)?;
+                match &enter {
+                    Some(dir) => engine.change_dir(dir),
+                    None => Ok(()),
+                }
+            })
+            .map_err(internal)?;
+        #[cfg(feature = "mcp")]
+        if let Some(manager) = setup::connect_mcp(setup::mcp_servers(&self.cfg, mcp_servers)).await
+        {
+            session.live.lock().await.engine.set_mcp(manager);
+        }
+        #[cfg(not(feature = "mcp"))]
+        let _ = mcp_servers;
+        if let Some(replaced) = sessions.insert(id.clone(), session.clone()) {
+            replaced.cancel.cancel();
+        }
+        Ok((id, session))
     }
 }
 
@@ -457,6 +502,7 @@ async fn handle_initialize(
     let caps = AgentCapabilities::new()
         .load_session(true)
         .prompt_capabilities(prompt::prompt_capabilities())
+        .mcp_capabilities(setup::mcp_capabilities())
         .session_capabilities(
             SessionCapabilities::new()
                 .list(SessionListCapabilities::new())
@@ -481,18 +527,20 @@ async fn handle_new_session(
             "sandbox is set to false but sandbox-required is set, enabling the sandbox anyway"
         );
     }
-    // Sandbox warnings are emitted once per session, here. The sandbox binds
-    // this process's working directory, not `req.cwd`.
+    // Sandbox warnings are emitted once per session, here.
     for warning in &sandbox_setup(&state.cli, &state.cfg).warnings {
         tracing::warn!("{warning}");
     }
 
-    let (session_id, session) = match state.open_session(|engine| {
-        engine.new_session();
-        Ok(())
-    }) {
-        Ok(opened) => opened,
-        Err(e) => return responder.respond_with_internal_error(e.to_string()),
+    let started = state
+        .start_session(&req.cwd, req.mcp_servers, None, |engine| {
+            engine.new_session();
+            Ok(())
+        })
+        .await;
+    let (session_id, session) = match started {
+        Ok(started) => started,
+        Err(e) => return responder.respond_with_error(e),
     };
     tracing::info!(
         "ACP new session: {} (cwd: {})",
@@ -501,11 +549,6 @@ async fn handle_new_session(
     );
     let modes = modes::mode_state(session.permission.as_ref());
     let config_options = options::config_options(&session.live.lock().await.engine);
-    state
-        .sessions
-        .lock()
-        .await
-        .insert(session_id.clone(), session);
 
     responder.respond(
         NewSessionResponse::new(session_id.clone())
