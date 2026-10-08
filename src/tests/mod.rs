@@ -55,7 +55,7 @@ mod engine_headless_tests;
 #[cfg(test)]
 mod engine_tests;
 #[cfg(test)]
-mod fake_model;
+pub(crate) mod fake_model;
 #[cfg(test)]
 mod feed_tests;
 #[cfg(test)]
