@@ -173,6 +173,136 @@ impl Engine {
         &self.context
     }
 
+    /// Mutably borrow the context files (prompt/theme selection, reloads).
+    pub fn context_mut(&mut self) -> &mut ContextFiles {
+        &mut self.context
+    }
+
+    /// Switch provider and apply its default model.
+    pub async fn set_provider(&mut self, provider: &str) -> anyhow::Result<()> {
+        let new_provider = provider.trim();
+        anyhow::ensure!(!new_provider.is_empty(), "provider cannot be empty");
+        if crate::provider::parse_provider(new_provider).is_none()
+            && !self.cfg.custom_providers_map().contains_key(new_provider)
+        {
+            anyhow::bail!("unknown provider: '{new_provider}'");
+        }
+        if let Some((model, costs)) =
+            crate::provider::default_model_for_provider(new_provider, &self.cfg)
+        {
+            self.session.model = CompactString::new(&model);
+            if let Some((inc, outc)) = costs {
+                self.session.input_token_cost = inc;
+                self.session.output_token_cost = outc;
+            }
+        }
+        self.rebuild_agent_with_client(new_provider).await?;
+        self.session.provider = CompactString::new(new_provider);
+        let qm = config::quick_models_map(&self.cfg);
+        self.session
+            .update_context_window(self.cfg.resolve_context_window(
+                new_provider,
+                &self.session.model,
+                &qm,
+            ));
+        Ok(())
+    }
+
+    /// Select a quick model by name or switch to a raw model ID.
+    pub async fn set_model_selection(&mut self, selection: &str) -> anyhow::Result<()> {
+        let selection = selection.trim();
+        anyhow::ensure!(!selection.is_empty(), "model selection cannot be empty");
+        anyhow::ensure!(
+            !selection.contains(char::is_whitespace),
+            "model selection cannot contain spaces"
+        );
+        let qm = config::quick_models_map(&self.cfg);
+        if let Some(q) = qm.get(selection) {
+            let provider = q.provider.to_string();
+            let model = q.model.to_string();
+            let in_cost = q.input_token_cost;
+            let out_cost = q.output_token_cost;
+            self.rebuild_agent_with_client(&provider).await?;
+            self.session.provider = CompactString::from(&provider);
+            self.rebuild_agent(&model).await;
+            self.session.model = CompactString::from(&model);
+            let qm2 = config::quick_models_map(&self.cfg);
+            self.session
+                .update_context_window(self.cfg.resolve_context_window(
+                    &self.session.provider,
+                    &self.session.model,
+                    &qm2,
+                ));
+            self.session.input_token_cost = in_cost;
+            self.session.output_token_cost = out_cost;
+            return Ok(());
+        }
+        let selection_owned = selection.to_string();
+        self.rebuild_agent(&selection_owned).await;
+        self.session.model = CompactString::new(selection);
+        Ok(())
+    }
+
+    /// Activate a prompt by name, or `"default"` to clear the active prompt.
+    pub async fn set_prompt(&mut self, prompt: &str) -> anyhow::Result<()> {
+        let prompt = prompt.trim();
+        anyhow::ensure!(!prompt.is_empty(), "prompt cannot be empty");
+        let mut sink = StringSink::new();
+        let parts = if prompt == "default" {
+            vec!["/prompt", "default"]
+        } else {
+            vec!["/prompt", prompt]
+        };
+        self.cmd_prompt(&parts, &mut sink).await?;
+        let transcript = sink.transcript();
+        if sink.lines().iter().any(|line| line.starts_with("error: ")) {
+            anyhow::bail!("{transcript}");
+        }
+        Ok(())
+    }
+
+    /// Switch the permission mode.
+    pub fn set_permission_mode(&mut self, mode: &str) -> anyhow::Result<()> {
+        let mode = mode.trim();
+        let Some(mode) = SecurityMode::from_str(mode) else {
+            anyhow::bail!("unknown mode: {mode}");
+        };
+        match &self.permission {
+            Some(permission) => {
+                permission
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .set_mode(mode);
+                Ok(())
+            }
+            None => anyhow::bail!("permission system not active"),
+        }
+    }
+
+    /// Switch the file-editing system.
+    pub fn set_edit_system(&self, system: &str) -> anyhow::Result<()> {
+        let system = system.trim();
+        match system {
+            "similarity" => {
+                crate::agent::tools::set_edit_system(crate::config::types::EditSystem::Similarity);
+                Ok(())
+            }
+            "hashedit" => {
+                crate::agent::tools::set_edit_system(crate::config::types::EditSystem::Hashedit);
+                Ok(())
+            }
+            _ => anyhow::bail!("unknown: '{system}' (similarity|hashedit)"),
+        }
+    }
+
+    /// Toggle reasoning on or off.
+    pub async fn toggle_reasoning(&mut self) {
+        self.reasoning_enabled = !self.reasoning_enabled;
+        self.show_reasoning = self.reasoning_enabled;
+        let model_id = self.session.model.to_string();
+        self.rebuild_agent(&model_id).await;
+    }
+
     /// Run one user input string: plain message, `/` slash command, `.`
     /// dot-prompt command, or `!` shell command.
     pub async fn run_string(&mut self, input: &str) -> anyhow::Result<RunOutput> {
@@ -1073,35 +1203,13 @@ impl Engine {
             sink.write_ok(format!("current provider: {}", self.session.provider));
             return Ok(SlashFlow::Done);
         }
-        let new_provider = parts[1].trim();
-        if crate::provider::parse_provider(new_provider).is_none()
-            && !self.cfg.custom_providers_map().contains_key(new_provider)
-        {
-            sink.write_error(format!("unknown provider: '{new_provider}'"));
-            return Ok(SlashFlow::Done);
+        match self.set_provider(parts[1].trim()).await {
+            Ok(()) => sink.write_ok(format!(
+                "switched to provider: {} (model: {})",
+                self.session.provider, self.session.model
+            )),
+            Err(error) => sink.write_error(error.to_string()),
         }
-        if let Some((model, costs)) =
-            crate::provider::default_model_for_provider(new_provider, &self.cfg)
-        {
-            self.session.model = CompactString::new(&model);
-            if let Some((inc, outc)) = costs {
-                self.session.input_token_cost = inc;
-                self.session.output_token_cost = outc;
-            }
-        }
-        self.rebuild_agent_with_client(new_provider).await?;
-        self.session.provider = CompactString::new(new_provider);
-        let qm = config::quick_models_map(&self.cfg);
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                new_provider,
-                &self.session.model,
-                &qm,
-            ));
-        sink.write_ok(format!(
-            "switched to provider: {} (model: {})",
-            new_provider, self.session.model
-        ));
         Ok(SlashFlow::Done)
     }
 
@@ -1138,32 +1246,10 @@ impl Engine {
         let qm = config::quick_models_map(&self.cfg);
         // `/models <name>`: quick-model switch, else raw model id.
         if parts.len() >= 2 && parts.get(1).map(|s| s.trim()) != Some("refresh") {
-            let arg = parts[1].trim();
-            if let Some(q) = qm.get(arg) {
-                let provider = q.provider.to_string();
-                let model = q.model.to_string();
-                let in_cost = q.input_token_cost;
-                let out_cost = q.output_token_cost;
-                self.rebuild_agent_with_client(&provider).await?;
-                self.session.provider = CompactString::from(&provider);
-                self.rebuild_agent(&model).await;
-                self.session.model = CompactString::from(&model);
-                let qm2 = config::quick_models_map(&self.cfg);
-                self.session
-                    .update_context_window(self.cfg.resolve_context_window(
-                        &self.session.provider,
-                        &self.session.model,
-                        &qm2,
-                    ));
-                self.session.input_token_cost = in_cost;
-                self.session.output_token_cost = out_cost;
-                sink.write_ok(format!("switched to model: {model}"));
-                return Ok(SlashFlow::Done);
+            match self.set_model_selection(parts[1].trim()).await {
+                Ok(()) => sink.write_ok(format!("switched to model: {}", self.session.model)),
+                Err(error) => sink.write_error(error.to_string()),
             }
-            let arg_owned = arg.to_string();
-            self.rebuild_agent(&arg_owned).await;
-            self.session.model = CompactString::new(arg);
-            sink.write_ok(format!("switched to model: {arg}"));
             return Ok(SlashFlow::Done);
         }
         // List mode.
@@ -1393,10 +1479,7 @@ impl Engine {
     ) -> anyhow::Result<SlashFlow> {
         match parts[0] {
             "/reasoning" | "/thinking" => {
-                self.reasoning_enabled = !self.reasoning_enabled;
-                self.show_reasoning = self.reasoning_enabled;
-                let model_id = self.session.model.to_string();
-                self.rebuild_agent(&model_id).await;
+                self.toggle_reasoning().await;
                 sink.write_ok(format!(
                     "reasoning: {}",
                     if self.reasoning_enabled { "on" } else { "off" }
@@ -1413,21 +1496,16 @@ impl Engine {
                     sink.write_ok(format!("current security mode: {current}"));
                     return Ok(SlashFlow::Done);
                 }
-                let mode = match parts[1] {
-                    "standard" => Some(SecurityMode::Standard),
-                    "restrictive" => Some(SecurityMode::Restrictive),
-                    "readonly" => Some(SecurityMode::ReadOnly),
-                    "guarded" => Some(SecurityMode::Guarded),
-                    "yolo" => Some(SecurityMode::Yolo),
-                    _ => None,
-                };
-                match (mode, &self.permission) {
-                    (Some(m), Some(p)) => {
-                        p.lock().unwrap_or_else(|e| e.into_inner()).set_mode(m);
-                        sink.write_ok(format!("security mode: {m}"));
+                match self.set_permission_mode(parts[1]) {
+                    Ok(()) => {
+                        let current = self
+                            .permission
+                            .as_ref()
+                            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).mode())
+                            .unwrap_or(SecurityMode::Standard);
+                        sink.write_ok(format!("security mode: {current}"));
                     }
-                    (None, _) => sink.write_error(format!("unknown mode: {}", parts[1])),
-                    (_, None) => sink.write_error("permission system not active"),
+                    Err(error) => sink.write_error(error.to_string()),
                 }
                 Ok(SlashFlow::Done)
             }
@@ -1443,20 +1521,12 @@ impl Engine {
                     ));
                     return Ok(SlashFlow::Done);
                 }
-                match parts[1] {
-                    "similarity" => {
-                        crate::agent::tools::set_edit_system(
-                            crate::config::types::EditSystem::Similarity,
-                        );
-                        sink.write_ok("edit system: similarity (SEARCH/REPLACE)");
-                    }
-                    "hashedit" => {
-                        crate::agent::tools::set_edit_system(
-                            crate::config::types::EditSystem::Hashedit,
-                        );
-                        sink.write_ok("edit system: hashedit (tag-based)");
-                    }
-                    _ => sink.write_error(format!("unknown: '{}' (similarity|hashedit)", parts[1])),
+                match self.set_edit_system(parts[1]) {
+                    Ok(()) => match parts[1] {
+                        "similarity" => sink.write_ok("edit system: similarity (SEARCH/REPLACE)"),
+                        _ => sink.write_ok("edit system: hashedit (tag-based)"),
+                    },
+                    Err(error) => sink.write_error(error.to_string()),
                 }
                 Ok(SlashFlow::Done)
             }
