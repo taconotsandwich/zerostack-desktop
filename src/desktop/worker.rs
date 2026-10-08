@@ -3,11 +3,13 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::{mpsc, oneshot};
 
+use super::acp_client::Stopper;
+use super::backend::{Applied, Backend};
 use crate::cli::Cli;
-use crate::engine::{Engine, RunOutput};
+use crate::engine::RunOutput;
 use crate::event::AgentEvent;
 use crate::permission::ask::UserDecision;
-use crate::session::{PermissionAllowEntry, Session, storage};
+use crate::session::Session;
 
 #[derive(Debug, Clone)]
 pub(super) enum Operation {
@@ -90,7 +92,6 @@ pub(super) enum Operation {
     #[cfg(feature = "loop")]
     StartLoop {
         prompt: String,
-        max_iterations: Option<u32>,
     },
     OpenDocument {
         name: String,
@@ -99,15 +100,16 @@ pub(super) enum Operation {
     MemoryEditor,
 }
 
-/// One streamed item from the engine while an operation runs.
+/// One streamed item from the conversation while an operation runs.
 #[derive(Debug, Clone)]
 pub(super) enum UiEvent {
-    /// One agent event of the in-flight turn (tokens, tool calls, usage).
+    /// One agent event of the in-flight turn (tokens, tool calls).
     Agent(AgentEvent),
     /// A tool wants permission before it proceeds; the reply channel carries
     /// the decision back to the waiting tool call.
     Permission(PermissionRequest),
-    /// The engine wants a URL opened in the default browser (MCP OAuth).
+    /// The conversation wants a URL opened in the default browser (MCP
+    /// OAuth).
     OpenUrl(String),
 }
 
@@ -125,30 +127,6 @@ pub(super) type PermissionReply = Arc<StdMutex<Option<oneshot::Sender<UserDecisi
 
 /// Handle the UI keeps alive while an operation streams events.
 pub(super) type UiSender = mpsc::UnboundedSender<UiEvent>;
-
-/// The UI sender of the operation currently running, shared with the ask and
-/// event relays. Empty between operations (or before the UI subscribes).
-#[derive(Clone, Default)]
-pub(super) struct UiStream(Arc<StdMutex<Option<UiSender>>>);
-
-impl UiStream {
-    fn set(&self, sender: Option<UiSender>) {
-        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = sender;
-    }
-
-    fn sender(&self) -> Option<UiSender> {
-        self.0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone()
-    }
-
-    /// Best-effort delivery; `false` when no UI is listening.
-    fn notify(&self, event: UiEvent) -> bool {
-        self.sender()
-            .is_some_and(|sender| sender.send(event).is_ok())
-    }
-}
 
 impl Operation {
     pub(super) fn is_textual(&self) -> bool {
@@ -201,10 +179,20 @@ struct Request {
     reply: oneshot::Sender<Reply>,
 }
 
-#[derive(Debug, Clone)]
+/// The desktop's handle on its conversations. Operations run one at a time
+/// on a thread of their own; the conversation itself runs in a
+/// `zerostack --acp` process.
+#[derive(Clone)]
 pub(super) struct Worker {
     sender: mpsc::UnboundedSender<Request>,
     stopped: tokio::sync::watch::Receiver<bool>,
+    stopper: Arc<StdMutex<Option<Stopper>>>,
+}
+
+impl std::fmt::Debug for Worker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Worker")
+    }
 }
 
 struct Stopped(tokio::sync::watch::Sender<bool>);
@@ -220,6 +208,8 @@ impl Worker {
         let (sender, mut receiver) = mpsc::unbounded_channel::<Request>();
         let (ready, result) = oneshot::channel();
         let (finished, stopped) = tokio::sync::watch::channel(false);
+        let stopper = Arc::new(StdMutex::new(None));
+        let current = stopper.clone();
         std::thread::spawn(move || {
             let _finished = Stopped(finished);
             if let Some(directory) = directory
@@ -239,212 +229,62 @@ impl Worker {
                 }
             };
             runtime.block_on(async move {
-                let mut startup = match crate::prepare(cli).await {
-                    Ok(Some(startup)) => startup,
-                    Ok(None) => {
-                        let _ = ready.send(Err(
-                            "The selected command does not launch a desktop session.".into(),
-                        ));
-                        return;
-                    }
+                let mut backend = match Backend::new(current) {
+                    Ok(backend) => backend,
                     Err(error) => {
                         let _ = ready.send(Err(format!("{error:#}")));
                         return;
                     }
                 };
-                let no_session = startup.cli.no_session;
-                let permission = startup.permission.clone();
-                let show_reasoning = startup.cfg.resolve_show_reasoning();
-                let mut providers: Vec<String> =
-                    ["openrouter", "openai", "anthropic", "gemini", "ollama"]
-                        .into_iter()
-                        .map(String::from)
-                        .collect();
-                providers.extend(startup.cfg.custom_providers_map().into_keys());
-                providers.sort();
-                providers.dedup();
-                let models = startup
-                    .cfg
-                    .quick_models
-                    .as_ref()
-                    .map(|models| {
-                        let mut names: Vec<_> = models.keys().cloned().collect();
-                        names.sort();
-                        names
-                    })
-                    .unwrap_or_default();
-
-                // Interactive services: the same handles the TUI consumes, so
-                // asks, MCP tools, and status signals behave identically here.
-                let ask_tx = startup.ask_tx.take();
-                let ask_rx = startup.ask_rx.take();
-                let status_signals = startup.status_signals.take();
-                #[cfg(feature = "mcp")]
-                let (mcp_manager, notices) =
-                    match crate::startup::connect_headless_mcp(&startup.cfg).await {
-                        Some(manager) => {
-                            let notices = manager
-                                .notices
-                                .iter()
-                                .map(|notice| notice.to_string())
-                                .collect::<Vec<_>>();
-                            (Some(manager), notices)
-                        }
-                        None => (None, Vec::new()),
-                    };
-                #[cfg(not(feature = "mcp"))]
-                let notices: Vec<String> = Vec::new();
-
-                let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-                // While an operation runs this slot holds its UI sender; asks
-                // and agent events found there stream to the desktop.
-                let stream = UiStream::default();
-                // "Allow always" decisions are mirrored into the session
-                // allowlist once the operation returns (see
-                // `adopt_session_allowlist`), exactly like the TUI.
-                let allowed: Arc<StdMutex<Vec<PermissionAllowEntry>>> =
-                    Arc::new(StdMutex::new(Vec::new()));
-
-                let mut engine = Engine::new(
-                    startup.cli,
-                    startup.cfg,
-                    startup.session,
-                    startup.context,
-                    startup.client,
-                    startup.permission,
-                    startup.sandbox,
-                )
-                .with_events(event_tx);
-                if let Some(ask_tx) = ask_tx {
-                    engine = engine.with_ask(ask_tx);
-                }
-                if let Some(signals) = status_signals.clone() {
-                    engine = engine.with_status_signals(signals);
-                }
-                #[cfg(feature = "mcp")]
-                if let Some(manager) = mcp_manager {
-                    engine = engine.with_mcp(manager);
-                }
-
-                // Forward agent events to the UI of the running operation.
-                let events_stream = stream.clone();
-                tokio::spawn(async move {
-                    while let Some(event) = event_rx.recv().await {
-                        #[cfg(feature = "mcp")]
-                        if let AgentEvent::Token(text) = &event
-                            && let Some(url) = login_url(text)
-                        {
-                            events_stream.notify(UiEvent::OpenUrl(url));
-                        }
-                        events_stream.notify(UiEvent::Agent(event));
-                    }
-                });
-
-                // Bridge permission asks. The decision comes back through a
-                // fresh oneshot so this task can publish blocked:permission /
-                // state:working around the wait, like the TUI handler does.
-                if let Some(mut ask_rx) = ask_rx {
-                    let asks_stream = stream.clone();
-                    let asks_allowed = allowed.clone();
-                    tokio::spawn(async move {
-                        while let Some(request) = ask_rx.recv().await {
-                            let crate::permission::ask::AskRequest {
-                                tool,
-                                input,
-                                reply: tool_reply,
-                            } = request;
-                            let (reply, answer) = oneshot::channel();
-                            let reply_slot: PermissionReply = Arc::new(StdMutex::new(Some(reply)));
-                            let asked =
-                                asks_stream.notify(UiEvent::Permission(PermissionRequest {
-                                    tool: tool.to_string(),
-                                    input,
-                                    reply: reply_slot.clone(),
-                                }));
-                            let Some(sender) = asks_stream.sender().filter(|_| asked) else {
-                                // No UI to ask: fail closed like a headless run.
-                                let _ = tool_reply.send(UserDecision::Deny);
-                                continue;
-                            };
-                            let blocked = status_signals.as_ref().map(|signals| {
-                                signals.blocked_scope(
-                                    crate::extras::status_signals::BlockedReason::Permission,
-                                )
-                            });
-                            // Wait for the answer, or for the UI to disappear
-                            // (window closed) so a hanging ask cannot wedge the
-                            // worker.
-                            let decision = tokio::select! {
-                                answer = answer => answer.unwrap_or(UserDecision::Deny),
-                                _ = sender.closed() => UserDecision::Deny,
-                            };
-                            drop(blocked);
-                            if let UserDecision::AllowAlways(pattern) = &decision {
-                                asks_allowed
-                                    .lock()
-                                    .unwrap_or_else(|error| error.into_inner())
-                                    .push(PermissionAllowEntry {
-                                        tool: tool.clone(),
-                                        pattern: pattern.as_str().into(),
-                                    });
-                            }
-                            // Release the single-use slot so the tool's reply
-                            // channel is unambiguous even if the UI never took it.
-                            reply_slot
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner())
-                                .take();
-                            let _ = tool_reply.send(decision);
-                        }
-                    });
-                }
-
+                let first = backend.first_conversation(&cli);
+                let started = backend.open(first.as_deref()).await;
                 let _ = ready.send(
-                    snapshot(
-                        &engine,
-                        &models,
-                        &providers,
-                        permission.as_ref(),
-                        show_reasoning,
-                        &notices,
-                        Applied::default(),
-                    )
-                    .map(Arc::new)
-                    .map_err(|e| format!("{e:#}")),
+                    started
+                        .and_then(|()| backend.snapshot(Applied::default()))
+                        .map(Arc::new)
+                        .map_err(|error| format!("{error:#}")),
                 );
                 while let Some(request) = receiver.recv().await {
-                    stream.set(request.events.clone());
-                    let result = apply(&mut engine, request.operation, no_session)
+                    let result = backend
+                        .apply(request.operation, request.events)
                         .await
-                        .and_then(|applied| {
-                            adopt_session_allowlist(&mut engine, &allowed, no_session)?;
-                            snapshot(
-                                &engine,
-                                &models,
-                                &providers,
-                                permission.as_ref(),
-                                show_reasoning,
-                                &notices,
-                                applied,
-                            )
-                        })
+                        .and_then(|applied| backend.snapshot(applied))
                         .map(Arc::new)
                         .map_err(|error| format!("{error:#}"));
-                    stream.set(None);
                     let _ = request.reply.send(result);
                 }
             });
         });
-        (Self { sender, stopped }, result)
+        (
+            Self {
+                sender,
+                stopped,
+                stopper,
+            },
+            result,
+        )
     }
 
     pub async fn stop(self) {
         let Self {
             sender,
             mut stopped,
+            ..
         } = self;
         drop(sender);
         let _ = stopped.wait_for(|stopped| *stopped).await;
+    }
+
+    /// Stop the running prompt; it then ends as cancelled.
+    pub fn cancel(&self) {
+        if let Some(stopper) = self
+            .stopper
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+        {
+            stopper.stop();
+        }
     }
 
     /// Send one operation; `events` receives streamed agent events and
@@ -457,358 +297,14 @@ impl Worker {
                 events,
                 reply,
             })
-            .map_err(|_| "The engine worker has stopped.".to_string())?;
+            .map_err(|_| "The conversation worker has stopped.".to_string())?;
         receive(receiver).await
     }
 }
 
 pub(super) async fn receive(receiver: oneshot::Receiver<Reply>) -> Reply {
-    receiver
-        .await
-        .unwrap_or_else(|_| Err("The engine worker stopped before returning a result.".into()))
-}
-
-/// What one operation produced: the engine output plus values that only the
-/// next snapshot consumes (a document to show, a file to open).
-#[derive(Default)]
-struct Applied {
-    output: Option<RunOutput>,
-    document: Option<(String, String)>,
-    open_path: Option<String>,
-}
-
-async fn apply(
-    engine: &mut Engine,
-    operation: Operation,
-    no_session: bool,
-) -> anyhow::Result<Applied> {
-    let persist = !no_session
-        && matches!(
-            operation,
-            Operation::Prompt(_)
-                | Operation::Command(_)
-                | Operation::ClearMessages
-                | Operation::Undo
-                | Operation::Redo
-                | Operation::Retry
-                | Operation::Rewind(_)
-                | Operation::SelectModel { .. }
-                | Operation::SelectProvider { .. }
-                | Operation::SelectPrompt { .. }
-                | Operation::SetPermissionMode { .. }
-                | Operation::SetEditSystem { .. }
-                | Operation::AddContextFile { .. }
-                | Operation::AddContextFiles(_)
-                | Operation::DropContextFile { .. }
-                | Operation::ClearContextFiles
-                | Operation::ToggleReasoning
-                | Operation::CompressConversation { .. }
-                | Operation::AskSeparateQuestion { .. }
-                | Operation::RunShell { .. }
-        );
-    #[cfg(feature = "git-worktree")]
-    let persist = persist
-        || (!no_session
-            && matches!(
-                operation,
-                Operation::MergeWorktree { .. } | Operation::ExitWorktree
-            ));
-    let before = serde_json::to_vec(engine.session())?;
-    let had_messages = !engine.session().messages.is_empty();
-    let conversation = engine.session().id.clone();
-    let mut document = None;
-    // Only the `memory` build assigns it, so keep the `mut` quiet otherwise.
-    #[allow(unused_mut)]
-    let mut open_path = None;
-    let output = match operation {
-        Operation::Prompt(prompt) => Some(engine.run_prompt(prompt).await),
-        Operation::Command(input) => Some(engine.run_string(&input).await?),
-        Operation::Load(id) => {
-            let session = saved_session(&id)?;
-            *engine.session_mut() = session;
-            None
-        }
-        Operation::Rename { id, name } => {
-            anyhow::ensure!(
-                !name.trim().is_empty(),
-                "A conversation name cannot be empty."
-            );
-            if engine.session().id.as_str() == id {
-                let mut session = engine.session().clone();
-                session.name = name.trim().into();
-                if !no_session {
-                    storage::save_session(&session)?;
-                }
-                engine.session_mut().name = session.name;
-            } else {
-                let mut session = saved_session(&id)?;
-                session.name = name.trim().into();
-                storage::save_session(&session)?;
-            }
-            None
-        }
-        Operation::Delete(id) => {
-            validate_id(&id)?;
-            storage::delete_session(&id)?;
-            None
-        }
-        Operation::NewSession => {
-            engine.new_session();
-            None
-        }
-        Operation::ClearMessages => {
-            engine.clear_messages().await;
-            None
-        }
-        Operation::Undo => {
-            engine.undo_messages();
-            None
-        }
-        Operation::Redo => {
-            engine.redo_messages();
-            None
-        }
-        Operation::Retry => Some(engine.retry_last_message().await?),
-        Operation::SelectModel { selection } => {
-            engine.set_model_selection(&selection).await?;
-            None
-        }
-        Operation::SelectProvider { provider } => {
-            engine.set_provider(&provider).await?;
-            None
-        }
-        Operation::SelectPrompt { prompt } => {
-            engine.set_prompt(&prompt).await?;
-            None
-        }
-        Operation::SetPermissionMode { mode } => {
-            engine.set_permission_mode(&mode)?;
-            None
-        }
-        Operation::SetEditSystem { system } => {
-            engine.set_edit_system(&system)?;
-            None
-        }
-        Operation::AddContextFile { path } => {
-            engine.add_context_file(path).await?;
-            None
-        }
-        Operation::AddContextFiles(paths) => {
-            let mut errors = Vec::new();
-            for path in paths {
-                if engine.context().extra_files.contains(&path)
-                    || engine
-                        .session()
-                        .pending_media
-                        .iter()
-                        .any(|media| media.path() == path)
-                {
-                    continue;
-                }
-                if let Err(error) = engine.add_context_file(path).await {
-                    errors.push(format!("error: {error}"));
-                }
-            }
-            (!errors.is_empty()).then(|| RunOutput::command(errors.join("\n")))
-        }
-        Operation::DropContextFile { path } => {
-            if let Some(index) = engine
-                .session()
-                .pending_media
-                .iter()
-                .position(|media| media.path() == path)
-            {
-                engine.session_mut().pending_media.remove(index);
-            } else {
-                engine.drop_context_file(path).await?;
-            }
-            None
-        }
-        Operation::ClearContextFiles => {
-            engine.clear_context_files().await?;
-            None
-        }
-        Operation::ToggleReasoning => {
-            engine.toggle_reasoning().await;
-            None
-        }
-        Operation::SaveQuickModel {
-            name,
-            provider,
-            model,
-        } => {
-            for value in [&name, &provider, &model] {
-                anyhow::ensure!(!value.trim().is_empty(), "Complete the required fields.");
-                anyhow::ensure!(
-                    !value.trim().contains(char::is_whitespace),
-                    "This Engine command currently requires a path without spaces."
-                );
-            }
-            crate::config::save_quick_model(&name, &provider, &model, 0.0, 0.0)
-                .map_err(|error| anyhow::anyhow!("failed to save quick model: {error}"))?;
-            None
-        }
-        Operation::CompressConversation { instructions } => {
-            engine.compress_conversation(instructions).await?;
-            None
-        }
-        Operation::AskSeparateQuestion { question } => {
-            Some(engine.ask_separate_question(question).await?)
-        }
-        Operation::RunShell { command } => Some(engine.run_shell(command).await?),
-        #[cfg(feature = "export")]
-        Operation::ExportConversation { destination } => {
-            engine.export_conversation(destination)?;
-            None
-        }
-        #[cfg(feature = "export")]
-        Operation::ImportConversation { path } => {
-            engine.import_conversation(path)?;
-            None
-        }
-        #[cfg(feature = "export")]
-        Operation::ShareConversation => Some(engine.share_conversation().await?),
-        Operation::Rewind(index) => {
-            engine.rewind_to(index);
-            None
-        }
-        #[cfg(feature = "git-worktree")]
-        Operation::MergeWorktree { target } => {
-            let command = match target {
-                Some(target) => format!("/wt-merge {target}"),
-                None => "/wt-merge".to_string(),
-            };
-            Some(engine.run_string(&command).await?)
-        }
-        #[cfg(feature = "git-worktree")]
-        Operation::ExitWorktree => Some(engine.run_string("/wt-exit").await?),
-        #[cfg(feature = "mcp")]
-        Operation::McpLogin { server } => {
-            Some(engine.run_string(&format!("/mcp login {server}")).await?)
-        }
-        #[cfg(feature = "mcp")]
-        Operation::McpLogout { server } => {
-            Some(engine.run_string(&format!("/mcp logout {server}")).await?)
-        }
-        Operation::OpenDocument { name } => {
-            let content = engine.read_doc(&name)?;
-            document = Some((name, content));
-            None
-        }
-        #[cfg(feature = "memory")]
-        Operation::MemoryEditor => {
-            let path = engine.memory_editor_path();
-            let message = format!("opening {} in your editor", path.display());
-            open_path = Some(path.display().to_string());
-            Some(RunOutput::command(message))
-        }
-        #[cfg(feature = "loop")]
-        Operation::StartLoop {
-            prompt,
-            max_iterations,
-        } => Some(engine.run_loop(Some(prompt), max_iterations).await?),
-    };
-    // Attached files are not saved with any conversation, so they end with the
-    // one they were attached in rather than carrying into the next.
-    if engine.session().id != conversation {
-        engine.clear_context_files().await?;
-    }
-    // A conversation reaches disk with its first message: a new one stays in
-    // memory until then, so starting or abandoning it leaves no empty entry.
-    // One emptied by clear or undo is still saved, so the change sticks.
-    let kept = had_messages || !engine.session().messages.is_empty();
-    if persist && kept && before != serde_json::to_vec(engine.session())? {
-        storage::save_session(engine.session())?;
-    }
-    Ok(Applied {
-        output,
-        document,
-        open_path,
-    })
-}
-
-fn validate_id(id: &str) -> anyhow::Result<()> {
-    uuid::Uuid::parse_str(id)?;
-    Ok(())
-}
-
-fn saved_session(id: &str) -> anyhow::Result<Session> {
-    validate_id(id)?;
-    storage::find_sessions_by_prefix(id)?
-        .into_iter()
-        .find(|session| session.id.as_str() == id)
-        .ok_or_else(|| anyhow::anyhow!("Conversation no longer exists."))
-}
-
-/// Mirror "allow always" decisions into the session allowlist (the TUI does
-/// the same in `permission_handler`), saving when it changed.
-fn adopt_session_allowlist(
-    engine: &mut Engine,
-    allowed: &StdMutex<Vec<PermissionAllowEntry>>,
-    no_session: bool,
-) -> anyhow::Result<()> {
-    let entries = std::mem::take(&mut *allowed.lock().unwrap_or_else(|error| error.into_inner()));
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let mut changed = false;
-    for entry in entries {
-        let known = engine
-            .session()
-            .permission_allowlist
-            .iter()
-            .any(|existing| existing.tool == entry.tool && existing.pattern == entry.pattern);
-        if !known {
-            engine.session_mut().permission_allowlist.push(entry);
-            changed = true;
-        }
-    }
-    if changed && !no_session {
-        storage::save_session(engine.session())?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn snapshot(
-    engine: &Engine,
-    models: &[String],
-    providers: &[String],
-    permission: Option<&crate::permission::checker::PermCheck>,
-    show_reasoning: bool,
-    notices: &[String],
-    applied: Applied,
-) -> anyhow::Result<Snapshot> {
-    let mut prompts: Vec<_> = engine.context().prompts.keys().cloned().collect();
-    prompts.sort();
-    prompts.insert(0, "default".into());
-    Ok(Snapshot {
-        session: engine.session().clone(),
-        sessions: storage::find_recent_sessions(100)?,
-        files: engine.context().extra_files.clone(),
-        prompts,
-        prompt: engine
-            .context()
-            .current_prompt_name
-            .clone()
-            .unwrap_or_else(|| "default".into()),
-        models: models.to_vec(),
-        providers: providers.to_vec(),
-        permission_mode: permission.map(|permission| {
-            permission
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .mode()
-                .to_string()
-        }),
-        edit_system: crate::agent::tools::edit_system().to_string(),
-        show_reasoning,
-        notices: notices.to_vec(),
-        rewind_points: engine.rewind_points(),
-        document: applied.document,
-        open_path: applied.open_path,
-        colors: engine.active_colors(),
-        output: applied.output,
+    receiver.await.unwrap_or_else(|_| {
+        Err("The conversation worker stopped before returning a result.".into())
     })
 }
 
@@ -825,345 +321,6 @@ pub(super) fn title(session: &Session) -> String {
         .unwrap_or_else(|| "New conversation".into())
 }
 
-/// The authorization URL that `/mcp login` prints before it waits.
-#[cfg(feature = "mcp")]
-fn login_url(text: &str) -> Option<String> {
-    let rest = text.strip_prefix("open this URL to authorize ")?;
-    let url = rest.lines().nth(1)?.trim();
-    url.starts_with("http").then(|| url.to_string())
-}
-
 #[cfg(test)]
-#[allow(unsafe_code, clippy::await_holding_lock)]
-mod tests {
-    use super::*;
-    use crate::tests::fake_model;
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-
-    struct Isolated {
-        dir: PathBuf,
-        previous: [Option<OsString>; 2],
-    }
-
-    impl Isolated {
-        fn new() -> Self {
-            let dir = std::env::temp_dir()
-                .join(format!("zerostack-desktop-test-{}", uuid::Uuid::new_v4()));
-            std::fs::create_dir_all(&dir).unwrap();
-            let keys = ["ZS_DATA_DIR", "ZS_CONFIG_DIR"];
-            let previous = keys.map(std::env::var_os);
-            for key in keys {
-                unsafe {
-                    std::env::set_var(key, &dir);
-                }
-            }
-            Self { dir, previous }
-        }
-    }
-
-    impl Drop for Isolated {
-        fn drop(&mut self) {
-            for (key, value) in ["ZS_DATA_DIR", "ZS_CONFIG_DIR"]
-                .into_iter()
-                .zip(&self.previous)
-            {
-                unsafe {
-                    if let Some(value) = value {
-                        std::env::set_var(key, value);
-                    } else {
-                        std::env::remove_var(key);
-                    }
-                }
-            }
-            let _ = std::fs::remove_dir_all(&self.dir);
-        }
-    }
-
-    fn engine() -> Engine {
-        let model = fake_model::text_turns(vec![vec!["First reply"], vec!["Second reply"]]);
-        Engine::new(
-            Cli {
-                api_key: Some("test-key".into()),
-                ..Default::default()
-            },
-            crate::config::Config::default(),
-            Session::new("anthropic", "claude-sonnet-4-5", 200_000, ""),
-            crate::context::load_with_prompts_dirs(true, &[]),
-            crate::provider::create_client("anthropic", Some("test-key"), &HashMap::new(), None)
-                .unwrap(),
-            None,
-            crate::sandbox::Sandbox::new(false, "bwrap"),
-        )
-        .with_agent(crate::provider::AnyAgent::Mock(
-            rig::agent::AgentBuilder::new(model).build(),
-        ))
-    }
-
-    #[tokio::test]
-    async fn messages_and_rewinds_are_persisted_through_existing_storage() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        let output = apply(
-            &mut engine,
-            Operation::Prompt("Explain the code".into()),
-            false,
-        )
-        .await
-        .unwrap()
-        .output
-        .unwrap();
-        assert_eq!(output.text, "First reply");
-        assert_eq!(
-            saved_session(&engine.session().id).unwrap().messages.len(),
-            2
-        );
-        apply(&mut engine, Operation::Undo, false).await.unwrap();
-        assert!(
-            saved_session(&engine.session().id)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
-        apply(&mut engine, Operation::Redo, false).await.unwrap();
-        assert_eq!(
-            saved_session(&engine.session().id).unwrap().messages.len(),
-            2
-        );
-    }
-
-    #[tokio::test]
-    async fn renaming_and_deleting_another_session_does_not_change_the_active_one() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        let active = engine.session().id.clone();
-        let other = Session::new("anthropic", "claude-sonnet-4-5", 200_000, "Other");
-        storage::save_session(&other).unwrap();
-        apply(
-            &mut engine,
-            Operation::Rename {
-                id: other.id.to_string(),
-                name: "Renamed".into(),
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(saved_session(&other.id).unwrap().name, "Renamed");
-        apply(&mut engine, Operation::Delete(other.id.to_string()), false)
-            .await
-            .unwrap();
-        assert!(saved_session(&other.id).is_err());
-        assert_eq!(engine.session().id, active);
-    }
-
-    #[tokio::test]
-    async fn invalid_session_targets_leave_active_state_unchanged() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        let active = engine.session().id.clone();
-        assert!(
-            apply(&mut engine, Operation::Delete("../outside".into()), false,)
-                .await
-                .is_err()
-        );
-        assert!(
-            apply(
-                &mut engine,
-                Operation::Load(uuid::Uuid::new_v4().to_string()),
-                false,
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(engine.session().id, active);
-    }
-
-    #[tokio::test]
-    async fn rewind_operation_truncates_and_persists() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        apply(
-            &mut engine,
-            Operation::Prompt("Explain the code".into()),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            saved_session(&engine.session().id).unwrap().messages.len(),
-            2
-        );
-
-        apply(&mut engine, Operation::Rewind(0), false)
-            .await
-            .unwrap();
-        assert!(engine.session().messages.is_empty());
-        assert!(
-            saved_session(&engine.session().id)
-                .unwrap()
-                .messages
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
-    async fn new_conversations_are_saved_with_their_first_message() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        let first = engine.session().id.clone();
-        assert!(saved_session(&first).is_err());
-        apply(
-            &mut engine,
-            Operation::Prompt("Explain the code".into()),
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(saved_session(&first).unwrap().messages.len(), 2);
-
-        apply(&mut engine, Operation::ClearMessages, false)
-            .await
-            .unwrap();
-        assert!(saved_session(&first).unwrap().messages.is_empty());
-
-        apply(&mut engine, Operation::NewSession, false)
-            .await
-            .unwrap();
-        apply(
-            &mut engine,
-            Operation::SelectModel {
-                selection: "claude-opus-4-1".into(),
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        let fresh = engine.session();
-        assert_ne!(fresh.id, first);
-        assert!(fresh.messages.is_empty());
-        assert_eq!(fresh.model.as_str(), "claude-opus-4-1");
-        assert!(saved_session(&fresh.id).is_err());
-    }
-
-    #[test]
-    fn allow_always_decisions_land_in_the_session_allowlist() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let _data = Isolated::new();
-        let mut engine = engine();
-        let allowed = StdMutex::new(vec![PermissionAllowEntry {
-            tool: "write".into(),
-            pattern: "/tmp/**".into(),
-        }]);
-
-        adopt_session_allowlist(&mut engine, &allowed, false).unwrap();
-        let saved = saved_session(&engine.session().id).unwrap();
-        assert_eq!(saved.permission_allowlist.len(), 1);
-        assert_eq!(saved.permission_allowlist[0].pattern.as_str(), "/tmp/**");
-
-        // Re-adding the same pair must not duplicate the entry.
-        adopt_session_allowlist(&mut engine, &allowed, false).unwrap();
-        assert_eq!(engine.session().permission_allowlist.len(), 1);
-    }
-
-    #[test]
-    fn ui_stream_reports_whether_a_ui_is_listening() {
-        let stream = UiStream::default();
-        assert!(!stream.notify(UiEvent::OpenUrl("https://example.com".into())));
-
-        let (sender, receiver) = mpsc::unbounded_channel();
-        stream.set(Some(sender));
-        assert!(stream.notify(UiEvent::OpenUrl("https://example.com".into())));
-        assert_eq!(receiver.len(), 1);
-        stream.set(None);
-        assert!(!stream.notify(UiEvent::OpenUrl("https://example.com".into())));
-    }
-
-    #[tokio::test]
-    async fn attachment_batches_keep_valid_files_and_report_failures() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let data = Isolated::new();
-        let mut engine = engine();
-        let text = data.dir.join("notes with spaces.txt");
-        let image = data.dir.join("image.png");
-        let missing = data.dir.join("missing.txt");
-        std::fs::write(&text, "context").unwrap();
-        std::fs::write(&image, [137, 80, 78, 71]).unwrap();
-        let result = apply(
-            &mut engine,
-            Operation::AddContextFiles(vec![text.clone(), missing, image.clone(), image.clone()]),
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(result.output.unwrap().text.contains("missing.txt"));
-        assert_eq!(engine.context().extra_files, [text.canonicalize().unwrap()]);
-        assert_eq!(engine.session().pending_media.len(), 1);
-        apply(
-            &mut engine,
-            Operation::DropContextFile { path: image },
-            false,
-        )
-        .await
-        .unwrap();
-        assert!(engine.session().pending_media.is_empty());
-        assert_eq!(engine.context().extra_files.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn attachments_end_with_the_conversation_they_were_added_in() {
-        let _lock = fake_model::run_print_guard::acquire();
-        let data = Isolated::new();
-        let mut engine = engine();
-        let text = data.dir.join("notes.txt");
-        let image = data.dir.join("image.png");
-        std::fs::write(&text, "context").unwrap();
-        std::fs::write(&image, [137, 80, 78, 71]).unwrap();
-        let attach = || Operation::AddContextFiles(vec![text.clone(), image.clone()]);
-        let attached = |engine: &Engine| {
-            engine.context().extra_files.len() + engine.session().pending_media.len()
-        };
-
-        apply(&mut engine, attach(), false).await.unwrap();
-        apply(
-            &mut engine,
-            Operation::SelectModel {
-                selection: "claude-opus-4-1".into(),
-            },
-            false,
-        )
-        .await
-        .unwrap();
-        assert_eq!(attached(&engine), 2);
-
-        apply(&mut engine, Operation::NewSession, false)
-            .await
-            .unwrap();
-        assert_eq!(attached(&engine), 0);
-
-        let other = Session::new("anthropic", "claude-sonnet-4-5", 200_000, "Other");
-        storage::save_session(&other).unwrap();
-        apply(&mut engine, attach(), false).await.unwrap();
-        apply(&mut engine, Operation::Load(other.id.to_string()), false)
-            .await
-            .unwrap();
-        assert_eq!(attached(&engine), 0);
-    }
-
-    #[cfg(feature = "mcp")]
-    #[test]
-    fn login_url_comes_from_the_mcp_login_announcement() {
-        let line = "open this URL to authorize 'docs':\nhttps://auth.example.com/x?y=1\nwaiting on 127.0.0.1:4000 ...\n";
-        assert_eq!(
-            login_url(line).as_deref(),
-            Some("https://auth.example.com/x?y=1")
-        );
-        assert_eq!(login_url("open this file"), None);
-        assert_eq!(login_url("open this URL to authorize 'docs':\n"), None);
-    }
-}
+#[path = "worker_tests.rs"]
+mod tests;
