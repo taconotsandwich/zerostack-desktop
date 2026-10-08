@@ -11,6 +11,11 @@ const COMMANDS: &[(&str, &str, Option<&str>)] = &[
         "Add a file to context, or list added files",
         Some("path"),
     ),
+    (
+        "btw",
+        "Ask a side question; the conversation is unchanged",
+        Some("question"),
+    ),
     ("clear", "Clear the conversation", None),
     ("compress", "Compact the conversation", Some("instructions")),
     ("drop", "Remove a file from context", Some("path")),
@@ -31,6 +36,11 @@ const COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ("redo", "Restore what the last undo removed", None),
     ("rename", "Rename the session", Some("name")),
     ("retry", "Run the last message again", None),
+    (
+        "rewind",
+        "List the messages, or cut back to before one",
+        Some("n"),
+    ),
     ("review", "Review the changes", Some("message")),
     (
         "toggle",
@@ -51,11 +61,46 @@ const EXPORT_COMMANDS: &[(&str, &str, Option<&str>)] = &[
     ("share", "Share the session as a secret gist", None),
 ];
 
+#[cfg(feature = "git-worktree")]
+const WORKTREE_COMMANDS: &[(&str, &str, Option<&str>)] = &[
+    ("worktree", "Move into a new git worktree", Some("name")),
+    (
+        "wt-merge",
+        "Merge this worktree's branch and return to the main repo",
+        Some("target branch"),
+    ),
+    (
+        "wt-exit",
+        "Return to the main repo, keeping the worktree",
+        None,
+    ),
+];
+
+#[cfg(feature = "mcp")]
+const MCP_COMMANDS: &[(&str, &str, Option<&str>)] = &[(
+    "mcp",
+    "List MCP servers or a server's tools, or log in or out",
+    Some("server | login server | logout server"),
+)];
+
+#[cfg(feature = "loop")]
+const LOOP_COMMANDS: &[(&str, &str, Option<&str>)] = &[(
+    "loop",
+    "Run a prompt in iterations until the plan is done",
+    Some("prompt"),
+)];
+
 pub(super) fn available_commands() -> Vec<AvailableCommand> {
     #[allow(unused_mut)]
     let mut commands: Vec<_> = COMMANDS.to_vec();
     #[cfg(feature = "export")]
     commands.extend_from_slice(EXPORT_COMMANDS);
+    #[cfg(feature = "git-worktree")]
+    commands.extend_from_slice(WORKTREE_COMMANDS);
+    #[cfg(feature = "mcp")]
+    commands.extend_from_slice(MCP_COMMANDS);
+    #[cfg(feature = "loop")]
+    commands.extend_from_slice(LOOP_COMMANDS);
     commands.sort_by_key(|(name, ..)| *name);
     commands
         .into_iter()
