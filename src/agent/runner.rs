@@ -2,7 +2,10 @@ use std::collections::HashMap;
 
 use compact_str::CompactString;
 use futures::StreamExt;
-use rig::agent::{Agent, MultiTurnStreamItem, StreamingResult};
+use rig::agent::{
+    Agent, AgentHook, HookContext, MultiTurnStreamItem, OutcomeAction, OutcomeEvent, StepEventKind,
+    StreamingResult,
+};
 use rig::completion::message::UserContent;
 use rig::completion::{Message, Usage};
 use rig::message::ToolResultContent;
@@ -67,6 +70,39 @@ impl UserPrompt {
     }
 }
 
+/// The ids of tool calls that failed or were refused, recorded by rig as each
+/// tool finishes. Its streamed result carries only the text, so the runner
+/// looks a call up here when the result arrives.
+#[derive(Clone, Default)]
+struct ToolFailures(std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>);
+
+impl ToolFailures {
+    fn take(&self, call_id: &str) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(call_id)
+    }
+}
+
+impl AgentHook for ToolFailures {
+    async fn on_outcome(&self, _ctx: &HookContext, event: OutcomeEvent<'_>) -> OutcomeAction {
+        if let (Some(call_id), Some(result)) = (event.call_id, event.tool_result())
+            && (result.is_error() || result.is_refused())
+        {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(call_id.to_string());
+        }
+        OutcomeAction::Proceed
+    }
+
+    fn observes(&self, kind: StepEventKind) -> bool {
+        kind == StepEventKind::ToolDispatch
+    }
+}
+
 /// Start one streamed run of `agent` for `prompt` over `history`, retrying a
 /// retryable first-item failure per `retry_config`.
 async fn start_stream(
@@ -74,11 +110,19 @@ async fn start_stream(
     prompt: UserPrompt,
     history: Vec<Message>,
     retry_config: &RetryConfig,
+    failures: Option<&ToolFailures>,
 ) -> Result<StreamingResult, anyhow::Error> {
     retry::retry_stream_chat(retry_config, || {
         let p = prompt.to_message();
         let h = history.clone();
-        async move { agent.prompt(p).history(h).stream() }
+        let failures = failures.cloned();
+        async move {
+            let run = agent.prompt(p).history(h);
+            match failures {
+                Some(failures) => run.add_hook(failures).stream(),
+                None => run.stream(),
+            }
+        }
     })
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))
@@ -97,19 +141,26 @@ pub fn spawn_btw(
     retry_config: RetryConfig,
 ) -> BtwRunner {
     let join = tokio::spawn(async move {
-        let mut stream =
-            match start_stream(&agent, UserPrompt::text(prompt), history, &retry_config).await {
-                Ok(s) => s,
-                Err(e) => {
-                    let _ = event_tx
-                        .send(BtwEvent::Error {
-                            id,
-                            message: CompactString::new(e.to_string()),
-                        })
-                        .await;
-                    return;
-                }
-            };
+        let mut stream = match start_stream(
+            &agent,
+            UserPrompt::text(prompt),
+            history,
+            &retry_config,
+            None,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = event_tx
+                    .send(BtwEvent::Error {
+                        id,
+                        message: CompactString::new(e.to_string()),
+                    })
+                    .await;
+                return;
+            }
+        };
 
         let mut acc = String::new();
 
@@ -292,6 +343,7 @@ pub fn spawn_agent(
         let mut consecutive_stop_blocks: u32 = 0;
         #[cfg(feature = "hooks")]
         const MAX_STOP_BLOCKS: u32 = 8;
+        let failures = ToolFailures::default();
 
         loop {
             let mut stream = match start_stream(
@@ -299,6 +351,7 @@ pub fn spawn_agent(
                 current_prompt.clone(),
                 conversation.clone(),
                 &retry_config,
+                Some(&failures),
             )
             .await
             {
@@ -375,6 +428,7 @@ pub fn spawn_agent(
                         );
                         let _ = event_tx
                             .send(AgentEvent::ToolResult {
+                                failed: failures.take(&call_id),
                                 call_id: CompactString::from(call_id),
                                 name: tool_name,
                                 output: CompactString::from(output),
@@ -534,6 +588,7 @@ pub async fn run_print(
             UserPrompt::text(current_prompt.clone()),
             conversation.clone(),
             retry_config,
+            None,
         )
         .await?;
 

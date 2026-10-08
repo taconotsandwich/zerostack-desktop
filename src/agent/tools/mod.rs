@@ -1,6 +1,8 @@
 pub(crate) mod bash;
 pub(crate) mod crc;
 pub(crate) mod edit;
+#[cfg(any(test, feature = "acp"))]
+pub(crate) mod edit_hunks;
 pub(crate) mod find_files;
 pub(crate) mod grep;
 pub(crate) mod list_dir;

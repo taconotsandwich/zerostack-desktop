@@ -76,7 +76,11 @@ async fn load_replays_the_history_and_the_session_goes_on() {
         "{replayed:?}"
     );
     assert_eq!(replayed[0]["content"]["text"], "write it");
-    assert_eq!(replayed[1]["title"], "write");
+    assert!(
+        replayed[1]["title"].as_str().unwrap().starts_with("write "),
+        "{replayed:?}"
+    );
+    assert_eq!(replayed[1]["kind"], "edit");
     assert_eq!(replayed[1]["toolCallId"], replayed[2]["toolCallId"]);
     assert_eq!(replayed[2]["status"], "completed");
     assert_eq!(replayed[3]["content"]["text"], "done");

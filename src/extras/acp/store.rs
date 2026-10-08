@@ -3,11 +3,12 @@
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 
-use super::events::{send_update, text_chunk};
+use super::events::{send_update, text_chunk, tool_kind, tool_path};
 use super::modes::mode_state;
 use super::options::config_options;
 use super::{AcpState, unknown_session};
 use crate::session::{MessageRole, SessionMessage, ToolRecord, storage};
+use crate::ui::utils::format_tool_call_summary;
 
 /// The ACP id of a stored tool call, so a replayed result updates its call.
 fn stored_call_id(id: u64) -> ToolCallId {
@@ -27,7 +28,14 @@ pub(super) fn replay(messages: &[SessionMessage]) -> Vec<SessionUpdate> {
                 (MessageRole::Assistant, _) => Some(SessionUpdate::AgentMessageChunk(text())),
                 (MessageRole::ToolCall, Some(ToolRecord::Call { id, name, args })) => {
                     Some(SessionUpdate::ToolCall(
-                        ToolCall::new(stored_call_id(*id), name.to_string())
+                        ToolCall::new(stored_call_id(*id), format_tool_call_summary(name, args))
+                            .kind(tool_kind(name))
+                            .locations(
+                                tool_path(args)
+                                    .map(ToolCallLocation::new)
+                                    .into_iter()
+                                    .collect(),
+                            )
                             .raw_input(Some(args.clone())),
                     ))
                 }
