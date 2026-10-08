@@ -681,3 +681,21 @@ fn remember_allowed_keeps_each_entry_once() {
         .collect();
     assert_eq!(kept, [("write", "/tmp/*"), ("bash", "/tmp/*")]);
 }
+
+#[tokio::test]
+async fn resume_session_continues_the_stored_conversation() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, model) = engine_with_turns(vec![vec!["resumed reply"]]);
+    let mut stored = test_session();
+    stored.add_message(MessageRole::User, "stored question");
+    stored.add_message(MessageRole::Assistant, "stored answer");
+    let id = stored.id.clone();
+
+    engine.resume_session(stored).expect("resume");
+    assert_eq!(engine.session().id, id);
+    let out = engine.run_prompt("next".to_string()).await;
+    assert_eq!(out.text, "resumed reply");
+    let history = format!("{:?}", fake_model::history_at(&model, 0));
+    assert!(history.contains("stored question"), "{history}");
+    assert!(history.contains("stored answer"), "{history}");
+}

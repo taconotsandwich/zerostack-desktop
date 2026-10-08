@@ -350,20 +350,20 @@ async fn prompting_an_unknown_session_is_an_error() {
 
 // --- permission asks ---
 
-fn guarded() -> Config {
+pub(super) fn guarded() -> Config {
     Config {
         default_permission_mode: Some("guarded".to_string()),
         ..Default::default()
     }
 }
 
-fn outside_file() -> std::path::PathBuf {
+pub(super) fn outside_file() -> std::path::PathBuf {
     std::env::temp_dir().join(format!("zerostack-acp-ask-{}.txt", uuid::Uuid::new_v4()))
 }
 
 /// One turn that writes `path` (an ask in guarded mode: it is outside the
 /// project), then one that answers.
-fn write_turns(path: &std::path::Path) -> Vec<Vec<MockStreamEvent>> {
+pub(super) fn write_turns(path: &std::path::Path) -> Vec<Vec<MockStreamEvent>> {
     vec![
         vec![
             MockStreamEvent::tool_call(
@@ -380,7 +380,7 @@ fn write_turns(path: &std::path::Path) -> Vec<Vec<MockStreamEvent>> {
     ]
 }
 
-fn select(option: &'static str) -> PermissionAnswer {
+pub(super) fn select(option: &'static str) -> PermissionAnswer {
     Box::new(move |_| {
         Some(Ok(
             json!({"outcome": {"outcome": "selected", "optionId": option}}),

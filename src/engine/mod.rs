@@ -253,6 +253,36 @@ impl Engine {
         &self.session
     }
 
+    /// Continue a saved session: it replaces the current one, its
+    /// "allow always" answers apply again, and the client and agent follow
+    /// its provider and model.
+    pub fn resume_session(&mut self, session: Session) -> anyhow::Result<()> {
+        if session.provider != self.session.provider {
+            self.client = crate::provider::create_client(
+                &session.provider,
+                self.cli.api_key.as_deref(),
+                &self.cfg.custom_providers_map(),
+                self.cfg.api_keys.as_ref(),
+            )?;
+        }
+        if session.provider != self.session.provider || session.model != self.session.model {
+            self.agent = None;
+        }
+        if let Some(permission) = &self.permission {
+            let allowlist: Vec<(String, String)> = session
+                .permission_allowlist
+                .iter()
+                .map(|entry| (entry.tool.to_string(), entry.pattern.to_string()))
+                .collect();
+            permission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .load_session_allowlist(&allowlist);
+        }
+        self.session = session;
+        Ok(())
+    }
+
     /// Keep an "allow always" answer with the session, so the session still
     /// allows it once resumed. Returns false when it was already kept.
     pub fn remember_allowed(&mut self, tool: &str, pattern: &str) -> bool {
