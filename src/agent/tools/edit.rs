@@ -37,7 +37,7 @@ impl EditTool {
 
 // ── V1: Similarity (SEARCH/REPLACE) ──────────────────────────────────────
 
-fn parse_blocks(raw: &str) -> Result<Vec<EditBlock>, ToolError> {
+pub(super) fn parse_blocks(raw: &str) -> Result<Vec<EditBlock>, ToolError> {
     let mut blocks = Vec::new();
     let mut in_block = false;
     let mut search_lines: Vec<String> = Vec::new();
@@ -351,7 +351,7 @@ async fn handle_similarity(
 
 // ── V2: Hashedit (tag-based) ────────────────────────────────────────────
 
-fn parse_tagged_line(raw: &str) -> Option<(usize, String)> {
+pub(super) fn parse_tagged_line(raw: &str) -> Option<(usize, String)> {
     let stripped = raw.trim_start_matches([' ', '\t']);
     let (num_tag, _content) = stripped.split_once(' ')?;
     let (num_str, tag) = num_tag.split_once('|')?;

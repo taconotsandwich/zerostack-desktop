@@ -20,6 +20,8 @@ pub enum AgentEvent {
         call_id: CompactString,
         name: CompactString,
         output: CompactString,
+        /// The tool failed or refused the call; `output` says why.
+        failed: bool,
     },
     #[cfg(any(feature = "subagents", feature = "acp"))]
     SubagentToolCall {

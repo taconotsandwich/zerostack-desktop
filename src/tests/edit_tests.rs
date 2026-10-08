@@ -5,7 +5,7 @@
 
 use crate::agent::tools::crc::crc32_hex;
 use crate::agent::tools::set_edit_system;
-use crate::agent::tools::{EditArgs, EditOp, edit};
+use crate::agent::tools::{EditArgs, EditOp, edit, edit_hunks};
 use crate::config::types::EditSystem;
 use rig::tool::PortableTool as Tool;
 
@@ -444,4 +444,66 @@ async fn test_hash_multi_edit_atomic() {
     let content = std::fs::read_to_string(tmp.path()).unwrap();
     assert_eq!(content, "AAA\nbbb\nccc\nDDD\n");
     assert!(result.contains("Applied 2 edit(s)"));
+}
+
+#[test]
+fn edit_hunks_pair_old_and_new_text() {
+    let block = EditArgs {
+        path: "a.rs".into(),
+        block: Some(
+            "<<<<<<< SEARCH\nfn a() {}\n=======\nfn b() {}\n>>>>>>> REPLACE\n\
+             <<<<<<< SEARCH\nlet x = 1;\n=======\n>>>>>>> REPLACE"
+                .into(),
+        ),
+        file_crc: None,
+        edits: None,
+    };
+    let hunks: Vec<_> = edit_hunks::edit_hunks(&block)
+        .into_iter()
+        .map(|h| (h.search, h.replace))
+        .collect();
+    assert_eq!(
+        hunks,
+        [
+            ("fn a() {}".to_string(), "fn b() {}".to_string()),
+            ("let x = 1;".to_string(), String::new()),
+        ]
+    );
+
+    let hashedit = EditArgs {
+        path: "a.rs".into(),
+        block: None,
+        file_crc: Some("00000000".into()),
+        edits: Some(vec![
+            EditOp {
+                line: Some("3|0a1b2c3d     let y = 2;".into()),
+                lines: None,
+                text: "    let y = 3;".into(),
+            },
+            EditOp {
+                line: None,
+                lines: Some("7|deadbeef one\n8|cafebabe two".into()),
+                text: "both".into(),
+            },
+        ]),
+    };
+    let hunks: Vec<_> = edit_hunks::edit_hunks(&hashedit)
+        .into_iter()
+        .map(|h| (h.search, h.replace))
+        .collect();
+    assert_eq!(
+        hunks,
+        [
+            ("    let y = 2;".to_string(), "    let y = 3;".to_string()),
+            ("one\ntwo".to_string(), "both".to_string()),
+        ]
+    );
+
+    let broken = EditArgs {
+        path: "a.rs".into(),
+        block: Some("no markers".into()),
+        file_crc: None,
+        edits: None,
+    };
+    assert!(edit_hunks::edit_hunks(&broken).is_empty());
 }

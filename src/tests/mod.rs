@@ -10,6 +10,8 @@ pub(crate) mod acp_session_tests;
 mod acp_store_tests;
 #[cfg(all(test, feature = "acp"))]
 mod acp_tests;
+#[cfg(all(test, feature = "acp"))]
+mod acp_tool_tests;
 #[cfg(all(test, feature = "advisor"))]
 mod advisor_tests;
 #[cfg(all(test, feature = "archmd"))]

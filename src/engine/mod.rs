@@ -913,6 +913,7 @@ impl Engine {
                     call_id: event_id,
                     name,
                     output,
+                    ..
                 } => {
                     if self.turn_trace.len() < 64 {
                         self.turn_trace.push(CompactString::from(format!(

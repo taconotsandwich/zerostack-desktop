@@ -164,6 +164,13 @@ struct LiveSession {
     forwarder: EventForwarder,
 }
 
+/// The session's context use and cost, as of the last model call.
+fn usage_update(session: &crate::session::Session) -> SessionUpdate {
+    let usage = UsageUpdate::new(session.effective_context_tokens(), session.context_window)
+        .cost((session.total_cost > 0.0).then(|| Cost::new(session.total_cost, "USD")));
+    SessionUpdate::UsageUpdate(usage)
+}
+
 impl LiveSession {
     /// Run one prompt, forwarding the turn's events as session updates. Every
     /// update is sent before this returns, so the prompt response that
@@ -237,6 +244,7 @@ impl LiveSession {
                 SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options_after)),
             );
         }
+        send_update(cx, &forwarder.session_id, usage_update(engine.session()));
         let allowed = std::mem::take(&mut *allowed.lock().unwrap_or_else(|e| e.into_inner()));
         for (tool, pattern) in allowed {
             engine.remember_allowed(&tool, &pattern);
