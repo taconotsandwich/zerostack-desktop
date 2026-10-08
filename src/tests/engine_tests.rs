@@ -380,3 +380,266 @@ async fn run_string_btw_usage_without_message() {
     // `/btw` never touches the session.
     assert!(engine.session().messages.is_empty());
 }
+
+fn engine_with_permission(
+    mode: crate::permission::SecurityMode,
+) -> (Engine, crate::permission::checker::PermCheck) {
+    use std::sync::{Arc, Mutex};
+
+    use crate::permission::PermissionConfigs;
+    use crate::permission::checker::PermissionChecker;
+
+    isolate_data_dirs();
+    let checker = PermissionChecker::new(&PermissionConfigs::default(), mode, None, None);
+    let perm: crate::permission::checker::PermCheck = Arc::new(Mutex::new(checker));
+    let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
+    let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build());
+    let engine = Engine::new(
+        test_cli(),
+        Config::default(),
+        test_session(),
+        test_context(),
+        test_client(),
+        Some(perm.clone()),
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(agent);
+    (engine, perm)
+}
+
+#[test]
+fn set_permission_mode_accepts_every_mode_and_rejects_unknown() {
+    use crate::permission::SecurityMode;
+
+    let (mut engine, perm) = engine_with_permission(SecurityMode::Standard);
+    for (name, mode) in [
+        ("restrictive", SecurityMode::Restrictive),
+        ("readonly", SecurityMode::ReadOnly),
+        ("planwrite", SecurityMode::PlanWrite),
+        ("guarded", SecurityMode::Guarded),
+        ("yolo", SecurityMode::Yolo),
+        ("standard", SecurityMode::Standard),
+    ] {
+        engine.set_permission_mode(name).expect(name);
+        assert_eq!(perm.lock().unwrap().mode(), mode);
+    }
+    let error = engine.set_permission_mode("chaos").unwrap_err();
+    assert_eq!(error.to_string(), "unknown mode: chaos");
+    assert_eq!(perm.lock().unwrap().mode(), SecurityMode::Standard);
+}
+
+#[test]
+fn set_permission_mode_without_a_permission_system_fails() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_permission_mode("yolo").unwrap_err();
+    assert_eq!(error.to_string(), "permission system not active");
+}
+
+#[test]
+fn set_edit_system_rejects_unknown_systems() {
+    let (engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_edit_system("vim").unwrap_err();
+    assert_eq!(error.to_string(), "unknown: 'vim' (similarity|hashedit)");
+}
+
+#[tokio::test]
+async fn set_provider_rejects_unknown_providers() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let error = engine.set_provider("nope").await.unwrap_err();
+    assert_eq!(error.to_string(), "unknown provider: 'nope'");
+    assert_eq!(engine.session().provider.as_str(), "anthropic");
+    assert!(engine.set_provider("  ").await.is_err());
+}
+
+#[tokio::test]
+async fn set_model_selection_switches_to_a_quick_model() {
+    isolate_data_dirs();
+    let cfg: Config = toml::from_str(
+        r#"
+[quick_models.fast]
+provider = "anthropic"
+model = "claude-haiku-4-5"
+input_token_cost = 1.0
+output_token_cost = 5.0
+"#,
+    )
+    .expect("config");
+    let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
+    let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build());
+    let mut engine = Engine::new(
+        test_cli(),
+        cfg,
+        test_session(),
+        test_context(),
+        test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(agent);
+
+    engine
+        .set_model_selection("fast")
+        .await
+        .expect("quick model");
+    let session = engine.session();
+    assert_eq!(session.provider.as_str(), "anthropic");
+    assert_eq!(session.model.as_str(), "claude-haiku-4-5");
+    assert_eq!(session.input_token_cost, 1.0);
+    assert_eq!(session.output_token_cost, 5.0);
+
+    engine
+        .set_model_selection("claude-opus-4-1")
+        .await
+        .expect("raw model id");
+    assert_eq!(engine.session().model.as_str(), "claude-opus-4-1");
+    assert!(engine.set_model_selection("two words").await.is_err());
+}
+
+#[tokio::test]
+async fn context_files_add_drop_and_clear() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    let dir = std::env::temp_dir().join(format!("zs-engine-ctx-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "hello").unwrap();
+    let canonical = file.canonicalize().unwrap();
+
+    let added = engine.add_context_file(file.clone()).await.expect("add");
+    assert_eq!(
+        added.as_deref(),
+        Some(format!("added: {} (5B)", canonical.display()).as_str())
+    );
+    assert_eq!(engine.context().extra_files, vec![canonical.clone()]);
+
+    let again = engine.add_context_file(file.clone()).await.expect("re-add");
+    assert!(again.unwrap().starts_with("already added: "));
+    assert_eq!(engine.context().extra_files.len(), 1);
+
+    let missing = engine.add_context_file(dir.join("missing.txt")).await;
+    assert!(
+        missing
+            .unwrap_err()
+            .to_string()
+            .starts_with("file not found: ")
+    );
+    let folder = engine.add_context_file(dir.clone()).await;
+    assert!(folder.unwrap_err().to_string().starts_with("not a file: "));
+
+    let dropped = engine.drop_context_file(file.clone()).await.expect("drop");
+    assert!(dropped.unwrap().starts_with("dropped: "));
+    assert!(engine.context().extra_files.is_empty());
+    assert!(engine.drop_context_file(file.clone()).await.is_err());
+
+    assert_eq!(engine.clear_context_files().await.expect("empty"), None);
+    engine.add_context_file(file.clone()).await.expect("add");
+    let cleared = engine.clear_context_files().await.expect("clear");
+    assert_eq!(cleared.as_deref(), Some("dropped 1 file(s)"));
+    assert!(engine.context().extra_files.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn rewind_points_and_rewind_to_cut_the_conversation() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["first"], vec!["second"]]);
+    engine.run_string("one").await.expect("turn 1");
+    engine.run_string("two").await.expect("turn 2");
+
+    // The picker lists every user message: index plus preview.
+    let points = engine.rewind_points();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0], (0, "one".to_string()));
+    assert_eq!(points[1], (2, "two".to_string()));
+
+    // Rewinding to the second prompt drops it and everything after it, and
+    // the cut stays undoable through the shared redo path.
+    assert_eq!(engine.rewind_to(2), 2);
+    assert_eq!(engine.session().messages.len(), 2);
+    assert_eq!(engine.rewind_to(2), 0, "already at the cut");
+    assert!(engine.redo_messages());
+    assert_eq!(engine.session().messages.len(), 4);
+}
+
+#[tokio::test]
+async fn new_session_keeps_settings_and_drops_history() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["hi there"]]);
+    engine.run_string("hello").await.expect("run_string");
+    let previous = engine.session().id.clone();
+    let working_dir = engine.session().working_dir.clone();
+    assert_eq!(engine.session().messages.len(), 2);
+
+    engine.new_session();
+
+    let session = engine.session();
+    assert_ne!(session.id, previous);
+    assert!(session.messages.is_empty());
+    assert_eq!(session.provider.as_str(), "anthropic");
+    assert_eq!(session.model.as_str(), "claude-sonnet-4-5");
+    assert_eq!(session.context_window, 200_000);
+    assert_eq!(session.working_dir, working_dir);
+}
+
+#[tokio::test]
+async fn retry_without_a_message_fails_and_with_one_reruns_it() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, model) = engine_with_turns(vec![vec!["first"], vec!["again"]]);
+    let error = engine.retry_last_message().await.unwrap_err();
+    assert_eq!(error.to_string(), "no previous message to retry");
+
+    engine.run_prompt("hello".to_string()).await;
+    let output = engine.retry_last_message().await.expect("retry");
+    assert!(output.text.contains("again"), "got: {}", output.text);
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn run_prompt_ignores_blank_input_and_clear_messages_empties_the_session() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["reply"]]);
+    assert_eq!(
+        engine.run_prompt("  ".to_string()).await.kind,
+        RunKind::Ignored
+    );
+    engine.run_prompt("hello".to_string()).await;
+    assert_eq!(engine.session().messages.len(), 2);
+    engine.clear_messages().await;
+    assert!(engine.session().messages.is_empty());
+    assert!(engine.run_shell(" ".to_string()).await.is_err());
+    assert!(engine.ask_separate_question(String::new()).await.is_err());
+}
+
+#[cfg(feature = "export")]
+#[tokio::test]
+async fn export_then_import_round_trips_the_conversation() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["hi there"]]);
+    engine.run_prompt("hello".to_string()).await;
+    let dir = std::env::temp_dir().join(format!("zs-engine-export-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("chat.jsonl");
+
+    let message = engine
+        .export_conversation(Some(path.clone()))
+        .expect("export");
+    assert_eq!(message, format!("exported JSONL to {}", path.display()));
+
+    engine.new_session();
+    let message = engine.import_conversation(path.clone()).expect("import");
+    assert_eq!(
+        message,
+        format!("imported session from {} (2 msgs)", path.display())
+    );
+    let session = engine.session();
+    assert_eq!(session.name.as_str(), "chat");
+    assert_eq!(session.messages[0].role, MessageRole::User);
+    assert_eq!(session.messages[0].content, "hello");
+    assert!(session.messages[1].content.contains("hi there"));
+
+    assert!(
+        engine
+            .import_conversation(dir.join("missing.jsonl"))
+            .is_err()
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
