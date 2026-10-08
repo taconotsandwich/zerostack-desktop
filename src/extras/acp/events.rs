@@ -126,6 +126,7 @@ impl EventForwarder {
         };
         let fields = ToolCallUpdateFields::new()
             .title(format!("{}: {}", ask.tool, ask.input))
+            .name(ask.tool.to_string())
             .raw_input(serde_json::Value::String(ask.input.clone()));
         ToolCallUpdate::new(id, fields)
     }
@@ -145,6 +146,7 @@ impl EventForwarder {
             } => {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
                 let tool_call = ToolCall::new(id.clone(), format_tool_call_summary(&name, &args))
+                    .name(name.to_string())
                     .kind(tool_kind(&name))
                     .locations(
                         tool_path(&args)
@@ -164,6 +166,7 @@ impl EventForwarder {
                 // default Pending status.
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
                 let tool_call = ToolCall::new(id, format!("[subagent] {}", name))
+                    .name(name.to_string())
                     .status(ToolCallStatus::Completed)
                     .raw_input(Some(args));
                 Some(SessionUpdate::ToolCall(tool_call))
