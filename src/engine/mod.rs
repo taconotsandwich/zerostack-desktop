@@ -490,6 +490,100 @@ impl Engine {
         Ok(())
     }
 
+    /// Export the active session. Returns the success message.
+    #[cfg(feature = "export")]
+    pub fn export_conversation(
+        &self,
+        destination: Option<std::path::PathBuf>,
+    ) -> anyhow::Result<String> {
+        let default_name = format!(
+            "zerostack-session-{}.html",
+            &self.session.id[..8.min(self.session.id.len())]
+        );
+        let default_path = std::path::PathBuf::from(default_name);
+        let path = destination.unwrap_or(default_path);
+        let path = path.to_string_lossy().into_owned();
+        let (content, kind) = if path.ends_with(".jsonl") {
+            (
+                crate::extras::export::session_to_jsonl(&self.session),
+                "JSONL",
+            )
+        } else {
+            (
+                crate::extras::export::session_to_html(&self.session),
+                "HTML",
+            )
+        };
+        std::fs::write(&path, content)
+            .map_err(|error| anyhow::anyhow!("export failed: {error}"))?;
+        Ok(format!("exported {kind} to {path}"))
+    }
+
+    /// Import a session file and make it active. Returns the success message.
+    #[cfg(feature = "export")]
+    pub fn import_conversation(&mut self, path: std::path::PathBuf) -> anyhow::Result<String> {
+        use compact_str::CompactString;
+
+        let path = path.to_string_lossy().into_owned();
+        anyhow::ensure!(
+            !path.trim().is_empty(),
+            "usage: /import <file.jsonl|session.json>"
+        );
+        let content = std::fs::read_to_string(&path)
+            .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
+        // JSONL lines start with `{` too, so pick the format by extension.
+        let mut session = if !path.ends_with(".jsonl") {
+            serde_json::from_str::<Session>(&content)
+                .map_err(|error| anyhow::anyhow!("invalid session file: {error}"))?
+        } else {
+            let messages = crate::extras::export::parse_jsonl_import(&content)
+                .map_err(|error| anyhow::anyhow!("invalid JSONL session: {error}"))?;
+            let name = std::path::Path::new(&path)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "imported".to_string());
+            let mut session = Session::new(
+                self.session.provider.as_str(),
+                self.session.model.as_str(),
+                self.session.context_window,
+                &name,
+            );
+            for message in messages {
+                session.add_message(message.role, &message.content);
+            }
+            session
+        };
+        if session.name.is_empty() {
+            session.name = CompactString::new("imported");
+        }
+        let message_count = session.messages.len();
+        crate::session::storage::save_session(&session)
+            .map_err(|error| anyhow::anyhow!("failed to save session: {error}"))?;
+        self.session = session;
+        Ok(format!(
+            "imported session from {path} ({message_count} msgs)"
+        ))
+    }
+
+    /// Publish the active session as a secret gist. Returns the run output.
+    #[cfg(feature = "export")]
+    pub async fn share_conversation(&self) -> anyhow::Result<RunOutput> {
+        let filename = format!(
+            "zerostack-session-{}.html",
+            &self.session.id[..8.min(self.session.id.len())]
+        );
+        let html = crate::extras::export::session_to_html(&self.session);
+        let description = if self.session.name.is_empty() {
+            "zerostack session".to_string()
+        } else {
+            format!("zerostack session: {}", self.session.name)
+        };
+        match crate::extras::export::share_gist(&filename, &html, &description).await {
+            Ok(url) => Ok(RunOutput::command(format!("shared as secret gist: {url}"))),
+            Err(error) => anyhow::bail!("share failed: {error}"),
+        }
+    }
+
     /// Run one user input string: plain message, `/` slash command, `.`
     /// dot-prompt command, or `!` shell command.
     pub async fn run_string(&mut self, input: &str) -> anyhow::Result<RunOutput> {
@@ -1846,23 +1940,16 @@ impl Engine {
             #[cfg(feature = "export")]
             "/import" => self.cmd_import(parts, sink),
             #[cfg(feature = "export")]
-            "/share" => {
-                let filename = format!(
-                    "zerostack-session-{}.html",
-                    &self.session.id[..8.min(self.session.id.len())]
-                );
-                let html = crate::extras::export::session_to_html(&self.session);
-                let description = if self.session.name.is_empty() {
-                    "zerostack session".to_string()
-                } else {
-                    format!("zerostack session: {}", self.session.name)
-                };
-                match crate::extras::export::share_gist(&filename, &html, &description).await {
-                    Ok(url) => sink.write_ok(format!("shared as secret gist: {url}")),
-                    Err(e) => sink.write_error(format!("share failed: {e}")),
+            "/share" => match self.share_conversation().await {
+                Ok(output) => {
+                    sink.write_ok(&output.text);
+                    Ok(SlashFlow::Done)
                 }
-                Ok(SlashFlow::Done)
-            }
+                Err(error) => {
+                    sink.write_error(error.to_string());
+                    Ok(SlashFlow::Done)
+                }
+            },
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -1965,87 +2052,32 @@ impl Engine {
 
     #[cfg(feature = "export")]
     fn cmd_export(&mut self, parts: &[&str], sink: &mut StringSink) -> anyhow::Result<SlashFlow> {
-        let default_name = format!(
-            "zerostack-session-{}.html",
-            &self.session.id[..8.min(self.session.id.len())]
-        );
-        let path = parts
+        let destination = parts
             .get(1)
-            .map(|p| p.trim())
-            .filter(|p| !p.is_empty())
-            .unwrap_or(&default_name);
-        let (content, kind) = if path.ends_with(".jsonl") {
-            (
-                crate::extras::export::session_to_jsonl(&self.session),
-                "JSONL",
-            )
-        } else {
-            (
-                crate::extras::export::session_to_html(&self.session),
-                "HTML",
-            )
-        };
-        match std::fs::write(path, content) {
-            Ok(()) => sink.write_ok(format!("exported {kind} to {path}")),
-            Err(e) => sink.write_error(format!("export failed: {e}")),
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .map(std::path::PathBuf::from);
+        match self.export_conversation(destination) {
+            Ok(message) => sink.write_ok(message),
+            Err(error) => sink.write_error(error.to_string()),
         }
         Ok(SlashFlow::Done)
     }
 
     #[cfg(feature = "export")]
     fn cmd_import(&mut self, parts: &[&str], sink: &mut StringSink) -> anyhow::Result<SlashFlow> {
-        let Some(path) = parts.get(1).map(|p| p.trim()).filter(|p| !p.is_empty()) else {
+        let Some(path) = parts
+            .get(1)
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+        else {
             sink.write_error("usage: /import <file.jsonl|session.json>");
             return Ok(SlashFlow::Done);
         };
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(e) => {
-                sink.write_error(format!("failed to read {path}: {e}"));
-                return Ok(SlashFlow::Done);
-            }
-        };
-        let mut session = if content.trim_start().starts_with('{') {
-            match serde_json::from_str::<Session>(&content) {
-                Ok(s) => s,
-                Err(e) => {
-                    sink.write_error(format!("invalid session file: {e}"));
-                    return Ok(SlashFlow::Done);
-                }
-            }
-        } else {
-            let messages = match crate::extras::export::parse_jsonl_import(&content) {
-                Ok(m) => m,
-                Err(e) => {
-                    sink.write_error(format!("invalid JSONL session: {e}"));
-                    return Ok(SlashFlow::Done);
-                }
-            };
-            let name = std::path::Path::new(path)
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "imported".to_string());
-            let mut session = Session::new(
-                self.session.provider.as_str(),
-                self.session.model.as_str(),
-                self.session.context_window,
-                &name,
-            );
-            for msg in messages {
-                session.add_message(msg.role, &msg.content);
-            }
-            session
-        };
-        if session.name.is_empty() {
-            session.name = CompactString::new("imported");
+        match self.import_conversation(std::path::PathBuf::from(path)) {
+            Ok(message) => sink.write_ok(message),
+            Err(error) => sink.write_error(error.to_string()),
         }
-        let msg_count = session.messages.len();
-        if let Err(e) = crate::session::storage::save_session(&session) {
-            sink.write_error(format!("failed to save session: {e}"));
-            return Ok(SlashFlow::Done);
-        }
-        self.session = session;
-        sink.write_ok(format!("imported session from {path} ({msg_count} msgs)"));
         Ok(SlashFlow::Done)
     }
 
