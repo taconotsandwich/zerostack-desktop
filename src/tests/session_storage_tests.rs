@@ -8,9 +8,8 @@ use crate::session::{PromptRef, PromptSource};
 use crate::session::{TOOL_RESULT_HEAD_CHARS, TOOL_RESULT_SAVE_THRESHOLD, TOOL_RESULT_TAIL_CHARS};
 use std::env;
 use std::path::Path;
-use std::sync::Mutex;
 
-static STORAGE_LOCK: Mutex<()> = Mutex::new(());
+use crate::tests::STORAGE_LOCK;
 
 struct TestEnv {
     dir: std::path::PathBuf,
