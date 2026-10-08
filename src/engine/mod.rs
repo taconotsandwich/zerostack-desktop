@@ -127,6 +127,18 @@ impl RunOutput {
         }
     }
 
+    /// Input that failed before anything ran.
+    pub fn failed(error: impl Into<String>) -> Self {
+        let error = error.into();
+        Self {
+            kind: RunKind::Command,
+            text: error.clone(),
+            usage: None,
+            error: Some(error),
+            cancelled: false,
+        }
+    }
+
     fn ignored() -> Self {
         Self {
             kind: RunKind::Ignored,
