@@ -31,8 +31,6 @@
 pub mod actions;
 pub(crate) mod blocking;
 pub(crate) mod compaction;
-#[cfg(any(test, feature = "desktop"))]
-mod frontend;
 pub(crate) mod headless;
 pub mod models;
 // Host-facing Git API; desktop consumers live on the frontend branch.

@@ -61,7 +61,7 @@ pub fn ensure_global() -> anyhow::Result<bool> {
 /// Content of a bundled doc by file name, preferring the copy in the global
 /// docs directory and falling back to the embedded copy when the data dir is
 /// unavailable or mid-refresh.
-#[cfg(any(test, feature = "desktop"))]
+#[cfg(feature = "desktop")]
 pub fn read(name: &str) -> anyhow::Result<String> {
     ensure_global()?;
     let path = global_docs_dir().join(name);

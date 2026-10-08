@@ -71,10 +71,7 @@ pub(super) fn typed_operation(input: &str) -> Option<Operation> {
         #[cfg(feature = "loop")]
         "/loop" => {
             let prompt = words.collect::<Vec<_>>().join(" ");
-            (!prompt.is_empty()).then_some(Operation::StartLoop {
-                prompt,
-                max_iterations: None,
-            })
+            (!prompt.is_empty()).then_some(Operation::StartLoop { prompt })
         }
         #[cfg(feature = "mcp")]
         "/mcp" => {
@@ -196,7 +193,6 @@ pub(super) fn form_operation(
         #[cfg(feature = "loop")]
         "/loop" => Ok(Operation::StartLoop {
             prompt: required_field(fields, 0)?,
-            max_iterations: None,
         }),
         #[cfg(feature = "mcp")]
         "/mcp login" => Ok(Operation::McpLogin {
