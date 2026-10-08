@@ -10,41 +10,139 @@ use agent_client_protocol::{
 };
 use compact_str::CompactString;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 use crate::cli::Cli;
 use crate::config::Config;
 use crate::context::ContextFiles;
+use crate::engine::{Engine, RunOutput};
 use crate::event::AgentEvent;
 use crate::permission::SecurityMode;
 use crate::permission::ask::AskSender;
 use crate::permission::checker::{PermCheck, PermissionChecker};
+use crate::provider::AnyClient;
 use crate::sandbox::{SandboxSettings, SandboxSetup};
+use crate::session::Session;
 
 const AGENT_VERSION: &str = "1.0.5";
 
-struct SessionState {
-    messages: Vec<(String, String)>,
+/// What every new session starts from: the resolved startup settings.
+pub struct AcpTemplate {
+    pub cli: Cli,
+    pub cfg: Config,
+    pub context: ContextFiles,
+    pub session: Session,
+    pub client: AnyClient,
 }
 
-struct AcpState {
+/// Builds the engine of a new session around its permission checker.
+/// Production clones the startup template; tests inject a scripted agent.
+pub(crate) type EngineFactory = Box<dyn Fn(Option<PermCheck>) -> Engine + Send + Sync>;
+
+pub(crate) struct AcpState {
     cli: Cli,
     cfg: Config,
-    context: ContextFiles,
-    sessions: Mutex<HashMap<SessionId, SessionState>>,
+    make_engine: EngineFactory,
+    sessions: Mutex<HashMap<SessionId, Arc<Mutex<LiveSession>>>>,
+}
+
+impl AcpState {
+    pub(crate) fn new(cli: Cli, cfg: Config, make_engine: EngineFactory) -> Self {
+        Self {
+            cli,
+            cfg,
+            make_engine,
+            sessions: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn from_template(template: AcpTemplate) -> Self {
+        let AcpTemplate {
+            cli,
+            cfg,
+            context,
+            session,
+            client,
+        } = template;
+        let (engine_cli, engine_cfg) = (cli.clone(), cfg.clone());
+        let make_engine: EngineFactory = Box::new(move |permission| {
+            Engine::new(
+                engine_cli.clone(),
+                engine_cfg.clone(),
+                session.clone(),
+                context.clone(),
+                client.clone(),
+                permission,
+                sandbox_setup(&engine_cli, &engine_cfg).sandbox,
+            )
+        });
+        Self::new(cli, cfg, make_engine)
+    }
+
+    async fn session(
+        &self,
+        id: &SessionId,
+    ) -> Result<Arc<Mutex<LiveSession>>, agent_client_protocol::Error> {
+        self.sessions
+            .lock()
+            .await
+            .get(id)
+            .cloned()
+            .ok_or_else(|| unknown_session(id))
+    }
+}
+
+fn unknown_session(id: &SessionId) -> agent_client_protocol::Error {
+    agent_client_protocol::Error::invalid_params().data(serde_json::json!({
+        "message": format!("unknown session: {id}"),
+    }))
+}
+
+/// One ACP session: its engine plus the receiving end of the engine's event
+/// stream, drained while a prompt runs.
+struct LiveSession {
+    engine: Engine,
+    events: UnboundedReceiver<AgentEvent>,
+    forwarder: EventForwarder,
+}
+
+impl LiveSession {
+    /// Run one prompt, forwarding the turn's events as session updates. Every
+    /// update is sent before this returns, so the prompt response that
+    /// follows never overtakes them.
+    async fn run(&mut self, text: String, cx: &ConnectionTo<Client>) -> RunOutput {
+        let Self {
+            engine,
+            events,
+            forwarder,
+        } = self;
+        let run = engine.run_prompt(text);
+        tokio::pin!(run);
+        let out = loop {
+            tokio::select! {
+                out = &mut run => break out,
+                Some(event) = events.recv() => forwarder.forward(event, cx),
+            }
+        };
+        while let Ok(event) = events.try_recv() {
+            forwarder.forward(event, cx);
+        }
+        out
+    }
 }
 
 /// The session sandbox and the warnings building it produced, from this
 /// server's resolved settings. Shared by `handle_new_session` (which logs the
-/// warnings once) and `run_prompt` (which needs the sandbox on every prompt),
-/// so the two can never disagree about what is masked or exposed.
-fn sandbox_setup(state: &AcpState) -> SandboxSetup {
+/// warnings once) and the engine factory, so the two can never disagree about
+/// what is masked or exposed.
+fn sandbox_setup(cli: &Cli, cfg: &Config) -> SandboxSetup {
     crate::sandbox::build_sandbox(&SandboxSettings {
-        enabled: state.cli.resolve_sandbox(&state.cfg),
-        required: state.cli.resolve_sandbox_required(&state.cfg),
-        backend: &state.cli.resolve_sandbox_backend(&state.cfg),
-        shell: &state.cli.resolve_shell(&state.cfg),
-        expose: &state.cli.resolve_sandbox_expose(&state.cfg),
-        network: state.cli.resolve_sandbox_network(&state.cfg),
+        enabled: cli.resolve_sandbox(cfg),
+        required: cli.resolve_sandbox_required(cfg),
+        backend: &cli.resolve_sandbox_backend(cfg),
+        shell: &cli.resolve_shell(cfg),
+        expose: &cli.resolve_sandbox_expose(cfg),
+        network: cli.resolve_sandbox_network(cfg),
     })
 }
 
@@ -90,28 +188,39 @@ impl<Counterpart: Role> ConnectTo<Counterpart> for TcpTransport {
 
 // --- Server Entry Point ---
 
-pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Result<()> {
-    let transport_mode = if cli.acp_host.is_some() {
+pub async fn serve(template: AcpTemplate) -> anyhow::Result<()> {
+    let transport_mode = if template.cli.acp_host.is_some() {
         "tcp"
     } else {
         "stdio"
     };
     tracing::info!("ACP server starting: transport={}", transport_mode);
 
-    // Extract transport config before moving cli into Arc
-    let acp_host = cli.acp_host.clone();
-    let acp_port = cli.acp_port;
+    let acp_host = template.cli.acp_host.clone();
+    let acp_port = template.cli.acp_port;
+    let state = Arc::new(AcpState::from_template(template));
 
-    let state = Arc::new(AcpState {
-        cli,
-        cfg,
-        context,
-        sessions: Mutex::new(HashMap::new()),
-    });
+    // Choose transport: TCP if host is set, otherwise stdio
+    if let Some(host) = acp_host {
+        let port = acp_port.unwrap_or(7243);
+        serve_on(state, TcpTransport { host, port })
+            .await
+            .map_err(|e| anyhow::anyhow!("ACP TCP server error: {}", e))
+    } else {
+        serve_on(state, Stdio::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("ACP stdio server error: {}", e))
+    }
+}
 
-    let builder = Agent.builder().name("zerostack");
-
-    let builder = builder
+/// Serve ACP over `transport` until the client disconnects.
+pub(crate) async fn serve_on(
+    state: Arc<AcpState>,
+    transport: impl ConnectTo<Agent> + 'static,
+) -> Result<(), agent_client_protocol::Error> {
+    Agent
+        .builder()
+        .name("zerostack")
         .on_receive_request(
             {
                 let state = state.clone();
@@ -141,23 +250,9 @@ pub async fn serve(cli: Cli, cfg: Config, context: ContextFiles) -> anyhow::Resu
                 }
             },
             on_receive_request!(),
-        );
-
-    // Choose transport: TCP if host is set, otherwise stdio
-    if let Some(host) = acp_host {
-        let port = acp_port.unwrap_or(7243);
-        builder
-            .connect_to(TcpTransport { host, port })
-            .await
-            .map_err(|e| anyhow::anyhow!("ACP TCP server error: {}", e))?;
-    } else {
-        builder
-            .connect_to(Stdio::new())
-            .await
-            .map_err(|e| anyhow::anyhow!("ACP stdio server error: {}", e))?;
-    }
-
-    Ok(())
+        )
+        .connect_to(transport)
+        .await
 }
 
 // --- Request Handlers ---
@@ -182,7 +277,27 @@ async fn handle_new_session(
     _cx: ConnectionTo<Client>,
     state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
-    let session_id = SessionId::new(uuid::Uuid::new_v4().to_string());
+    if state.cli.sandbox_setting_conflict(&state.cfg) {
+        tracing::warn!(
+            "sandbox is set to false but sandbox-required is set, enabling the sandbox anyway"
+        );
+    }
+    // Sandbox warnings are emitted once per session, here. The sandbox binds
+    // this process's working directory, not `req.cwd`.
+    for warning in &sandbox_setup(&state.cli, &state.cfg).warnings {
+        tracing::warn!("{warning}");
+    }
+
+    let (permission, ask_tx) = build_acp_permission(&state.cli, &state.cfg);
+    let (event_tx, events) = unbounded_channel();
+    let mut engine = (state.make_engine)(permission).with_events(event_tx);
+    if let Some(ask_tx) = ask_tx {
+        engine = engine.with_ask(ask_tx);
+    }
+    engine.new_session();
+    // The ACP session id is the zerostack session id, so a client can find
+    // the session in the store later.
+    let session_id = SessionId::new(engine.session().id.to_string());
 
     tracing::info!(
         "ACP new session: {} (cwd: {})",
@@ -190,30 +305,18 @@ async fn handle_new_session(
         req.cwd.display()
     );
 
-    if state.cli.sandbox_setting_conflict(&state.cfg) {
-        tracing::warn!(
-            "sandbox is set to false but sandbox-required is set, enabling the sandbox anyway"
-        );
-    }
-    // Sandbox warnings are emitted once per session, so they live here and not
-    // in run_prompt (which runs on every prompt). The sandbox itself is rebuilt
-    // per prompt from the same settings; building it here is what makes the
-    // warnings describe the sandbox that will actually run, including the
-    // directory it binds, which is this process's working directory and not
-    // `req.cwd` (the ACP server never chdirs to it).
-    for warning in &sandbox_setup(state).warnings {
-        tracing::warn!("{warning}");
-    }
+    let live = LiveSession {
+        engine,
+        events,
+        forwarder: EventForwarder::new(session_id.clone()),
+    };
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session_id.clone(), Arc::new(Mutex::new(live)));
 
-    state.sessions.lock().await.insert(
-        session_id.clone(),
-        SessionState {
-            messages: Vec::new(),
-        },
-    );
-
-    let resp = NewSessionResponse::new(session_id);
-    responder.respond(resp)
+    responder.respond(NewSessionResponse::new(session_id))
 }
 
 async fn handle_prompt(
@@ -222,10 +325,12 @@ async fn handle_prompt(
     cx: ConnectionTo<Client>,
     state: Arc<AcpState>,
 ) -> Result<(), agent_client_protocol::Error> {
-    let session_id = req.session_id.clone();
+    tracing::info!("ACP prompt for session {}", req.session_id);
 
-    tracing::info!("ACP prompt for session {}", session_id);
-
+    let live = match state.session(&req.session_id).await {
+        Ok(live) => live,
+        Err(e) => return responder.respond_with_error(e),
+    };
     let prompt_text = req
         .prompt
         .iter()
@@ -236,172 +341,88 @@ async fn handle_prompt(
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Append user message to session history
-    {
-        let mut sessions = state.sessions.lock().await;
-        if let Some(sess) = sessions.get_mut(&session_id) {
-            sess.messages
-                .push(("user".to_string(), prompt_text.clone()));
-        }
-    }
-
+    // The turn runs off the dispatch loop: it streams updates and may wait on
+    // the client, which needs the loop free.
     cx.spawn({
         let cx = cx.clone();
-        async move { run_prompt(&state, &prompt_text, session_id, responder, cx).await }
+        async move {
+            let out = live.lock().await.run(prompt_text, &cx).await;
+            match out.error {
+                Some(error) => responder.respond_with_internal_error(error),
+                None => responder.respond(PromptResponse::new(StopReason::EndTurn)),
+            }
+        }
     })
 }
 
-// --- Prompt Execution ---
+// --- Event Translation ---
 
-async fn run_prompt(
-    state: &AcpState,
-    prompt_text: &str,
+fn text_chunk(text: String) -> ContentChunk {
+    ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+}
+
+fn send_update(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
+    let notif = SessionNotification::new(session_id.clone(), update);
+    if let Err(e) = cx.send_notification(notif) {
+        tracing::warn!("ACP failed to send session update: {}", e);
+    }
+}
+
+/// Translates the [`AgentEvent`]s of one session into ACP session updates.
+/// Turn boundaries (`Done`, `Error`) are the caller's business; they produce
+/// no update here.
+struct EventForwarder {
     session_id: SessionId,
-    responder: Responder<PromptResponse>,
-    cx: ConnectionTo<Client>,
-) -> Result<(), agent_client_protocol::Error> {
-    let provider_str = state.cli.resolve_provider(&state.cfg);
-    let mut model_str = state.cli.resolve_model(&state.cfg);
+    /// In-flight main-agent calls by `AgentEvent` id (rig's
+    /// `internal_call_id`) to the ACP ToolCallId announced for them. A map,
+    /// not a single slot: a parallel batch streams every `ToolCall` before
+    /// the first `ToolResult`.
+    tool_call_ids: HashMap<CompactString, ToolCallId>,
+}
 
-    tracing::debug!(
-        "ACP run_prompt: provider={}, model={}, prompt_len={}",
-        provider_str,
-        model_str,
-        prompt_text.len(),
-    );
-
-    // Custom provider model override (if no explicit model set)
-    if (model_str.as_str() == "deepseek/deepseek-v4-pro" || state.cli.model.is_none())
-        && let Some(custom) = state.cfg.custom_providers_map().get(provider_str.as_str())
-        && let Some(ref custom_model) = custom.model
-    {
-        model_str = custom_model.clone();
+impl EventForwarder {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            tool_call_ids: HashMap::new(),
+        }
     }
 
-    let client = crate::provider::create_client(
-        &provider_str,
-        None,
-        &state.cfg.custom_providers_map(),
-        state.cfg.api_keys.as_ref(),
-    )
-    .map_err(|e| agent_client_protocol::Error::new(-32603, e.to_string()))?;
+    fn forward(&mut self, event: AgentEvent, cx: &ConnectionTo<Client>) {
+        if let Some(update) = self.translate(event) {
+            send_update(cx, &self.session_id, update);
+        }
+    }
 
-    let model = client.completion_model(model_str.to_string());
-
-    let (permission, ask_tx) = build_acp_permission(state);
-    // Warnings are dropped here on purpose: handle_new_session already logged
-    // them once for this session.
-    let sandbox = sandbox_setup(state).sandbox;
-
-    // Track session history for future context persistence
-    let _extra_messages = {
-        let sessions = state.sessions.lock().await;
-        sessions
-            .get(&session_id)
-            .map(|s| s.messages.clone())
-            .unwrap_or_default()
-    };
-
-    let temperature = crate::config::resolve_temperature(&state.cli, &state.cfg, &model_str);
-    let extra_body = crate::config::resolve_extra_body(&state.cfg, &model_str);
-    let agent = crate::provider::build_agent(
-        model,
-        crate::agent::builder::AgentBuild {
-            cli: &state.cli,
-            cfg: &state.cfg,
-            context: &state.context,
-            permission,
-            ask_tx,
-            sandbox,
-            reasoning_enabled: false,
-            temperature,
-            extra_body,
-            #[cfg(feature = "mcp")]
-            mcp_manager: None,
-        },
-    )
-    .await;
-
-    let runner = agent
-        .spawn_runner(
-            prompt_text.to_string(),
-            vec![],
-            crate::retry::RetryConfig::default(),
-            #[cfg(feature = "hooks")]
-            None,
-        )
-        .await;
-    let mut rx = runner.event_rx;
-
-    // In-flight main-agent calls by `AgentEvent` id (rig's
-    // `internal_call_id`) to the ACP ToolCallId announced for them. A map,
-    // not a single slot: a parallel batch streams every `ToolCall` before
-    // the first `ToolResult`.
-    let mut tool_call_ids: HashMap<CompactString, ToolCallId> = HashMap::new();
-    let mut final_response = String::new();
-
-    while let Some(event) = rx.recv().await {
+    fn translate(&mut self, event: AgentEvent) -> Option<SessionUpdate> {
         match event {
-            AgentEvent::Token(text) => {
-                final_response.push_str(&text);
-                let chunk =
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send token notification: {}", e);
-                }
-            }
-            AgentEvent::Reasoning(text) => {
-                let chunk =
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send reasoning notification: {}", e);
-                }
-            }
+            AgentEvent::Token(text) => Some(SessionUpdate::AgentMessageChunk(text_chunk(
+                text.to_string(),
+            ))),
+            AgentEvent::Reasoning(text) => Some(SessionUpdate::AgentThoughtChunk(text_chunk(
+                text.to_string(),
+            ))),
             AgentEvent::ToolCall {
                 call_id: event_id,
                 name,
                 args,
             } => {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                tool_call_ids.insert(event_id, id.clone());
-                let args_str = args.to_string();
-                let tool_call = ToolCall::new(id.clone(), name.to_string())
-                    .raw_input(serde_json::from_str(&args_str).ok());
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCall(tool_call),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send tool call notification: {}", e);
-                }
+                self.tool_call_ids.insert(event_id, id.clone());
+                let tool_call = ToolCall::new(id, name.to_string())
+                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                Some(SessionUpdate::ToolCall(tool_call))
             }
             AgentEvent::SubagentToolCall { name, args } => {
                 // Announce-only: subagent calls carry no correlating id, so
-                // they never receive a ToolCallUpdate. (Previously they
-                // hijacked the single pending slot, so the enclosing `task`
-                // call's result got attached to the subagent's entry.)
-                // Announced as already Completed, since nothing will ever
-                // update it out of the default Pending status.
+                // they never receive a ToolCallUpdate. Announced as already
+                // Completed, since nothing will ever update it out of the
+                // default Pending status.
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                let args_str = args.to_string();
-                let tool_call = ToolCall::new(id.clone(), format!("[subagent] {}", name))
+                let tool_call = ToolCall::new(id, format!("[subagent] {}", name))
                     .status(ToolCallStatus::Completed)
-                    .raw_input(serde_json::from_str(&args_str).ok());
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCall(tool_call),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send subagent tool call notification: {}", e);
-                }
+                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                Some(SessionUpdate::ToolCall(tool_call))
             }
             AgentEvent::ToolResult {
                 call_id: event_id,
@@ -411,94 +432,53 @@ async fn run_prompt(
                 // No announced ToolCall to update: an update carrying a
                 // ToolCallId the client was never told about is worse than
                 // silence, so drop it.
-                let Some(id) = tool_call_ids.remove(&event_id) else {
+                let Some(id) = self.tool_call_ids.remove(&event_id) else {
                     tracing::warn!(
                         "ACP tool result with no announced tool call (id={}); \
                          skipping update",
                         event_id.escape_debug(),
                     );
-                    continue;
+                    return None;
                 };
                 let fields = ToolCallUpdateFields::new()
                     .status(ToolCallStatus::Completed)
                     .content(vec![ToolCallContent::from(ContentBlock::Text(
                         TextContent::new(output.to_string()),
                     ))]);
-                let update = ToolCallUpdate::new(id, fields);
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCallUpdate(update),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send tool result notification: {}", e);
-                }
+                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    id, fields,
+                )))
             }
             AgentEvent::Retrying { attempt, max } => {
                 // ACP has no status bar, so surface the retry as an agent
                 // thought. This keeps the client from going silent during the
                 // backoff delay and mirrors how `Reasoning` is forwarded.
-                let text = format!("retrying... ({}/{})", attempt, max);
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send retry notification: {}", e);
-                }
+                Some(SessionUpdate::AgentThoughtChunk(text_chunk(format!(
+                    "retrying... ({}/{})",
+                    attempt, max
+                ))))
             }
-            AgentEvent::CompletionCall { .. } => {
-                // Mid-stream provider usage; ACP has no status bar to update, so
-                // there is nothing to surface for this event.
-            }
-            AgentEvent::Done { .. } => {
-                break;
-            }
-            AgentEvent::Error(err) => {
-                // Surface the error to the client instead of silently
-                // reporting EndTurn.
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(format!(
-                    "[error: {}]",
-                    err
-                ))));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
-                );
-                let _ = cx.send_notification(notif);
-                let _ = responder.respond(PromptResponse::new(StopReason::Refusal));
-                return Ok(());
+            AgentEvent::CompletionCall { .. } | AgentEvent::Done { .. } | AgentEvent::Error(_) => {
+                None
             }
         }
     }
-
-    // Store assistant response in session history
-    if !final_response.is_empty() {
-        let mut sessions = state.sessions.lock().await;
-        if let Some(sess) = sessions.get_mut(&session_id) {
-            sess.messages
-                .push(("assistant".to_string(), final_response));
-        }
-    }
-
-    let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
-    Ok(())
 }
 
 // --- Permission ---
 
-fn build_acp_permission(state: &AcpState) -> (Option<PermCheck>, Option<AskSender>) {
+fn build_acp_permission(cli: &Cli, cfg: &Config) -> (Option<PermCheck>, Option<AskSender>) {
     use std::sync::Mutex as StdMutex;
 
-    let no_tools = state.cli.resolve_no_tools(&state.cfg);
-    if no_tools || state.cli.dangerously_skip_permissions {
+    let no_tools = cli.resolve_no_tools(cfg);
+    if no_tools || cli.dangerously_skip_permissions {
         return (None, None);
     }
 
-    let perm_config = state.cfg.build_permission_config();
+    let perm_config = cfg.build_permission_config();
 
-    let mode = resolve_acp_mode(&state.cli, &state.cfg);
-    let permission_modes = state.cfg.permission_modes.clone();
+    let mode = resolve_acp_mode(cli, cfg);
+    let permission_modes = cfg.permission_modes.clone();
     let checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
     let perm: PermCheck = Arc::new(StdMutex::new(checker));
 

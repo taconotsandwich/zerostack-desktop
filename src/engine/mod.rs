@@ -74,6 +74,10 @@ pub struct RunOutput {
     pub text: String,
     /// Token usage of the agent turn that ran, if any.
     pub usage: Option<TurnUsage>,
+    /// Why the agent turn failed, if it did. `text` still carries the
+    /// transcript with the error line; this is the bare message for callers
+    /// that report failures out of band (ACP answers with a JSON-RPC error).
+    pub error: Option<String>,
 }
 
 impl RunOutput {
@@ -82,6 +86,7 @@ impl RunOutput {
             kind: RunKind::Agent,
             text,
             usage: Some(usage),
+            error: None,
         }
     }
 
@@ -91,6 +96,7 @@ impl RunOutput {
             kind: RunKind::Command,
             text: text.into(),
             usage: None,
+            error: None,
         }
     }
 
@@ -99,6 +105,7 @@ impl RunOutput {
             kind: RunKind::Ignored,
             text: String::new(),
             usage: None,
+            error: None,
         }
     }
 }
@@ -677,7 +684,9 @@ impl Engine {
                 if len > 0 && self.session.messages[len - 1].role == MessageRole::User {
                     self.session.truncate_to(len - 1);
                 }
-                RunOutput::agent(sink.transcript(), TurnUsage::default())
+                let mut out = RunOutput::agent(sink.transcript(), TurnUsage::default());
+                out.error = Some(e.to_string());
+                out
             }
         }
     }
