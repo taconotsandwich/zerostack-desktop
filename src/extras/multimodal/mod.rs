@@ -26,6 +26,18 @@ pub enum MediaAttachment {
 }
 
 impl MediaAttachment {
+    /// An attachment of the kind its MIME type names: image, audio, or
+    /// otherwise a document.
+    pub fn new(path: PathBuf, data: Vec<u8>, mime: String) -> Self {
+        if mime.starts_with("image/") {
+            MediaAttachment::Image { path, data, mime }
+        } else if mime.starts_with("audio/") {
+            MediaAttachment::Audio { path, data, mime }
+        } else {
+            MediaAttachment::Document { path, data, mime }
+        }
+    }
+
     pub fn size(&self) -> usize {
         match self {
             MediaAttachment::Image { data, .. }
@@ -88,13 +100,5 @@ pub fn load_attachment(path: &Path) -> std::io::Result<MediaAttachment> {
         })?
         .to_string();
 
-    // We already know the mime from detect_media — dispatch on the prefix.
-    let path = path.to_path_buf();
-    Ok(if mime.starts_with("image/") {
-        MediaAttachment::Image { path, data, mime }
-    } else if mime.starts_with("audio/") {
-        MediaAttachment::Audio { path, data, mime }
-    } else {
-        MediaAttachment::Document { path, data, mime }
-    })
+    Ok(MediaAttachment::new(path.to_path_buf(), data, mime))
 }
