@@ -28,6 +28,7 @@
 //! flow) reports a friendly error instead of blocking: headless runs never
 //! read stdin.
 
+mod headless;
 pub mod sink;
 
 pub use sink::{EventSink, StringSink};
@@ -1294,6 +1295,11 @@ impl Engine {
             "/compress" | "/compact" | "/loop" | "/worktree" | "/wt-merge" | "/wt-exit" => {
                 self.slash_features(&parts, &mut sink).await
             }
+            #[cfg(feature = "mcp")]
+            "/mcp" => {
+                self.slash_mcp(&parts, &mut sink).await;
+                Ok(SlashFlow::Done)
+            }
             #[cfg(feature = "hooks")]
             "/hooks" => {
                 self.slash_hooks(&mut sink);
@@ -2071,11 +2077,6 @@ impl Engine {
                     Ok(SlashFlow::Done)
                 }
             }
-            #[cfg(feature = "mcp")]
-            "/mcp" => {
-                sink.write_error("/mcp needs the TUI runtime (connection notices render there)");
-                Ok(SlashFlow::Done)
-            }
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -2148,12 +2149,7 @@ impl Engine {
                 }
                 Ok(SlashFlow::Done)
             }
-            "/rewind" => {
-                sink.write_error(
-                    "/rewind needs the TUI picker (no interactive selection headless)",
-                );
-                Ok(SlashFlow::Done)
-            }
+            "/rewind" => Ok(self.slash_rewind(parts, sink)),
             "/retry" => match self.last_user_message() {
                 Some(msg) => {
                     sink.write_ok("retrying last message...");
@@ -2691,13 +2687,7 @@ impl Engine {
             "/loop" => {
                 #[cfg(feature = "loop")]
                 {
-                    if parts.len() < 2 || parts[1] == "status" {
-                        sink.write_error("loop mode needs the TUI event loop in this build");
-                    } else if parts[1] == "stop" {
-                        sink.write_ok("no active loop");
-                    } else {
-                        sink.write_error("/loop iterations run in the TUI; headless uses --loop");
-                    }
+                    self.slash_loop(parts, sink).await;
                     Ok(SlashFlow::Done)
                 }
                 #[cfg(not(feature = "loop"))]
@@ -2760,11 +2750,12 @@ impl Engine {
                 }
                 Ok(SlashFlow::Done)
             }
-            "/wt-merge" | "/wt-exit" => {
-                sink.write_error(format!(
-                    "{} spawns a merge agent on the TUI loop; headless cannot run it",
-                    parts[0]
-                ));
+            "/wt-merge" => {
+                self.slash_wt_merge(parts, sink).await;
+                Ok(SlashFlow::Done)
+            }
+            "/wt-exit" => {
+                self.slash_wt_exit(sink).await;
                 Ok(SlashFlow::Done)
             }
             _ => Ok(SlashFlow::Done),

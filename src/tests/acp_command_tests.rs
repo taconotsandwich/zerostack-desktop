@@ -27,7 +27,13 @@ async fn a_new_session_announces_the_commands() {
         .find(|c| c["name"] == "model")
         .expect("model command");
     assert_eq!(model["input"]["hint"], "model", "{model}");
-    assert!(commands.iter().any(|c| c["name"] == "undo"));
+    for name in ["undo", "rewind", "btw"] {
+        assert!(commands.iter().any(|c| c["name"] == name), "{name}");
+    }
+    assert_eq!(
+        commands.iter().any(|c| c["name"] == "mcp"),
+        cfg!(feature = "mcp")
+    );
     assert!(
         !commands.iter().any(|c| c["name"] == "quit"),
         "commands that do nothing headless are left out"

@@ -18,7 +18,7 @@ use crate::sandbox::Sandbox;
 use crate::session::{MessageRole, Session};
 use crate::tests::fake_model::{self, FakeModel};
 
-fn isolate_data_dirs() {
+pub(super) fn isolate_data_dirs() {
     let dir = std::env::temp_dir().join(format!(
         "zerostack-engine-tests-{}-{}",
         std::process::id(),
@@ -32,7 +32,7 @@ fn isolate_data_dirs() {
     unsafe { std::env::set_var("ZS_CONFIG_DIR", &dir) };
 }
 
-fn test_cli() -> Cli {
+pub(super) fn test_cli() -> Cli {
     Cli {
         api_key: Some("test-key".to_string()),
         no_session: true,
@@ -41,16 +41,16 @@ fn test_cli() -> Cli {
     }
 }
 
-fn test_client() -> AnyClient {
+pub(super) fn test_client() -> AnyClient {
     crate::provider::create_client("anthropic", Some("test-key"), &HashMap::new(), None)
         .expect("create test client")
 }
 
-fn test_session() -> Session {
+pub(super) fn test_session() -> Session {
     Session::new("anthropic", "claude-sonnet-4-5", 200_000, "engine-test")
 }
 
-fn test_context() -> crate::context::ContextFiles {
+pub(super) fn test_context() -> crate::context::ContextFiles {
     crate::context::load_with_prompts_dirs(true, &[])
 }
 
@@ -324,16 +324,6 @@ async fn run_string_reasoning_toggles() {
 
     let out = engine.run_string("/reasoning").await.expect("toggle");
     assert!(out.text.contains("on"), "got: {}", out.text);
-}
-
-#[tokio::test]
-async fn run_string_rewind_reports_headless_limitation() {
-    let _guard = crate::tests::fake_model::run_print_guard::acquire();
-    let (mut engine, _model) = engine_with_turns(vec![]);
-
-    let out = engine.run_string("/rewind").await.expect("run_string");
-    assert_eq!(out.kind, RunKind::Command);
-    assert!(out.text.contains("TUI"), "got: {}", out.text);
 }
 
 #[tokio::test]
