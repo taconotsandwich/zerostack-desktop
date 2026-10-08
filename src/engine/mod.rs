@@ -28,8 +28,6 @@
 //! flow) reports a friendly error instead of blocking: headless runs never
 //! read stdin.
 
-#[cfg(any(test, feature = "desktop"))]
-mod frontend;
 pub(crate) mod headless;
 pub mod sink;
 

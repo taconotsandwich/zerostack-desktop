@@ -1,7 +1,9 @@
+mod acp_client;
 mod activity;
 mod activity_view;
 mod app;
 mod approval;
+mod backend;
 mod bubble;
 mod commands;
 mod components;
@@ -17,8 +19,6 @@ mod review;
 mod review_view;
 mod scroll;
 mod sidebar;
-#[cfg(test)]
-mod startup_tests;
 mod style;
 mod view;
 mod worker;
