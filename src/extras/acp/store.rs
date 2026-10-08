@@ -5,6 +5,7 @@ use agent_client_protocol::{Client, ConnectionTo, Responder};
 
 use super::events::{send_update, text_chunk};
 use super::modes::mode_state;
+use super::options::config_options;
 use super::{AcpState, unknown_session};
 use crate::session::{MessageRole, SessionMessage, ToolRecord, storage};
 
@@ -92,6 +93,7 @@ pub(super) async fn handle_load(
         Err(e) => return responder.respond_with_internal_error(e.to_string()),
     };
     let modes = mode_state(session.permission.as_ref());
+    let config_options = config_options(&session.live.lock().await.engine);
     let replaced = state
         .sessions
         .lock()
@@ -104,7 +106,11 @@ pub(super) async fn handle_load(
     for update in updates {
         send_update(&cx, &req.session_id, update);
     }
-    responder.respond(LoadSessionResponse::new().modes(modes))
+    responder.respond(
+        LoadSessionResponse::new()
+            .modes(modes)
+            .config_options(config_options),
+    )
 }
 
 /// The stored sessions, newest first, optionally only those of one folder.

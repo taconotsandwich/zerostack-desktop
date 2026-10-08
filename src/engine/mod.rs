@@ -449,6 +449,16 @@ impl Engine {
         }
     }
 
+    /// The settings this engine was built with.
+    pub fn config(&self) -> &Config {
+        &self.cfg
+    }
+
+    /// Whether the model is asked to reason.
+    pub fn reasoning_enabled(&self) -> bool {
+        self.reasoning_enabled
+    }
+
     /// The active permission mode, or `None` when tools run unchecked.
     pub fn permission_mode(&self) -> Option<SecurityMode> {
         self.permission.as_ref().map(|permission| {
