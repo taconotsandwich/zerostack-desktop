@@ -546,6 +546,9 @@ impl App {
         } else {
             ("Send", !input.trim().is_empty())
         };
+        if self.busy {
+            tools = tools.push(icon_button(Icon::Stop, "Stop", Some(Message::Stop)));
+        }
         tools = tools.push(icon_button(
             Icon::Send,
             label,
