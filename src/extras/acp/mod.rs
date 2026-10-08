@@ -1,3 +1,4 @@
+mod commands;
 pub mod config;
 mod events;
 mod modes;
@@ -183,11 +184,12 @@ impl LiveSession {
             asks,
             forwarder,
         } = self;
+        let mut streamed = false;
         let mode_before = engine.permission_mode();
         let options_before = options::config_options(engine);
         let allowed: Arc<std::sync::Mutex<Vec<(CompactString, String)>>> = Arc::default();
         let out = {
-            let run = engine.run_prompt(text);
+            let run = engine.run_string(&text);
             tokio::pin!(run);
             // Asks wait until their tool call is announced, so the client
             // shows the ask on it. The engine forwards events as it drains
@@ -196,7 +198,10 @@ impl LiveSession {
             loop {
                 tokio::select! {
                     out = &mut run => break out,
-                    Some(event) = events.recv() => forwarder.forward(event, cx),
+                    Some(event) = events.recv() => {
+                        streamed |= matches!(event, AgentEvent::Token(_));
+                        forwarder.forward(event, cx);
+                    }
                     Some(ask) = next_ask(asks) => waiting.push(ask),
                     _ = tokio::time::sleep(ASK_ANNOUNCE_WAIT), if !waiting.is_empty() => {
                         for ask in waiting.drain(..) {
@@ -224,7 +229,19 @@ impl LiveSession {
             }
         };
         while let Ok(event) = events.try_recv() {
+            streamed |= matches!(event, AgentEvent::Token(_));
             forwarder.forward(event, cx);
+        }
+        let out = out.unwrap_or_else(|e| RunOutput::failed(e.to_string()));
+        // A command's output, and a shell command's, is not streamed: it
+        // comes back as the transcript.
+        let reply = commands::without_echo(&text, &out.text);
+        if !streamed && out.error.is_none() && !reply.is_empty() {
+            send_update(
+                cx,
+                &forwarder.session_id,
+                SessionUpdate::AgentMessageChunk(events::text_chunk(reply.to_string())),
+            );
         }
         // A prompt can switch the mode itself, through a prompt's
         // `%%mode` or `/mode`.
@@ -456,7 +473,7 @@ async fn handle_initialize(
 async fn handle_new_session(
     req: NewSessionRequest,
     responder: Responder<NewSessionResponse>,
-    _cx: ConnectionTo<Client>,
+    cx: ConnectionTo<Client>,
     state: &AcpState,
 ) -> Result<(), agent_client_protocol::Error> {
     if state.cli.sandbox_setting_conflict(&state.cfg) {
@@ -491,10 +508,12 @@ async fn handle_new_session(
         .insert(session_id.clone(), session);
 
     responder.respond(
-        NewSessionResponse::new(session_id)
+        NewSessionResponse::new(session_id.clone())
             .modes(modes)
             .config_options(config_options),
-    )
+    )?;
+    send_update(&cx, &session_id, commands::commands_update());
+    Ok(())
 }
 
 async fn handle_prompt(

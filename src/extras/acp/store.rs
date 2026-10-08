@@ -3,6 +3,7 @@
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 
+use super::commands::commands_update;
 use super::events::{send_update, text_chunk, tool_kind, tool_path};
 use super::modes::mode_state;
 use super::options::config_options;
@@ -118,7 +119,9 @@ pub(super) async fn handle_load(
         LoadSessionResponse::new()
             .modes(modes)
             .config_options(config_options),
-    )
+    )?;
+    send_update(&cx, &req.session_id, commands_update());
+    Ok(())
 }
 
 /// The stored sessions, newest first, optionally only those of one folder.
