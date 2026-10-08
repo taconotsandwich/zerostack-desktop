@@ -947,3 +947,76 @@ pub fn worktree_auto_commit_all(wt_path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// Prompt instructing the agent to squash-merge a worktree branch back into
+/// `target`. Shared by the TUI `/wt-merge` flow and headless callers.
+///
+/// The agent must NOT delete the worktree or the branch itself: cleanup is
+/// conditional on verification in [`finish_agent_merge`] (an aborted or failed
+/// agent run must leave both intact). The prompt says so explicitly.
+pub fn merge_prompt(branch: &str, target: &str, main_path: &str, wt_path: &str) -> String {
+    format!(
+        "I'm in a git worktree on branch '{branch}' at '{wt_path}'. \
+         Merge it into '{target}' in the main repo at '{main_path}'.\n\n\
+         Follow these steps:\n\
+         1. cd {main_path}\n\
+         2. git fetch --all\n\
+         3. git checkout {target}\n\
+         4. git pull --ff-only (if this fails because the branch has no upstream, continue with the local branch)\n\
+         5. git merge --squash {branch}\n\
+         6. git commit --no-edit (if this says 'nothing to commit', the branch was already fully merged — treat it as success)\n\n\
+         After step 5, CHECK THE EXIT CODE and output.\n\
+         - If the merge Succeeded (no conflicts), continue to step 6.\n\
+         - If there is a MERGE CONFLICT:\n\
+           a. Run: git diff --name-only --diff-filter=U\n\
+           b. Tell the user WHICH FILES have conflicts. Show them the list.\n\
+           c. Ask the user what to do. Give them these options:\n\
+              - 'abort': run `git merge --abort` (or `git reset --merge` for squash merges), do NOT delete anything, stop here.\n\
+              - 'resolve <file>': you help them fix the conflict in that file.\n\
+              - 'leave': leave the conflict state as-is for manual resolution.\n\
+           d. WAIT for the user's response before continuing.\n\
+           e. Follow their instruction.\n\n\
+         7. If the merge succeeded (or conflicts were resolved and committed):\n\
+           - cd {main_path} and report completion.\n\
+           - Do NOT run `git worktree remove` or `git branch -d`: zerostack verifies the merge and cleans up itself.\n\n\
+         Important: Do NOT skip any step. Always check for conflicts after merge."
+    )
+}
+
+/// Verification + cleanup tail shared by the TUI merge loop and the engine:
+/// check on disk whether `branch` really landed in `target`, remove the
+/// worktree and branch only when it did, and return the message to show the
+/// user.
+pub fn finish_agent_merge(
+    main_path: &str,
+    wt_path: &str,
+    branch: &str,
+    target: &str,
+    force: bool,
+) -> String {
+    match verify_branch_merged(Path::new(main_path), target, branch) {
+        AgentMergeStatus::Merged => {
+            cleanup_worktree(wt_path, branch, main_path, force);
+            format!(
+                "merged '{}' into '{}' and cleaned up; returned to main repo at {}",
+                branch, target, main_path
+            )
+        }
+        AgentMergeStatus::Conflicts(files) => {
+            let mut msg = format!(
+                "merge has conflicts in {} file(s); worktree kept at {}:",
+                files.len(),
+                wt_path
+            );
+            for f in &files {
+                msg.push_str(&format!("\n  {}", f));
+            }
+            msg
+        }
+        AgentMergeStatus::NotMerged(reason) => format!(
+            "agent run finished but '{}' is not merged into '{}' ({}); \
+             worktree kept at {} for manual handling",
+            branch, target, reason, wt_path
+        ),
+    }
+}
