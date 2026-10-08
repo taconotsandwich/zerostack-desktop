@@ -643,3 +643,26 @@ async fn export_then_import_round_trips_the_conversation() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn with_events_forwards_the_turn_as_it_runs() {
+    use crate::event::AgentEvent;
+
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (engine, _model) = engine_with_turns(vec![vec!["streamed reply"]]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut engine = engine.with_events(tx);
+    engine.run_prompt("hello".to_string()).await;
+
+    let mut text = String::new();
+    let mut done = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::Token(chunk) => text.push_str(&chunk),
+            AgentEvent::Done { .. } => done = true,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "streamed reply");
+    assert!(done, "the final event reaches the listener");
+}

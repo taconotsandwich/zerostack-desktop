@@ -34,6 +34,7 @@ pub use sink::{EventSink, StringSink};
 
 use compact_str::CompactString;
 use smallvec::SmallVec;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::builder::AgentBuild;
 use crate::agent::runner::{self, AgentRunner};
@@ -41,7 +42,11 @@ use crate::cli::Cli;
 use crate::config::{self, Config};
 use crate::context::ContextFiles;
 use crate::event::AgentEvent;
+#[cfg(feature = "mcp")]
+use crate::extras::mcp::McpClientManager;
+use crate::extras::status_signals::StatusSignals;
 use crate::permission::SecurityMode;
+use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
@@ -80,7 +85,8 @@ impl RunOutput {
         }
     }
 
-    fn command(text: impl Into<String>) -> Self {
+    /// Build a command-transcript output (slash-style text, no agent usage).
+    pub fn command(text: impl Into<String>) -> Self {
         Self {
             kind: RunKind::Command,
             text: text.into(),
@@ -109,6 +115,15 @@ pub struct Engine {
     agent: Option<AnyAgent>,
     permission: Option<PermCheck>,
     sandbox: Sandbox,
+    /// Interactive services injected by embedders (ACP, GUI shells).
+    /// A bare engine leaves them unset and stays fully headless: `Ask`
+    /// verdicts fail closed, no MCP tools are registered, no status is
+    /// published, and no events are forwarded.
+    ask_tx: Option<AskSender>,
+    #[cfg(feature = "mcp")]
+    mcp_manager: Option<McpClientManager>,
+    status_signals: Option<StatusSignals>,
+    event_tx: Option<UnboundedSender<AgentEvent>>,
     /// Mirrors `SlashState`: toggles owned by slash commands.
     show_reasoning: bool,
     reasoning_enabled: bool,
@@ -143,6 +158,11 @@ impl Engine {
             agent: None,
             permission,
             sandbox,
+            ask_tx: None,
+            #[cfg(feature = "mcp")]
+            mcp_manager: None,
+            status_signals: None,
+            event_tx: None,
             show_reasoning,
             reasoning_enabled: true,
             pending_tool_calls: Vec::new(),
@@ -155,6 +175,34 @@ impl Engine {
     /// Inject a pre-built agent (tests inject `AnyAgent::Mock`).
     pub fn with_agent(mut self, agent: AnyAgent) -> Self {
         self.agent = Some(agent);
+        self
+    }
+
+    /// Let tools ask the user for permission. The caller must drain the
+    /// matching receiver and answer each request; without a sender an `Ask`
+    /// verdict stays fail-closed (`Permission denied (non-interactive mode)`).
+    pub fn with_ask(mut self, ask_tx: AskSender) -> Self {
+        self.ask_tx = Some(ask_tx);
+        self
+    }
+
+    /// Register MCP tools on every agent this engine builds.
+    #[cfg(feature = "mcp")]
+    pub fn with_mcp(mut self, manager: McpClientManager) -> Self {
+        self.mcp_manager = Some(manager);
+        self
+    }
+
+    /// Publish run state over the same status socket the TUI reports to.
+    pub fn with_status_signals(mut self, signals: StatusSignals) -> Self {
+        self.status_signals = Some(signals);
+        self
+    }
+
+    /// Forward every [`AgentEvent`] of a running turn to `tx` so embedders can
+    /// render tokens, tool calls, and usage while the turn is in flight.
+    pub fn with_events(mut self, tx: UnboundedSender<AgentEvent>) -> Self {
+        self.event_tx = Some(tx);
         self
     }
 
@@ -689,8 +737,14 @@ impl Engine {
         let mut usage = TurnUsage::default();
         let mut final_response = String::new();
         let mut turn_error: Option<String> = None;
+        if let Some(signals) = &self.status_signals {
+            signals.send_start();
+        }
 
         while let Some(event) = runner.event_rx.recv().await {
+            if let Some(tx) = &self.event_tx {
+                let _ = tx.send(event.clone());
+            }
             match event {
                 AgentEvent::Reasoning(text) => {
                     if self.show_reasoning {
@@ -781,6 +835,9 @@ impl Engine {
         }
         self.turn_trace.clear();
         self.pending_tool_calls.clear();
+        if let Some(signals) = &self.status_signals {
+            signals.send_stop();
+        }
 
         if let Some(e) = turn_error {
             anyhow::bail!("{e}");
@@ -898,12 +955,6 @@ impl Engine {
         if self.agent.is_some() {
             return;
         }
-        #[cfg(feature = "mcp")]
-        {
-            // Headless engines never connect MCP lazily: pass `None` like
-            // `dispatch_print` does. Callers needing MCP build the agent
-            // up front via `Engine::new(...).with_agent(...)`.
-        }
         let model = self.client.completion_model(self.session.model.to_string());
         let temperature = config::resolve_temperature(&self.cli, &self.cfg, &self.session.model);
         let extra_body = config::resolve_extra_body(&self.cfg, &self.session.model);
@@ -914,15 +965,13 @@ impl Engine {
                 cfg: &self.cfg,
                 context: &self.context,
                 permission: self.permission.clone(),
-                // Headless: no one drains the ask channel, so an `Ask` verdict
-                // must fail closed (same as `dispatch_print`'s `None`).
-                ask_tx: None,
+                ask_tx: self.ask_tx.clone(),
                 sandbox: self.sandbox.clone(),
                 reasoning_enabled: self.reasoning_enabled,
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
-                mcp_manager: None,
+                mcp_manager: self.mcp_manager.as_ref(),
             },
         )
         .await;
@@ -968,13 +1017,13 @@ impl Engine {
                 cfg,
                 context,
                 permission: permission.clone(),
-                ask_tx: None,
+                ask_tx: self.ask_tx.clone(),
                 sandbox: sandbox.clone(),
                 reasoning_enabled: self.reasoning_enabled,
                 temperature,
                 extra_body,
                 #[cfg(feature = "mcp")]
-                mcp_manager: None,
+                mcp_manager: self.mcp_manager.as_ref(),
             },
         )
         .await;
