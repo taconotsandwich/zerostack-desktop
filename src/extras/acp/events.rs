@@ -6,11 +6,53 @@ use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Client, ConnectionTo};
 use compact_str::CompactString;
 
+use crate::agent::tools::{EditArgs, WriteArgs, edit_hunks::edit_hunks};
 use crate::event::AgentEvent;
 use crate::permission::ask::AskRequest;
+use crate::ui::utils::format_tool_call_summary;
 
 pub(super) fn text_chunk(text: String) -> ContentChunk {
     ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+}
+
+/// What kind of work a zerostack tool does, so a client can pick an icon.
+pub(super) fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "read" | "list_dir" => ToolKind::Read,
+        "grep" | "find_files" => ToolKind::Search,
+        "edit" | "write" => ToolKind::Edit,
+        "bash" => ToolKind::Execute,
+        _ => ToolKind::Other,
+    }
+}
+
+/// The file a tool call works on, as an absolute path.
+pub(super) fn tool_path(args: &serde_json::Value) -> Option<std::path::PathBuf> {
+    let path = args.get("path")?.as_str()?;
+    std::path::absolute(crate::fs::expand_tilde(path)).ok()
+}
+
+/// The change a successful edit or write made, as diffs: one per replaced
+/// span for an edit, the whole new file for a write (write only creates
+/// files).
+fn tool_diffs(name: &str, args: &serde_json::Value) -> Vec<ToolCallContent> {
+    let Some(path) = tool_path(args) else {
+        return Vec::new();
+    };
+    match name {
+        "edit" => serde_json::from_value::<EditArgs>(args.clone())
+            .map(|args| edit_hunks(&args))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|hunk| {
+                ToolCallContent::Diff(Diff::new(path.clone(), hunk.replace).old_text(hunk.search))
+            })
+            .collect(),
+        "write" => serde_json::from_value::<WriteArgs>(args.clone())
+            .map(|args| vec![ToolCallContent::Diff(Diff::new(path, args.content))])
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
 }
 
 pub(super) fn send_update(
@@ -24,6 +66,13 @@ pub(super) fn send_update(
     }
 }
 
+/// A tool call announced to the client and not yet answered.
+struct AnnouncedCall {
+    id: ToolCallId,
+    name: CompactString,
+    args: serde_json::Value,
+}
+
 /// Translates the [`AgentEvent`]s of one session into ACP session updates.
 /// Turn boundaries (`Done`, `Error`) are the caller's business; they produce
 /// no update here.
@@ -33,7 +82,7 @@ pub(super) struct EventForwarder {
     /// `internal_call_id`) to the ACP ToolCallId announced for them. A map,
     /// not a single slot: a parallel batch streams every `ToolCall` before
     /// the first `ToolResult`.
-    tool_call_ids: HashMap<CompactString, (ToolCallId, CompactString)>,
+    tool_call_ids: HashMap<CompactString, AnnouncedCall>,
     /// Announced calls a permission request was already sent for.
     asked: HashSet<ToolCallId>,
 }
@@ -56,8 +105,8 @@ impl EventForwarder {
     fn unasked_call(&self, tool: &str) -> Option<&ToolCallId> {
         self.tool_call_ids
             .values()
-            .find(|(id, name)| name == tool && !self.asked.contains(id))
-            .map(|(id, _)| id)
+            .find(|call| call.name == tool && !self.asked.contains(&call.id))
+            .map(|call| &call.id)
     }
 
     pub(super) fn has_unasked_call(&self, tool: &str) -> bool {
@@ -95,10 +144,17 @@ impl EventForwarder {
                 args,
             } => {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
+                let tool_call = ToolCall::new(id.clone(), format_tool_call_summary(&name, &args))
+                    .kind(tool_kind(&name))
+                    .locations(
+                        tool_path(&args)
+                            .map(ToolCallLocation::new)
+                            .into_iter()
+                            .collect(),
+                    )
+                    .raw_input(Some(args.clone()));
                 self.tool_call_ids
-                    .insert(event_id, (id.clone(), name.clone()));
-                let tool_call = ToolCall::new(id, name.to_string())
-                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                    .insert(event_id, AnnouncedCall { id, name, args });
                 Some(SessionUpdate::ToolCall(tool_call))
             }
             AgentEvent::SubagentToolCall { name, args } => {
@@ -109,18 +165,19 @@ impl EventForwarder {
                 let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
                 let tool_call = ToolCall::new(id, format!("[subagent] {}", name))
                     .status(ToolCallStatus::Completed)
-                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                    .raw_input(Some(args));
                 Some(SessionUpdate::ToolCall(tool_call))
             }
             AgentEvent::ToolResult {
                 call_id: event_id,
                 output,
+                failed,
                 ..
             } => {
                 // No announced ToolCall to update: an update carrying a
                 // ToolCallId the client was never told about is worse than
                 // silence, so drop it.
-                let Some((id, _)) = self.tool_call_ids.remove(&event_id) else {
+                let Some(call) = self.tool_call_ids.remove(&event_id) else {
                     tracing::warn!(
                         "ACP tool result with no announced tool call (id={}); \
                          skipping update",
@@ -128,14 +185,21 @@ impl EventForwarder {
                     );
                     return None;
                 };
-                self.asked.remove(&id);
-                let fields = ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .content(vec![ToolCallContent::from(ContentBlock::Text(
-                        TextContent::new(output.to_string()),
-                    ))]);
+                self.asked.remove(&call.id);
+                let (status, mut content) = if failed {
+                    (ToolCallStatus::Failed, Vec::new())
+                } else {
+                    (
+                        ToolCallStatus::Completed,
+                        tool_diffs(&call.name, &call.args),
+                    )
+                };
+                content.push(ToolCallContent::from(ContentBlock::Text(TextContent::new(
+                    output.to_string(),
+                ))));
+                let fields = ToolCallUpdateFields::new().status(status).content(content);
                 Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    id, fields,
+                    call.id, fields,
                 )))
             }
             AgentEvent::Retrying { attempt, max } => {

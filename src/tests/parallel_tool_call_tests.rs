@@ -208,6 +208,7 @@ async fn spawn_agent_events_pair_each_result_with_its_own_call_by_id() {
                 call_id,
                 name,
                 output,
+                ..
             } => log.push(ToolEvent::Result {
                 id: call_id,
                 name: name.to_string(),
