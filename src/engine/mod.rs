@@ -178,6 +178,35 @@ impl Engine {
         &mut self.context
     }
 
+    // ── typed actions for programmatic callers ──────────────────────
+    //
+    // These methods expose the same state changes as the slash handlers
+    // without requiring callers to format command strings. `run_string`
+    // remains the entry point for user-typed slash/bang/dot commands.
+
+    /// Run a plain prompt as an agent turn.
+    pub async fn run_prompt(&mut self, prompt: String) -> RunOutput {
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return RunOutput::ignored();
+        }
+        self.run_agent_text(prompt).await
+    }
+
+    /// Run a shell command without a leading `!`.
+    pub async fn run_shell(&mut self, command: String) -> anyhow::Result<RunOutput> {
+        let command = command.trim();
+        anyhow::ensure!(!command.is_empty(), "shell command cannot be empty");
+        Ok(self.run_bang(&format!("!{command}")).await)
+    }
+
+    /// Ask a separate question without mutating the session.
+    pub async fn ask_separate_question(&mut self, question: String) -> anyhow::Result<RunOutput> {
+        let question = question.trim();
+        anyhow::ensure!(!question.is_empty(), "question cannot be empty");
+        Ok(self.run_btw(&format!("/btw {question}")).await)
+    }
+
     /// Switch provider and apply its default model.
     pub async fn set_provider(&mut self, provider: &str) -> anyhow::Result<()> {
         let new_provider = provider.trim();
@@ -370,12 +399,95 @@ impl Engine {
         Ok(Some(format!("dropped {file_count} file(s)")))
     }
 
+    /// Clear session messages and related turn state.
+    pub async fn clear_messages(&mut self) {
+        #[cfg(feature = "hooks")]
+        crate::extras::hooks::dispatch_session_end("clear").await;
+        self.session.messages.clear();
+        self.session.total_estimated_tokens = 0;
+        self.session.reset_calibration();
+        self.session.compactions.clear();
+        self.context.chain_declined.clear();
+        #[cfg(feature = "hooks")]
+        crate::extras::hooks::dispatch_session_start("clear").await;
+    }
+
+    /// Swap in a fresh conversation that keeps the settings the user picked
+    /// (provider, model, context window, prompt), mirroring the session
+    /// `startup` creates on launch. The replaced session stays on disk.
+    pub fn new_session(&mut self) {
+        let mut session = crate::session::Session::new(
+            &self.session.provider,
+            &self.session.model,
+            self.session.context_window,
+            "",
+        );
+        session.input_token_cost = self.session.input_token_cost;
+        session.output_token_cost = self.session.output_token_cost;
+        session.prompt = self.session.prompt.clone();
+        self.session = session;
+    }
+
+    /// Undo the last exchange. Returns the removed message count.
+    pub fn undo_messages(&mut self) -> usize {
+        crate::ui::slash::undo_last(&mut self.session)
+    }
+
+    /// Restore the last rewind. Returns false when there is nothing to redo.
+    pub fn redo_messages(&mut self) -> bool {
+        self.session.redo()
+    }
+
+    /// Rewind candidate points, mirroring the TUI rewind picker: the index and
+    /// an 80-character preview of every user message.
+    pub fn rewind_points(&self) -> Vec<(usize, String)> {
+        crate::ui::rewind_targets(&self.session)
+    }
+
+    /// Rewind the conversation to `new_len` messages; the TUI picker passes the
+    /// index of the chosen user message. Returns the number of messages removed
+    /// (0 when the index is already at or past the end).
+    pub fn rewind_to(&mut self, new_len: usize) -> usize {
+        self.session.rewind_to(new_len)
+    }
+
+    /// Retry the last user message as a new agent turn.
+    pub async fn retry_last_message(&mut self) -> anyhow::Result<RunOutput> {
+        let Some(message) = self.last_user_message() else {
+            anyhow::bail!("no previous message to retry");
+        };
+        let output = self.run_agent_text(&message.content).await;
+        self.save_session_best_effort();
+        Ok(output)
+    }
+
+    fn last_user_message(&self) -> Option<crate::session::SessionMessage> {
+        self.session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == MessageRole::User)
+            .cloned()
+    }
+
     /// Toggle reasoning on or off.
     pub async fn toggle_reasoning(&mut self) {
         self.reasoning_enabled = !self.reasoning_enabled;
         self.show_reasoning = self.reasoning_enabled;
         let model_id = self.session.model.to_string();
         self.rebuild_agent(&model_id).await;
+    }
+
+    /// Compact the context with optional instructions.
+    pub async fn compress_conversation(
+        &mut self,
+        instructions: Option<String>,
+    ) -> anyhow::Result<()> {
+        let mut sink = StringSink::new();
+        self.compress(instructions.as_deref(), false, &mut sink)
+            .await?;
+        self.save_session_best_effort();
+        Ok(())
     }
 
     /// Run one user input string: plain message, `/` slash command, `.`
@@ -1672,20 +1784,12 @@ impl Engine {
             "/sessions" => self.cmd_sessions(parts, sink),
             "/rename" => self.cmd_rename(parts, sink),
             "/clear" | "/new" => {
-                #[cfg(feature = "hooks")]
-                crate::extras::hooks::dispatch_session_end("clear").await;
-                self.session.messages.clear();
-                self.session.total_estimated_tokens = 0;
-                self.session.reset_calibration();
-                self.session.compactions.clear();
-                self.context.chain_declined.clear();
-                #[cfg(feature = "hooks")]
-                crate::extras::hooks::dispatch_session_start("clear").await;
+                self.clear_messages().await;
                 sink.write_ok("session cleared");
                 Ok(SlashFlow::Done)
             }
             "/undo" => {
-                let removed = crate::ui::slash::undo_last(&mut self.session);
+                let removed = self.undo_messages();
                 if removed == 0 {
                     sink.write_ok("nothing to undo");
                 } else {
@@ -1694,7 +1798,7 @@ impl Engine {
                 Ok(SlashFlow::Done)
             }
             "/redo" => {
-                if !self.session.redo() {
+                if !self.redo_messages() {
                     sink.write_ok("nothing to redo");
                 } else {
                     sink.write_ok("restored the last rewind");
@@ -1707,28 +1811,19 @@ impl Engine {
                 );
                 Ok(SlashFlow::Done)
             }
-            "/retry" => {
-                match self
-                    .session
-                    .messages
-                    .iter()
-                    .rev()
-                    .find(|m| m.role == MessageRole::User)
-                    .cloned()
-                {
-                    Some(msg) => {
-                        sink.write_ok("retrying last message...");
-                        let out = self.run_agent_text(&msg.content).await;
-                        sink.write_ok(&out.text);
-                        self.save_session_best_effort();
-                        Ok(SlashFlow::Done)
-                    }
-                    None => {
-                        sink.write_ok("no previous message to retry");
-                        Ok(SlashFlow::Done)
-                    }
+            "/retry" => match self.last_user_message() {
+                Some(msg) => {
+                    sink.write_ok("retrying last message...");
+                    let out = self.run_agent_text(&msg.content).await;
+                    sink.write_ok(&out.text);
+                    self.save_session_best_effort();
+                    Ok(SlashFlow::Done)
                 }
-            }
+                None => {
+                    sink.write_ok("no previous message to retry");
+                    Ok(SlashFlow::Done)
+                }
+            },
             "/quit" | "/exit" => {
                 anyhow::bail!("quit requested (headless engines do not exit the process)");
             }

@@ -537,3 +537,74 @@ async fn context_files_add_drop_and_clear() {
     assert!(engine.context().extra_files.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[tokio::test]
+async fn rewind_points_and_rewind_to_cut_the_conversation() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["first"], vec!["second"]]);
+    engine.run_string("one").await.expect("turn 1");
+    engine.run_string("two").await.expect("turn 2");
+
+    // The picker lists every user message: index plus preview.
+    let points = engine.rewind_points();
+    assert_eq!(points.len(), 2);
+    assert_eq!(points[0], (0, "one".to_string()));
+    assert_eq!(points[1], (2, "two".to_string()));
+
+    // Rewinding to the second prompt drops it and everything after it, and
+    // the cut stays undoable through the shared redo path.
+    assert_eq!(engine.rewind_to(2), 2);
+    assert_eq!(engine.session().messages.len(), 2);
+    assert_eq!(engine.rewind_to(2), 0, "already at the cut");
+    assert!(engine.redo_messages());
+    assert_eq!(engine.session().messages.len(), 4);
+}
+
+#[tokio::test]
+async fn new_session_keeps_settings_and_drops_history() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["hi there"]]);
+    engine.run_string("hello").await.expect("run_string");
+    let previous = engine.session().id.clone();
+    let working_dir = engine.session().working_dir.clone();
+    assert_eq!(engine.session().messages.len(), 2);
+
+    engine.new_session();
+
+    let session = engine.session();
+    assert_ne!(session.id, previous);
+    assert!(session.messages.is_empty());
+    assert_eq!(session.provider.as_str(), "anthropic");
+    assert_eq!(session.model.as_str(), "claude-sonnet-4-5");
+    assert_eq!(session.context_window, 200_000);
+    assert_eq!(session.working_dir, working_dir);
+}
+
+#[tokio::test]
+async fn retry_without_a_message_fails_and_with_one_reruns_it() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, model) = engine_with_turns(vec![vec!["first"], vec!["again"]]);
+    let error = engine.retry_last_message().await.unwrap_err();
+    assert_eq!(error.to_string(), "no previous message to retry");
+
+    engine.run_prompt("hello".to_string()).await;
+    let output = engine.retry_last_message().await.expect("retry");
+    assert!(output.text.contains("again"), "got: {}", output.text);
+    assert_eq!(model.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn run_prompt_ignores_blank_input_and_clear_messages_empties_the_session() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _model) = engine_with_turns(vec![vec!["reply"]]);
+    assert_eq!(
+        engine.run_prompt("  ".to_string()).await.kind,
+        RunKind::Ignored
+    );
+    engine.run_prompt("hello".to_string()).await;
+    assert_eq!(engine.session().messages.len(), 2);
+    engine.clear_messages().await;
+    assert!(engine.session().messages.is_empty());
+    assert!(engine.run_shell(" ".to_string()).await.is_err());
+    assert!(engine.ask_separate_question(String::new()).await.is_err());
+}
