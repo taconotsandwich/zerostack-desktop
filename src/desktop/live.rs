@@ -112,6 +112,7 @@ mod tests {
                 call_id: "b".into(),
                 name: "read".into(),
                 output: "second file".into(),
+                failed: false,
             },
             false,
             Path::new("/"),
