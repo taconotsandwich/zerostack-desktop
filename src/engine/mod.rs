@@ -218,6 +218,27 @@ impl Engine {
         &self.session
     }
 
+    /// Keep an "allow always" answer with the session, so the session still
+    /// allows it once resumed. Returns false when it was already kept.
+    pub fn remember_allowed(&mut self, tool: &str, pattern: &str) -> bool {
+        let known = self
+            .session
+            .permission_allowlist
+            .iter()
+            .any(|entry| entry.tool == tool && entry.pattern == pattern);
+        if known {
+            return false;
+        }
+        self.session
+            .permission_allowlist
+            .push(crate::session::PermissionAllowEntry {
+                tool: tool.into(),
+                pattern: pattern.into(),
+            });
+        self.save_session_best_effort();
+        true
+    }
+
     /// Mutably borrow the session.
     pub fn session_mut(&mut self) -> &mut Session {
         &mut self.session

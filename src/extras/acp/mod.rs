@@ -1,4 +1,11 @@
 pub mod config;
+mod events;
+mod permission;
+
+use events::EventForwarder;
+#[cfg(test)]
+pub(crate) use permission::resolve_acp_mode;
+use permission::{ASK_ANNOUNCE_WAIT, ask_client, build_acp_permission, next_ask};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,9 +24,8 @@ use crate::config::Config;
 use crate::context::ContextFiles;
 use crate::engine::{Engine, RunOutput};
 use crate::event::AgentEvent;
-use crate::permission::SecurityMode;
-use crate::permission::ask::AskSender;
-use crate::permission::checker::{PermCheck, PermissionChecker};
+use crate::permission::ask::{AskReceiver, AskRequest, AskSender};
+use crate::permission::checker::PermCheck;
 use crate::provider::AnyClient;
 use crate::sandbox::{SandboxSettings, SandboxSetup};
 use crate::session::Session;
@@ -35,9 +41,11 @@ pub struct AcpTemplate {
     pub client: AnyClient,
 }
 
-/// Builds the engine of a new session around its permission checker.
-/// Production clones the startup template; tests inject a scripted agent.
-pub(crate) type EngineFactory = Box<dyn Fn(Option<PermCheck>) -> Engine + Send + Sync>;
+/// Builds the engine of a new session around its permission checker and the
+/// channel its tools ask through. Production clones the startup template;
+/// tests inject a scripted agent.
+pub(crate) type EngineFactory =
+    Box<dyn Fn(Option<PermCheck>, Option<AskSender>) -> Engine + Send + Sync>;
 
 pub(crate) struct AcpState {
     cli: Cli,
@@ -65,8 +73,8 @@ impl AcpState {
             client,
         } = template;
         let (engine_cli, engine_cfg) = (cli.clone(), cfg.clone());
-        let make_engine: EngineFactory = Box::new(move |permission| {
-            Engine::new(
+        let make_engine: EngineFactory = Box::new(move |permission, ask_tx| {
+            let engine = Engine::new(
                 engine_cli.clone(),
                 engine_cfg.clone(),
                 session.clone(),
@@ -74,7 +82,11 @@ impl AcpState {
                 client.clone(),
                 permission,
                 sandbox_setup(&engine_cli, &engine_cfg).sandbox,
-            )
+            );
+            match ask_tx {
+                Some(ask_tx) => engine.with_ask(ask_tx),
+                None => engine,
+            }
         });
         Self::new(cli, cfg, make_engine)
     }
@@ -103,6 +115,9 @@ fn unknown_session(id: &SessionId) -> agent_client_protocol::Error {
 struct LiveSession {
     engine: Engine,
     events: UnboundedReceiver<AgentEvent>,
+    /// Permission asks from the engine's tools; `None` when tools run
+    /// unchecked.
+    asks: Option<AskReceiver>,
     forwarder: EventForwarder,
 }
 
@@ -114,27 +129,58 @@ impl LiveSession {
         let Self {
             engine,
             events,
+            asks,
             forwarder,
         } = self;
-        let run = engine.run_prompt(text);
-        tokio::pin!(run);
-        let out = loop {
-            tokio::select! {
-                out = &mut run => break out,
-                Some(event) = events.recv() => forwarder.forward(event, cx),
+        let allowed: Arc<std::sync::Mutex<Vec<(CompactString, String)>>> = Arc::default();
+        let out = {
+            let run = engine.run_prompt(text);
+            tokio::pin!(run);
+            // Asks wait until their tool call is announced, so the client
+            // shows the ask on it. The engine forwards events as it drains
+            // the runner, which can trail the tool's ask by a moment.
+            let mut waiting: Vec<AskRequest> = Vec::new();
+            loop {
+                tokio::select! {
+                    out = &mut run => break out,
+                    Some(event) = events.recv() => forwarder.forward(event, cx),
+                    Some(ask) = next_ask(asks) => waiting.push(ask),
+                    _ = tokio::time::sleep(ASK_ANNOUNCE_WAIT), if !waiting.is_empty() => {
+                        for ask in waiting.drain(..) {
+                            let tool_call = forwarder.permission_tool_call(&ask);
+                            tokio::spawn(ask_client(cx.clone(), forwarder.session_id.clone(), tool_call, ask, allowed.clone()));
+                        }
+                    }
+                }
+                let mut i = 0;
+                while i < waiting.len() {
+                    if forwarder.has_unasked_call(&waiting[i].tool) {
+                        let ask = waiting.remove(i);
+                        let tool_call = forwarder.permission_tool_call(&ask);
+                        tokio::spawn(ask_client(
+                            cx.clone(),
+                            forwarder.session_id.clone(),
+                            tool_call,
+                            ask,
+                            allowed.clone(),
+                        ));
+                    } else {
+                        i += 1;
+                    }
+                }
             }
         };
         while let Ok(event) = events.try_recv() {
             forwarder.forward(event, cx);
         }
+        let allowed = std::mem::take(&mut *allowed.lock().unwrap_or_else(|e| e.into_inner()));
+        for (tool, pattern) in allowed {
+            engine.remember_allowed(&tool, &pattern);
+        }
         out
     }
 }
 
-/// The session sandbox and the warnings building it produced, from this
-/// server's resolved settings. Shared by `handle_new_session` (which logs the
-/// warnings once) and the engine factory, so the two can never disagree about
-/// what is masked or exposed.
 fn sandbox_setup(cli: &Cli, cfg: &Config) -> SandboxSetup {
     crate::sandbox::build_sandbox(&SandboxSettings {
         enabled: cli.resolve_sandbox(cfg),
@@ -288,12 +334,10 @@ async fn handle_new_session(
         tracing::warn!("{warning}");
     }
 
-    let (permission, ask_tx) = build_acp_permission(&state.cli, &state.cfg);
+    let (permission, asks) = build_acp_permission(&state.cli, &state.cfg);
     let (event_tx, events) = unbounded_channel();
-    let mut engine = (state.make_engine)(permission).with_events(event_tx);
-    if let Some(ask_tx) = ask_tx {
-        engine = engine.with_ask(ask_tx);
-    }
+    let (ask_tx, asks) = asks.unzip();
+    let mut engine = (state.make_engine)(permission, ask_tx).with_events(event_tx);
     engine.new_session();
     // The ACP session id is the zerostack session id, so a client can find
     // the session in the store later.
@@ -308,6 +352,7 @@ async fn handle_new_session(
     let live = LiveSession {
         engine,
         events,
+        asks,
         forwarder: EventForwarder::new(session_id.clone()),
     };
     state
@@ -353,174 +398,4 @@ async fn handle_prompt(
             }
         }
     })
-}
-
-// --- Event Translation ---
-
-fn text_chunk(text: String) -> ContentChunk {
-    ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
-}
-
-fn send_update(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
-    let notif = SessionNotification::new(session_id.clone(), update);
-    if let Err(e) = cx.send_notification(notif) {
-        tracing::warn!("ACP failed to send session update: {}", e);
-    }
-}
-
-/// Translates the [`AgentEvent`]s of one session into ACP session updates.
-/// Turn boundaries (`Done`, `Error`) are the caller's business; they produce
-/// no update here.
-struct EventForwarder {
-    session_id: SessionId,
-    /// In-flight main-agent calls by `AgentEvent` id (rig's
-    /// `internal_call_id`) to the ACP ToolCallId announced for them. A map,
-    /// not a single slot: a parallel batch streams every `ToolCall` before
-    /// the first `ToolResult`.
-    tool_call_ids: HashMap<CompactString, ToolCallId>,
-}
-
-impl EventForwarder {
-    fn new(session_id: SessionId) -> Self {
-        Self {
-            session_id,
-            tool_call_ids: HashMap::new(),
-        }
-    }
-
-    fn forward(&mut self, event: AgentEvent, cx: &ConnectionTo<Client>) {
-        if let Some(update) = self.translate(event) {
-            send_update(cx, &self.session_id, update);
-        }
-    }
-
-    fn translate(&mut self, event: AgentEvent) -> Option<SessionUpdate> {
-        match event {
-            AgentEvent::Token(text) => Some(SessionUpdate::AgentMessageChunk(text_chunk(
-                text.to_string(),
-            ))),
-            AgentEvent::Reasoning(text) => Some(SessionUpdate::AgentThoughtChunk(text_chunk(
-                text.to_string(),
-            ))),
-            AgentEvent::ToolCall {
-                call_id: event_id,
-                name,
-                args,
-            } => {
-                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                self.tool_call_ids.insert(event_id, id.clone());
-                let tool_call = ToolCall::new(id, name.to_string())
-                    .raw_input(serde_json::from_str(&args.to_string()).ok());
-                Some(SessionUpdate::ToolCall(tool_call))
-            }
-            AgentEvent::SubagentToolCall { name, args } => {
-                // Announce-only: subagent calls carry no correlating id, so
-                // they never receive a ToolCallUpdate. Announced as already
-                // Completed, since nothing will ever update it out of the
-                // default Pending status.
-                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                let tool_call = ToolCall::new(id, format!("[subagent] {}", name))
-                    .status(ToolCallStatus::Completed)
-                    .raw_input(serde_json::from_str(&args.to_string()).ok());
-                Some(SessionUpdate::ToolCall(tool_call))
-            }
-            AgentEvent::ToolResult {
-                call_id: event_id,
-                output,
-                ..
-            } => {
-                // No announced ToolCall to update: an update carrying a
-                // ToolCallId the client was never told about is worse than
-                // silence, so drop it.
-                let Some(id) = self.tool_call_ids.remove(&event_id) else {
-                    tracing::warn!(
-                        "ACP tool result with no announced tool call (id={}); \
-                         skipping update",
-                        event_id.escape_debug(),
-                    );
-                    return None;
-                };
-                let fields = ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .content(vec![ToolCallContent::from(ContentBlock::Text(
-                        TextContent::new(output.to_string()),
-                    ))]);
-                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
-                    id, fields,
-                )))
-            }
-            AgentEvent::Retrying { attempt, max } => {
-                // ACP has no status bar, so surface the retry as an agent
-                // thought. This keeps the client from going silent during the
-                // backoff delay and mirrors how `Reasoning` is forwarded.
-                Some(SessionUpdate::AgentThoughtChunk(text_chunk(format!(
-                    "retrying... ({}/{})",
-                    attempt, max
-                ))))
-            }
-            AgentEvent::CompletionCall { .. } | AgentEvent::Done { .. } | AgentEvent::Error(_) => {
-                None
-            }
-        }
-    }
-}
-
-// --- Permission ---
-
-fn build_acp_permission(cli: &Cli, cfg: &Config) -> (Option<PermCheck>, Option<AskSender>) {
-    use std::sync::Mutex as StdMutex;
-
-    let no_tools = cli.resolve_no_tools(cfg);
-    if no_tools || cli.dangerously_skip_permissions {
-        return (None, None);
-    }
-
-    let perm_config = cfg.build_permission_config();
-
-    let mode = resolve_acp_mode(cli, cfg);
-    let permission_modes = cfg.permission_modes.clone();
-    let checker = PermissionChecker::new(&perm_config, mode, None, permission_modes);
-    let perm: PermCheck = Arc::new(StdMutex::new(checker));
-
-    let (ask_tx, mut ask_rx) = tokio::sync::mpsc::channel::<crate::permission::ask::AskRequest>(64);
-    // ACP is headless — there is no interactive user to prompt. Auto-approve
-    // Ask requests so tools don't fail with "Permission system unavailable".
-    // Log a warning so the auto-approval is visible in logs.
-    tokio::spawn(async move {
-        while let Some(req) = ask_rx.recv().await {
-            tracing::warn!(
-                "ACP auto-approving tool call: tool={}, input_len={}",
-                req.tool,
-                req.input.len()
-            );
-            let _ = req
-                .reply
-                .send(crate::permission::ask::UserDecision::AllowOnce);
-        }
-    });
-
-    (Some(perm), Some(ask_tx))
-}
-
-pub(crate) fn resolve_acp_mode(cli: &Cli, cfg: &Config) -> SecurityMode {
-    if cli.dangerously_skip_permissions {
-        SecurityMode::Standard
-    } else if cli.yolo || cfg.yolo.unwrap_or(false) {
-        SecurityMode::Yolo
-    } else if cli.accept_all || cfg.accept_all.unwrap_or(false) {
-        SecurityMode::Standard
-    } else if cli.restrictive || cfg.restrictive.unwrap_or(false) {
-        SecurityMode::Restrictive
-    } else if let Some(m) = &cfg.default_permission_mode {
-        match m.as_str() {
-            "yolo" => SecurityMode::Yolo,
-            "accept" | "standard" => SecurityMode::Standard,
-            "guarded" => SecurityMode::Guarded,
-            "readonly" => SecurityMode::ReadOnly,
-            "restrictive" => SecurityMode::Restrictive,
-            _ => SecurityMode::Standard,
-        }
-    } else {
-        SecurityMode::Standard
-    }
 }

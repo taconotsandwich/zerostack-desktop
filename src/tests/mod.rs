@@ -159,6 +159,11 @@ mod worktree_tests;
 /// NOTE: this deliberately does NOT cover the TUI loop tests
 /// (`tui_loop_tests`, `headless_*`, `parallel_tool_call_tests`):
 /// those never chdir, so they don't need it.
+/// Held by tests that point `ZS_DATA_DIR` somewhere and then read or write
+/// the session store, so they never see each other's directory.
+#[cfg(test)]
+pub(crate) static STORAGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 static CWD_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
