@@ -122,7 +122,14 @@ async fn run() -> anyhow::Result<()> {
     // ACP mode: serve and exit before feature init
     #[cfg(feature = "acp")]
     if startup.cli.acp_enabled {
-        return extras::acp::serve(startup.cli, startup.cfg, startup.context).await;
+        return extras::acp::serve(extras::acp::AcpTemplate {
+            cli: startup.cli,
+            cfg: startup.cfg,
+            context: startup.context,
+            session: startup.session,
+            client: startup.client,
+        })
+        .await;
     }
 
     let phase_start = std::time::Instant::now();
