@@ -17,6 +17,8 @@ mod acp_store_tests;
 #[cfg(all(test, feature = "acp"))]
 mod acp_tests;
 #[cfg(all(test, feature = "acp"))]
+mod acp_title_tests;
+#[cfg(all(test, feature = "acp"))]
 mod acp_tool_tests;
 #[cfg(all(test, feature = "advisor"))]
 mod advisor_tests;
