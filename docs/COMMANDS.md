@@ -6,6 +6,14 @@ description: "Complete reference of zerostack slash commands, keyboard shortcuts
 
 All slash commands are available from the TUI input prompt.
 
+Most also run without the TUI, sent as a prompt to an ACP session (see
+[ACP.md](ACP.md)). There, commands that would open a picker or run on the
+TUI's loop run inline instead: `/rewind` lists the messages and
+`/rewind <n>` cuts back to before message `n`; `/loop`, `/wt-merge` and
+`/mcp login` run to the end of the prompt, showing their progress as they go,
+and a cancel stops them. Commands about the terminal itself (`/quit`,
+`/tutor`, the pickers) are not offered.
+
 ## Session
 
 | Command | Description |
@@ -14,7 +22,8 @@ All slash commands are available from the TUI input prompt.
 | `/new` | Alias for `/clear`. |
 | `/undo` | Remove the last exchange (user message + assistant response). |
 | `/redo` | Restore whatever the most recent `/undo` or `/rewind` removed. |
-| `/rewind` | Open a picker to jump the session back to an earlier point. |
+| `/rewind` | Open a picker to jump the session back to an earlier point. Without the TUI: list the messages. |
+| `/rewind <n>` | Without the TUI: cut the session back to before message `n` of the list. |
 | `/retry` | Load the last user message into the input editor for editing. |
 | `/quit` | Exit zerostack. |
 | `/exit` | Alias for `/quit`. |
