@@ -141,6 +141,7 @@ pub async fn handle_agent_event(
             call_id: event_id,
             name,
             output,
+            ..
         } => {
             let call_id = resolve_tool_result_call_id(run, ui.session, &event_id, &name);
             ui.session.add_tool_result(call_id, &name, &output);
