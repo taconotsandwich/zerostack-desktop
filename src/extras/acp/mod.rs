@@ -333,143 +333,26 @@ async fn run_prompt(
         .await;
     let mut rx = runner.event_rx;
 
-    // In-flight main-agent calls by `AgentEvent` id (rig's
-    // `internal_call_id`) to the ACP ToolCallId announced for them. A map,
-    // not a single slot: a parallel batch streams every `ToolCall` before
-    // the first `ToolResult`.
-    let mut tool_call_ids: HashMap<CompactString, ToolCallId> = HashMap::new();
+    let mut events = EventForwarder::new(session_id.clone());
     let mut final_response = String::new();
-
     while let Some(event) = rx.recv().await {
         match event {
-            AgentEvent::Token(text) => {
-                final_response.push_str(&text);
-                let chunk =
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send token notification: {}", e);
-                }
-            }
-            AgentEvent::Reasoning(text) => {
-                let chunk =
-                    ContentChunk::new(ContentBlock::Text(TextContent::new(text.to_string())));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send reasoning notification: {}", e);
-                }
-            }
-            AgentEvent::ToolCall {
-                call_id: event_id,
-                name,
-                args,
-            } => {
-                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                tool_call_ids.insert(event_id, id.clone());
-                let args_str = args.to_string();
-                let tool_call = ToolCall::new(id.clone(), name.to_string())
-                    .raw_input(serde_json::from_str(&args_str).ok());
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCall(tool_call),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send tool call notification: {}", e);
-                }
-            }
-            AgentEvent::SubagentToolCall { name, args } => {
-                // Announce-only: subagent calls carry no correlating id, so
-                // they never receive a ToolCallUpdate. (Previously they
-                // hijacked the single pending slot, so the enclosing `task`
-                // call's result got attached to the subagent's entry.)
-                // Announced as already Completed, since nothing will ever
-                // update it out of the default Pending status.
-                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
-                let args_str = args.to_string();
-                let tool_call = ToolCall::new(id.clone(), format!("[subagent] {}", name))
-                    .status(ToolCallStatus::Completed)
-                    .raw_input(serde_json::from_str(&args_str).ok());
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCall(tool_call),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send subagent tool call notification: {}", e);
-                }
-            }
-            AgentEvent::ToolResult {
-                call_id: event_id,
-                output,
-                ..
-            } => {
-                // No announced ToolCall to update: an update carrying a
-                // ToolCallId the client was never told about is worse than
-                // silence, so drop it.
-                let Some(id) = tool_call_ids.remove(&event_id) else {
-                    tracing::warn!(
-                        "ACP tool result with no announced tool call (id={}); \
-                         skipping update",
-                        event_id.escape_debug(),
-                    );
-                    continue;
-                };
-                let fields = ToolCallUpdateFields::new()
-                    .status(ToolCallStatus::Completed)
-                    .content(vec![ToolCallContent::from(ContentBlock::Text(
-                        TextContent::new(output.to_string()),
-                    ))]);
-                let update = ToolCallUpdate::new(id, fields);
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::ToolCallUpdate(update),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send tool result notification: {}", e);
-                }
-            }
-            AgentEvent::Retrying { attempt, max } => {
-                // ACP has no status bar, so surface the retry as an agent
-                // thought. This keeps the client from going silent during the
-                // backoff delay and mirrors how `Reasoning` is forwarded.
-                let text = format!("retrying... ({}/{})", attempt, max);
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(text)));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentThoughtChunk(chunk),
-                );
-                if let Err(e) = cx.send_notification(notif) {
-                    tracing::warn!("ACP failed to send retry notification: {}", e);
-                }
-            }
-            AgentEvent::CompletionCall { .. } => {
-                // Mid-stream provider usage; ACP has no status bar to update, so
-                // there is nothing to surface for this event.
-            }
-            AgentEvent::Done { .. } => {
-                break;
-            }
+            AgentEvent::Token(ref text) => final_response.push_str(text),
+            AgentEvent::Done { .. } => break,
             AgentEvent::Error(err) => {
                 // Surface the error to the client instead of silently
                 // reporting EndTurn.
-                let chunk = ContentChunk::new(ContentBlock::Text(TextContent::new(format!(
-                    "[error: {}]",
-                    err
-                ))));
-                let notif = SessionNotification::new(
-                    session_id.clone(),
-                    SessionUpdate::AgentMessageChunk(chunk),
+                send_update(
+                    &cx,
+                    &session_id,
+                    SessionUpdate::AgentMessageChunk(text_chunk(format!("[error: {err}]"))),
                 );
-                let _ = cx.send_notification(notif);
                 let _ = responder.respond(PromptResponse::new(StopReason::Refusal));
                 return Ok(());
             }
+            _ => {}
         }
+        events.forward(event, &cx);
     }
 
     // Store assistant response in session history
@@ -483,6 +366,116 @@ async fn run_prompt(
 
     let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
     Ok(())
+}
+
+// --- Event Translation ---
+
+fn text_chunk(text: String) -> ContentChunk {
+    ContentChunk::new(ContentBlock::Text(TextContent::new(text)))
+}
+
+fn send_update(cx: &ConnectionTo<Client>, session_id: &SessionId, update: SessionUpdate) {
+    let notif = SessionNotification::new(session_id.clone(), update);
+    if let Err(e) = cx.send_notification(notif) {
+        tracing::warn!("ACP failed to send session update: {}", e);
+    }
+}
+
+/// Translates the [`AgentEvent`]s of one session into ACP session updates.
+/// Turn boundaries (`Done`, `Error`) are the caller's business; they produce
+/// no update here.
+struct EventForwarder {
+    session_id: SessionId,
+    /// In-flight main-agent calls by `AgentEvent` id (rig's
+    /// `internal_call_id`) to the ACP ToolCallId announced for them. A map,
+    /// not a single slot: a parallel batch streams every `ToolCall` before
+    /// the first `ToolResult`.
+    tool_call_ids: HashMap<CompactString, ToolCallId>,
+}
+
+impl EventForwarder {
+    fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            tool_call_ids: HashMap::new(),
+        }
+    }
+
+    fn forward(&mut self, event: AgentEvent, cx: &ConnectionTo<Client>) {
+        if let Some(update) = self.translate(event) {
+            send_update(cx, &self.session_id, update);
+        }
+    }
+
+    fn translate(&mut self, event: AgentEvent) -> Option<SessionUpdate> {
+        match event {
+            AgentEvent::Token(text) => Some(SessionUpdate::AgentMessageChunk(text_chunk(
+                text.to_string(),
+            ))),
+            AgentEvent::Reasoning(text) => Some(SessionUpdate::AgentThoughtChunk(text_chunk(
+                text.to_string(),
+            ))),
+            AgentEvent::ToolCall {
+                call_id: event_id,
+                name,
+                args,
+            } => {
+                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
+                self.tool_call_ids.insert(event_id, id.clone());
+                let tool_call = ToolCall::new(id, name.to_string())
+                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                Some(SessionUpdate::ToolCall(tool_call))
+            }
+            AgentEvent::SubagentToolCall { name, args } => {
+                // Announce-only: subagent calls carry no correlating id, so
+                // they never receive a ToolCallUpdate. Announced as already
+                // Completed, since nothing will ever update it out of the
+                // default Pending status.
+                let id = ToolCallId::new(uuid::Uuid::new_v4().to_string());
+                let tool_call = ToolCall::new(id, format!("[subagent] {}", name))
+                    .status(ToolCallStatus::Completed)
+                    .raw_input(serde_json::from_str(&args.to_string()).ok());
+                Some(SessionUpdate::ToolCall(tool_call))
+            }
+            AgentEvent::ToolResult {
+                call_id: event_id,
+                output,
+                ..
+            } => {
+                // No announced ToolCall to update: an update carrying a
+                // ToolCallId the client was never told about is worse than
+                // silence, so drop it.
+                let Some(id) = self.tool_call_ids.remove(&event_id) else {
+                    tracing::warn!(
+                        "ACP tool result with no announced tool call (id={}); \
+                         skipping update",
+                        event_id.escape_debug(),
+                    );
+                    return None;
+                };
+                let fields = ToolCallUpdateFields::new()
+                    .status(ToolCallStatus::Completed)
+                    .content(vec![ToolCallContent::from(ContentBlock::Text(
+                        TextContent::new(output.to_string()),
+                    ))]);
+                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                    id, fields,
+                )))
+            }
+            AgentEvent::Retrying { attempt, max } => {
+                // ACP has no status bar, so surface the retry as an agent
+                // thought. This keeps the client from going silent during the
+                // backoff delay and mirrors how `Reasoning` is forwarded.
+                Some(SessionUpdate::AgentThoughtChunk(text_chunk(format!(
+                    "retrying... ({}/{})",
+                    attempt, max
+                ))))
+            }
+            AgentEvent::CompletionCall { .. } | AgentEvent::Done { .. } | AgentEvent::Error(_) => {
+                None
+            }
+        }
+    }
 }
 
 // --- Permission ---
