@@ -1,15 +1,11 @@
 //! Sessions in the session store: load (with history replay), list, delete.
 
-use std::sync::Arc;
-
 use agent_client_protocol::schema::v1::*;
 use agent_client_protocol::{Client, ConnectionTo, Responder};
-use tokio::sync::Mutex;
-use tokio::sync::mpsc::unbounded_channel;
 
-use super::events::{EventForwarder, send_update, text_chunk};
-use super::permission::build_acp_permission;
-use super::{AcpSession, AcpState, LiveSession, unknown_session};
+use super::events::{send_update, text_chunk};
+use super::modes::mode_state;
+use super::{AcpState, unknown_session};
 use crate::session::{MessageRole, SessionMessage, ToolRecord, storage};
 
 /// The ACP id of a stored tool call, so a replayed result updates its call.
@@ -91,28 +87,16 @@ pub(super) async fn handle_load(
     };
     let updates = replay(&stored.messages);
 
-    let (permission, asks) = build_acp_permission(&state.cli, &state.cfg);
-    let (event_tx, events) = unbounded_channel();
-    let (ask_tx, asks) = asks.unzip();
-    let mut engine = (state.make_engine)(permission, ask_tx).with_events(event_tx);
-    if let Err(e) = engine.resume_session(stored) {
-        return responder.respond_with_internal_error(e.to_string());
-    }
-
-    let cancel = engine.cancel_handle();
-    let live = LiveSession {
-        engine,
-        events,
-        asks,
-        forwarder: EventForwarder::new(req.session_id.clone()),
+    let session = match state.open_session(|engine| engine.resume_session(stored)) {
+        Ok((_, session)) => session,
+        Err(e) => return responder.respond_with_internal_error(e.to_string()),
     };
-    let replaced = state.sessions.lock().await.insert(
-        req.session_id.clone(),
-        Arc::new(AcpSession {
-            live: Mutex::new(live),
-            cancel,
-        }),
-    );
+    let modes = mode_state(session.permission.as_ref());
+    let replaced = state
+        .sessions
+        .lock()
+        .await
+        .insert(req.session_id.clone(), session);
     if let Some(replaced) = replaced {
         replaced.cancel.cancel();
     }
@@ -120,7 +104,7 @@ pub(super) async fn handle_load(
     for update in updates {
         send_update(&cx, &req.session_id, update);
     }
-    responder.respond(LoadSessionResponse::new())
+    responder.respond(LoadSessionResponse::new().modes(modes))
 }
 
 /// The stored sessions, newest first, optionally only those of one folder.

@@ -1,9 +1,10 @@
 pub mod config;
 mod events;
+mod modes;
 mod permission;
 mod store;
 
-use events::EventForwarder;
+use events::{EventForwarder, send_update};
 #[cfg(test)]
 pub(crate) use permission::resolve_acp_mode;
 use permission::{ASK_ANNOUNCE_WAIT, ask_client, build_acp_permission, next_ask};
@@ -116,6 +117,39 @@ fn unknown_session(id: &SessionId) -> agent_client_protocol::Error {
 struct AcpSession {
     live: Mutex<LiveSession>,
     cancel: CancelHandle,
+    /// The session's permission checker, for mode switches that must not
+    /// wait for a running prompt. `None` when tools run unchecked.
+    permission: Option<PermCheck>,
+}
+
+impl AcpState {
+    /// Build a session's engine, its permission checker, ask channel and
+    /// event stream. `prepare` starts or resumes its conversation; the ACP
+    /// session id is the zerostack session id it ends up with.
+    fn open_session(
+        &self,
+        prepare: impl FnOnce(&mut Engine) -> anyhow::Result<()>,
+    ) -> anyhow::Result<(SessionId, Arc<AcpSession>)> {
+        let (permission, asks) = build_acp_permission(&self.cli, &self.cfg);
+        let (event_tx, events) = unbounded_channel();
+        let (ask_tx, asks) = asks.unzip();
+        let mut engine = (self.make_engine)(permission.clone(), ask_tx).with_events(event_tx);
+        prepare(&mut engine)?;
+        let session_id = SessionId::new(engine.session().id.to_string());
+        let cancel = engine.cancel_handle();
+        let live = LiveSession {
+            engine,
+            events,
+            asks,
+            forwarder: EventForwarder::new(session_id.clone()),
+        };
+        let session = Arc::new(AcpSession {
+            live: Mutex::new(live),
+            cancel,
+            permission,
+        });
+        Ok((session_id, session))
+    }
 }
 
 /// One ACP session: its engine plus the receiving end of the engine's event
@@ -140,6 +174,7 @@ impl LiveSession {
             asks,
             forwarder,
         } = self;
+        let mode_before = engine.permission_mode();
         let allowed: Arc<std::sync::Mutex<Vec<(CompactString, String)>>> = Arc::default();
         let out = {
             let run = engine.run_prompt(text);
@@ -180,6 +215,17 @@ impl LiveSession {
         };
         while let Ok(event) = events.try_recv() {
             forwarder.forward(event, cx);
+        }
+        // A prompt can switch the mode itself, through a prompt's
+        // `%%mode` or `/mode`.
+        if let Some(mode) = engine.permission_mode()
+            && Some(mode) != mode_before
+        {
+            send_update(
+                cx,
+                &forwarder.session_id,
+                SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(mode.to_string())),
+            );
         }
         let allowed = std::mem::take(&mut *allowed.lock().unwrap_or_else(|e| e.into_inner()));
         for (tool, pattern) in allowed {
@@ -331,6 +377,16 @@ pub(crate) async fn serve_on(
             },
             on_receive_request!(),
         )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: SetSessionModeRequest, responder, _cx| {
+                    let state = state.clone();
+                    async move { modes::handle_set_mode(req, responder, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
         .on_receive_notification(
             {
                 let state = state.clone();
@@ -384,37 +440,26 @@ async fn handle_new_session(
         tracing::warn!("{warning}");
     }
 
-    let (permission, asks) = build_acp_permission(&state.cli, &state.cfg);
-    let (event_tx, events) = unbounded_channel();
-    let (ask_tx, asks) = asks.unzip();
-    let mut engine = (state.make_engine)(permission, ask_tx).with_events(event_tx);
-    engine.new_session();
-    // The ACP session id is the zerostack session id, so a client can find
-    // the session in the store later.
-    let session_id = SessionId::new(engine.session().id.to_string());
-
+    let (session_id, session) = match state.open_session(|engine| {
+        engine.new_session();
+        Ok(())
+    }) {
+        Ok(opened) => opened,
+        Err(e) => return responder.respond_with_internal_error(e.to_string()),
+    };
     tracing::info!(
         "ACP new session: {} (cwd: {})",
         session_id,
         req.cwd.display()
     );
+    let modes = modes::mode_state(session.permission.as_ref());
+    state
+        .sessions
+        .lock()
+        .await
+        .insert(session_id.clone(), session);
 
-    let cancel = engine.cancel_handle();
-    let live = LiveSession {
-        engine,
-        events,
-        asks,
-        forwarder: EventForwarder::new(session_id.clone()),
-    };
-    state.sessions.lock().await.insert(
-        session_id.clone(),
-        Arc::new(AcpSession {
-            live: Mutex::new(live),
-            cancel,
-        }),
-    );
-
-    responder.respond(NewSessionResponse::new(session_id))
+    responder.respond(NewSessionResponse::new(session_id).modes(modes))
 }
 
 async fn handle_prompt(
