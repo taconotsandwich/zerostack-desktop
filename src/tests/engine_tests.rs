@@ -666,3 +666,18 @@ async fn with_events_forwards_the_turn_as_it_runs() {
     assert_eq!(text, "streamed reply");
     assert!(done, "the final event reaches the listener");
 }
+
+#[test]
+fn remember_allowed_keeps_each_entry_once() {
+    let (mut engine, _model) = engine_with_turns(vec![]);
+    assert!(engine.remember_allowed("write", "/tmp/*"));
+    assert!(!engine.remember_allowed("write", "/tmp/*"));
+    assert!(engine.remember_allowed("bash", "/tmp/*"));
+    let kept: Vec<(&str, &str)> = engine
+        .session()
+        .permission_allowlist
+        .iter()
+        .map(|entry| (entry.tool.as_str(), entry.pattern.as_str()))
+        .collect();
+    assert_eq!(kept, [("write", "/tmp/*"), ("bash", "/tmp/*")]);
+}

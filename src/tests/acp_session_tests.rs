@@ -15,6 +15,8 @@ use crate::cli::Cli;
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::extras::acp::{AcpState, EngineFactory, serve_on};
+use crate::permission::ask::AskSender;
+use crate::permission::checker::PermCheck;
 use crate::provider::AnyAgent;
 use crate::sandbox::Sandbox;
 use crate::session::Session;
@@ -22,7 +24,13 @@ use crate::tests::fake_model::{self, FakeModel, MockStreamEvent};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(super) fn isolate_data_dirs() -> std::path::PathBuf {
+/// Point the session store at a fresh directory. Hold the returned guard
+/// for the whole test: another test moving `ZS_DATA_DIR` mid-test would
+/// send this one's saves elsewhere.
+pub(super) fn isolate_data_dirs() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+    let lock = crate::tests::STORAGE_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let dir = std::env::temp_dir().join(format!(
         "zerostack-acp-tests-{}-{}",
         std::process::id(),
@@ -31,7 +39,7 @@ pub(super) fn isolate_data_dirs() -> std::path::PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     unsafe { std::env::set_var("ZS_DATA_DIR", &dir) };
     unsafe { std::env::set_var("ZS_CONFIG_DIR", &dir) };
-    dir
+    (dir, lock)
 }
 
 pub(super) fn test_cli(no_session: bool) -> Cli {
@@ -45,10 +53,34 @@ pub(super) fn test_cli(no_session: bool) -> Cli {
 
 /// An ACP server whose sessions run `model`.
 pub(super) fn state_with(cli: Cli, cfg: Config, model: FakeModel) -> AcpState {
+    state_from(cli, cfg, move |_, _| {
+        AnyAgent::Mock(rig::agent::AgentBuilder::new(model.clone()).build())
+    })
+}
+
+/// An ACP server whose sessions run `model` with the `write` tool, checked
+/// by the session's permission system.
+pub(super) fn state_with_write_tool(cli: Cli, cfg: Config, model: FakeModel) -> AcpState {
+    state_from(cli, cfg, move |permission, ask_tx| {
+        let write = crate::agent::tools::WriteTool::new(permission, ask_tx, None);
+        AnyAgent::Mock(
+            rig::agent::AgentBuilder::new(model.clone())
+                .tool(write)
+                .default_max_turns(4)
+                .build(),
+        )
+    })
+}
+
+fn state_from(
+    cli: Cli,
+    cfg: Config,
+    agent: impl Fn(Option<PermCheck>, Option<AskSender>) -> AnyAgent + Send + Sync + 'static,
+) -> AcpState {
     let (engine_cli, engine_cfg) = (cli.clone(), cfg.clone());
-    let make_engine: EngineFactory = Box::new(move |permission| {
-        let agent = AnyAgent::Mock(rig::agent::AgentBuilder::new(model.clone()).build());
-        Engine::new(
+    let make_engine: EngineFactory = Box::new(move |permission, ask_tx| {
+        let agent = agent(permission.clone(), ask_tx.clone());
+        let engine = Engine::new(
             engine_cli.clone(),
             engine_cfg.clone(),
             Session::new("anthropic", "claude-sonnet-4-5", 200_000, ""),
@@ -63,13 +95,18 @@ pub(super) fn state_with(cli: Cli, cfg: Config, model: FakeModel) -> AcpState {
             permission,
             Sandbox::new(false, "bwrap"),
         )
-        .with_agent(agent)
+        .with_agent(agent);
+        match ask_tx {
+            Some(ask_tx) => engine.with_ask(ask_tx),
+            None => engine,
+        }
     });
     AcpState::new(cli, cfg, make_engine)
 }
 
-/// How the peer answers `session/request_permission`.
-pub(super) type PermissionAnswer = Box<dyn FnMut(&Value) -> Value + Send>;
+/// How the peer answers `session/request_permission`: a result, or a
+/// JSON-RPC error object.
+pub(super) type PermissionAnswer = Box<dyn FnMut(&Value) -> Result<Value, Value> + Send>;
 
 /// The client end: sends requests, records every `session/update`, answers
 /// permission requests.
@@ -89,7 +126,7 @@ impl Peer {
             channel,
             next_id: 0,
             received: Vec::new(),
-            on_permission: Box::new(|_| json!({"outcome": {"outcome": "cancelled"}})),
+            on_permission: Box::new(|_| Ok(json!({"outcome": {"outcome": "cancelled"}}))),
         }
     }
 
@@ -133,8 +170,11 @@ impl Peer {
         };
         let message = serde_json::to_value(message).expect("serializable message");
         if message["method"] == "session/request_permission" {
-            let answer = (self.on_permission)(&message["params"]);
-            self.send(json!({"jsonrpc": "2.0", "id": message["id"], "result": answer}));
+            let reply = match (self.on_permission)(&message["params"]) {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": message["id"], "result": result}),
+                Err(error) => json!({"jsonrpc": "2.0", "id": message["id"], "error": error}),
+            };
+            self.send(reply);
         }
         self.received.push(message.clone());
         message
@@ -174,6 +214,15 @@ impl Peer {
         .await
     }
 
+    /// The params of every `session/request_permission` received so far.
+    pub fn permission_requests(&self) -> Vec<Value> {
+        self.received
+            .iter()
+            .filter(|m| m["method"] == "session/request_permission")
+            .map(|m| m["params"].clone())
+            .collect()
+    }
+
     /// The `update` of every `session/update` received so far, in order.
     pub fn updates(&self) -> Vec<Value> {
         self.received
@@ -196,7 +245,7 @@ impl Peer {
 #[tokio::test]
 async fn prompt_streams_the_reply_before_answering() {
     let _guard = fake_model::run_print_guard::acquire();
-    isolate_data_dirs();
+    let _data = isolate_data_dirs();
     let model = fake_model::text_turns([["hel", "lo"]]);
     let mut peer = Peer::start(state_with(test_cli(true), Config::default(), model));
     peer.initialize().await;
@@ -215,7 +264,7 @@ async fn prompt_streams_the_reply_before_answering() {
 #[tokio::test]
 async fn second_prompt_carries_the_history() {
     let _guard = fake_model::run_print_guard::acquire();
-    isolate_data_dirs();
+    let _data = isolate_data_dirs();
     let model = fake_model::text_turns([["first reply"], ["second reply"]]);
     let mut peer = Peer::start(state_with(test_cli(true), Config::default(), model.clone()));
     peer.initialize().await;
@@ -237,7 +286,7 @@ async fn second_prompt_carries_the_history() {
 async fn sessions_are_saved_unless_no_session() {
     let _guard = fake_model::run_print_guard::acquire();
     for no_session in [false, true] {
-        let dir = isolate_data_dirs();
+        let (dir, _data) = isolate_data_dirs();
         let model = fake_model::text_turns([["reply"]]);
         let mut peer = Peer::start(state_with(test_cli(no_session), Config::default(), model));
         peer.initialize().await;
@@ -252,7 +301,7 @@ async fn sessions_are_saved_unless_no_session() {
 #[tokio::test]
 async fn a_failed_turn_is_a_json_rpc_error() {
     let _guard = fake_model::run_print_guard::acquire();
-    isolate_data_dirs();
+    let _data = isolate_data_dirs();
     let model = FakeModel::from_stream_turns(vec![vec![MockStreamEvent::error("stream broke")]]);
     let mut peer = Peer::start(state_with(test_cli(true), Config::default(), model));
     peer.initialize().await;
@@ -265,11 +314,137 @@ async fn a_failed_turn_is_a_json_rpc_error() {
 #[tokio::test]
 async fn prompting_an_unknown_session_is_an_error() {
     let _guard = fake_model::run_print_guard::acquire();
-    isolate_data_dirs();
+    let _data = isolate_data_dirs();
     let model = fake_model::text_turns(Vec::<Vec<&str>>::new());
     let mut peer = Peer::start(state_with(test_cli(true), Config::default(), model));
     peer.initialize().await;
 
     let error = peer.prompt("nope", "hi").await.unwrap_err();
     assert_eq!(error["code"], -32602, "{error}");
+}
+
+// --- permission asks ---
+
+fn guarded() -> Config {
+    Config {
+        default_permission_mode: Some("guarded".to_string()),
+        ..Default::default()
+    }
+}
+
+fn outside_file() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("zerostack-acp-ask-{}.txt", uuid::Uuid::new_v4()))
+}
+
+/// One turn that writes `path` (an ask in guarded mode: it is outside the
+/// project), then one that answers.
+fn write_turns(path: &std::path::Path) -> Vec<Vec<MockStreamEvent>> {
+    vec![
+        vec![
+            MockStreamEvent::tool_call(
+                "call-1",
+                "write",
+                json!({"path": path.display().to_string(), "content": "from acp"}),
+            ),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+        vec![
+            MockStreamEvent::text("done".to_string()),
+            MockStreamEvent::final_response_with_default_usage(),
+        ],
+    ]
+}
+
+fn select(option: &'static str) -> PermissionAnswer {
+    Box::new(move |_| Ok(json!({"outcome": {"outcome": "selected", "optionId": option}})))
+}
+
+#[tokio::test]
+async fn allow_once_asks_on_the_announced_tool_call() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let _data = isolate_data_dirs();
+    let target = outside_file();
+    let model = FakeModel::from_stream_turns(write_turns(&target));
+    let mut peer = Peer::start(state_with_write_tool(test_cli(true), guarded(), model));
+    peer.on_permission = select("allow_once");
+    peer.initialize().await;
+    let session = peer.new_session().await;
+
+    peer.prompt(&session, "write it").await.expect("prompt");
+
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "from acp");
+    let asks = peer.permission_requests();
+    assert_eq!(asks.len(), 1);
+    let announced = peer
+        .updates()
+        .into_iter()
+        .find(|u| u["sessionUpdate"] == "tool_call")
+        .expect("tool call announced");
+    assert_eq!(asks[0]["toolCall"]["toolCallId"], announced["toolCallId"]);
+    let kinds: Vec<&str> = asks[0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| o["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["allow_once", "allow_always", "reject_once"]);
+    let _ = std::fs::remove_file(&target);
+}
+
+#[tokio::test]
+async fn allow_always_is_asked_once_and_kept_with_the_session() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let (dir, _data) = isolate_data_dirs();
+    let target = outside_file();
+    let mut turns = write_turns(&target);
+    turns.extend(write_turns(&target));
+    let model = FakeModel::from_stream_turns(turns);
+    let mut peer = Peer::start(state_with_write_tool(test_cli(false), guarded(), model));
+    peer.on_permission = select("allow_always");
+    peer.initialize().await;
+    let session = peer.new_session().await;
+
+    peer.prompt(&session, "write it").await.expect("prompt");
+    peer.prompt(&session, "write it again")
+        .await
+        .expect("prompt");
+
+    assert_eq!(peer.permission_requests().len(), 1);
+    let saved = std::fs::read_to_string(dir.join("sessions").join(format!("{session}.json")))
+        .expect("session saved");
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["permission_allowlist"][0]["tool"], "write", "{saved}");
+    let _ = std::fs::remove_file(&target);
+}
+
+#[tokio::test]
+async fn reject_and_a_failed_answer_deny_the_call() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let _data = isolate_data_dirs();
+    let answers: [PermissionAnswer; 2] = [
+        select("reject_once"),
+        Box::new(|_| Err(json!({"code": -32603, "message": "client broke"}))),
+    ];
+    for answer in answers {
+        let target = outside_file();
+        let model = FakeModel::from_stream_turns(write_turns(&target));
+        let mut peer = Peer::start(state_with_write_tool(
+            test_cli(true),
+            guarded(),
+            model.clone(),
+        ));
+        peer.on_permission = answer;
+        peer.initialize().await;
+        let session = peer.new_session().await;
+
+        peer.prompt(&session, "write it").await.expect("prompt");
+
+        assert!(!target.exists());
+        assert_eq!(peer.permission_requests().len(), 1);
+        assert_eq!(
+            model.requests().len(),
+            2,
+            "the denial goes back to the model"
+        );
+    }
 }
