@@ -7,7 +7,7 @@ use super::AcpState;
 use crate::permission::SecurityMode;
 use crate::permission::checker::PermCheck;
 
-const MODES: [(SecurityMode, &str); 6] = [
+pub(super) const MODES: [(SecurityMode, &str); 6] = [
     (
         SecurityMode::Standard,
         "Allow path tools within the working directory, ask for external paths.",

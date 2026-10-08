@@ -1,6 +1,7 @@
 pub mod config;
 mod events;
 mod modes;
+mod options;
 mod permission;
 mod store;
 
@@ -175,6 +176,7 @@ impl LiveSession {
             forwarder,
         } = self;
         let mode_before = engine.permission_mode();
+        let options_before = options::config_options(engine);
         let allowed: Arc<std::sync::Mutex<Vec<(CompactString, String)>>> = Arc::default();
         let out = {
             let run = engine.run_prompt(text);
@@ -225,6 +227,14 @@ impl LiveSession {
                 cx,
                 &forwarder.session_id,
                 SessionUpdate::CurrentModeUpdate(CurrentModeUpdate::new(mode.to_string())),
+            );
+        }
+        let options_after = options::config_options(engine);
+        if options_after != options_before {
+            send_update(
+                cx,
+                &forwarder.session_id,
+                SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(options_after)),
             );
         }
         let allowed = std::mem::take(&mut *allowed.lock().unwrap_or_else(|e| e.into_inner()));
@@ -387,6 +397,16 @@ pub(crate) async fn serve_on(
             },
             on_receive_request!(),
         )
+        .on_receive_request(
+            {
+                let state = state.clone();
+                move |req: SetSessionConfigOptionRequest, responder, _cx| {
+                    let state = state.clone();
+                    async move { options::handle_set_config_option(req, responder, &state).await }
+                }
+            },
+            on_receive_request!(),
+        )
         .on_receive_notification(
             {
                 let state = state.clone();
@@ -453,13 +473,18 @@ async fn handle_new_session(
         req.cwd.display()
     );
     let modes = modes::mode_state(session.permission.as_ref());
+    let config_options = options::config_options(&session.live.lock().await.engine);
     state
         .sessions
         .lock()
         .await
         .insert(session_id.clone(), session);
 
-    responder.respond(NewSessionResponse::new(session_id).modes(modes))
+    responder.respond(
+        NewSessionResponse::new(session_id)
+            .modes(modes)
+            .config_options(config_options),
+    )
 }
 
 async fn handle_prompt(
