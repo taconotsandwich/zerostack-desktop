@@ -295,6 +295,81 @@ impl Engine {
         }
     }
 
+    /// Add a file to context. Returns a status message when one applies.
+    pub async fn add_context_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<Option<String>> {
+        let path = Self::resolve_path(path.to_string_lossy().as_ref());
+        if !path.exists() {
+            anyhow::bail!("file not found: {}", path.display());
+        }
+        if !path.is_file() {
+            anyhow::bail!("not a file: {}", path.display());
+        }
+        #[cfg(feature = "multimodal")]
+        if crate::extras::multimodal::detect_media(&path).is_some() {
+            match crate::extras::multimodal::load_attachment(&path) {
+                Ok(attachment) => {
+                    let size = attachment.size();
+                    self.session.pending_media.push(attachment);
+                    return Ok(Some(format!("attached: {} ({size}B)", path.display())));
+                }
+                Err(error) => anyhow::bail!("failed to load media: {error}"),
+            }
+        }
+        let canonical = path.canonicalize().unwrap_or(path);
+        if self.context.extra_files.contains(&canonical) {
+            return Ok(Some(format!("already added: {}", canonical.display())));
+        }
+        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+        self.context.extra_files.push(canonical.clone());
+        let model_id = self.session.model.to_string();
+        self.rebuild_agent(&model_id).await;
+        Ok(Some(format!("added: {} ({size}B)", canonical.display())))
+    }
+
+    /// Remove a file from context. Returns a status message when one applies.
+    pub async fn drop_context_file(
+        &mut self,
+        path: std::path::PathBuf,
+    ) -> anyhow::Result<Option<String>> {
+        let path = Self::resolve_path(path.to_string_lossy().as_ref());
+        let canonical = path.canonicalize().unwrap_or(path);
+        if let Some(index) = self
+            .context
+            .extra_files
+            .iter()
+            .position(|file| file == &canonical)
+        {
+            self.context.extra_files.remove(index);
+            let model_id = self.session.model.to_string();
+            self.rebuild_agent(&model_id).await;
+            return Ok(Some(format!("dropped: {}", canonical.display())));
+        }
+        anyhow::bail!("not in context: {} (use /add to see)", canonical.display())
+    }
+
+    /// Remove all context files and pending media.
+    pub async fn clear_context_files(&mut self) -> anyhow::Result<Option<String>> {
+        let file_count = self.context.extra_files.len();
+        #[cfg(feature = "multimodal")]
+        let media_count = self.session.pending_media.len();
+        #[cfg(not(feature = "multimodal"))]
+        let media_count = 0;
+        if file_count == 0 && media_count == 0 {
+            return Ok(None);
+        }
+        if file_count > 0 {
+            self.context.extra_files.clear();
+            let model_id = self.session.model.to_string();
+            self.rebuild_agent(&model_id).await;
+        }
+        #[cfg(feature = "multimodal")]
+        self.session.pending_media.clear();
+        Ok(Some(format!("dropped {file_count} file(s)")))
+    }
+
     /// Toggle reasoning on or off.
     pub async fn toggle_reasoning(&mut self) {
         self.reasoning_enabled = !self.reasoning_enabled;
@@ -1916,26 +1991,20 @@ impl Engine {
         match parts[0] {
             "/add" => self.cmd_add(parts, sink).await,
             "/drop" => self.cmd_drop(parts, sink).await,
-            "/drop-all" => {
-                let file_count = self.context.extra_files.len();
-                #[cfg(feature = "multimodal")]
-                let media_count = self.session.pending_media.len();
-                #[cfg(not(feature = "multimodal"))]
-                let media_count = 0;
-                if file_count == 0 && media_count == 0 {
+            "/drop-all" => match self.clear_context_files().await {
+                Ok(Some(message)) => {
+                    sink.write_ok(message);
+                    Ok(SlashFlow::Done)
+                }
+                Ok(None) => {
                     sink.write_ok("no files or media to drop");
-                    return Ok(SlashFlow::Done);
+                    Ok(SlashFlow::Done)
                 }
-                if file_count > 0 {
-                    self.context.extra_files.clear();
-                    let model_id = self.session.model.to_string();
-                    self.rebuild_agent(&model_id).await;
+                Err(error) => {
+                    sink.write_error(error.to_string());
+                    Ok(SlashFlow::Done)
                 }
-                #[cfg(feature = "multimodal")]
-                self.session.pending_media.clear();
-                sink.write_ok(format!("dropped {file_count} file(s)"));
-                Ok(SlashFlow::Done)
-            }
+            },
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -1957,37 +2026,14 @@ impl Engine {
             }
             return Ok(SlashFlow::Done);
         }
-        let path = Self::resolve_path(parts[1]);
-        if !path.exists() {
-            sink.write_error(format!("file not found: {}", path.display()));
-            return Ok(SlashFlow::Done);
+        match self
+            .add_context_file(std::path::PathBuf::from(parts[1]))
+            .await
+        {
+            Ok(Some(message)) => sink.write_ok(message),
+            Ok(None) => {}
+            Err(error) => sink.write_error(error.to_string()),
         }
-        if !path.is_file() {
-            sink.write_error(format!("not a file: {}", path.display()));
-            return Ok(SlashFlow::Done);
-        }
-        #[cfg(feature = "multimodal")]
-        if crate::extras::multimodal::detect_media(&path).is_some() {
-            match crate::extras::multimodal::load_attachment(&path) {
-                Ok(attachment) => {
-                    let size = attachment.size();
-                    self.session.pending_media.push(attachment);
-                    sink.write_ok(format!("attached: {} ({size}B)", path.display()));
-                }
-                Err(e) => sink.write_error(format!("failed to load media: {e}")),
-            }
-            return Ok(SlashFlow::Done);
-        }
-        let canonical = path.canonicalize().unwrap_or(path);
-        if self.context.extra_files.contains(&canonical) {
-            sink.write_ok(format!("already added: {}", canonical.display()));
-            return Ok(SlashFlow::Done);
-        }
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        self.context.extra_files.push(canonical.clone());
-        let model_id = self.session.model.to_string();
-        self.rebuild_agent(&model_id).await;
-        sink.write_ok(format!("added: {} ({size}B)", canonical.display()));
         Ok(SlashFlow::Done)
     }
 
@@ -2000,24 +2046,14 @@ impl Engine {
             sink.write_error("usage: /drop <path-or-index>");
             return Ok(SlashFlow::Done);
         }
-        let path = Self::resolve_path(parts[1]);
-        let canonical = path.canonicalize().unwrap_or(path);
-        if let Some(i) = self
-            .context
-            .extra_files
-            .iter()
-            .position(|f| f == &canonical)
+        match self
+            .drop_context_file(std::path::PathBuf::from(parts[1]))
+            .await
         {
-            self.context.extra_files.remove(i);
-            let model_id = self.session.model.to_string();
-            self.rebuild_agent(&model_id).await;
-            sink.write_ok(format!("dropped: {}", canonical.display()));
-            return Ok(SlashFlow::Done);
+            Ok(Some(message)) => sink.write_ok(message),
+            Ok(None) => {}
+            Err(error) => sink.write_error(error.to_string()),
         }
-        sink.write_error(format!(
-            "not in context: {} (use /add to see)",
-            canonical.display()
-        ));
         Ok(SlashFlow::Done)
     }
 
