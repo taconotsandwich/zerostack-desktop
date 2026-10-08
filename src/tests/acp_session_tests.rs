@@ -24,10 +24,19 @@ use crate::tests::fake_model::{self, FakeModel, MockStreamEvent};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Locks held for the whole of an ACP test: the process folder, which a
+/// session may move to, and the session store directory.
+pub(super) struct TestGuard {
+    _cwd: std::sync::MutexGuard<'static, ()>,
+    _storage: std::sync::MutexGuard<'static, ()>,
+}
+
 /// Point the session store at a fresh directory. Hold the returned guard
 /// for the whole test: another test moving `ZS_DATA_DIR` mid-test would
-/// send this one's saves elsewhere.
-pub(super) fn isolate_data_dirs() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+/// send this one's saves elsewhere, and one changing the process folder
+/// would make a session here ask for a different folder.
+pub(super) fn isolate_data_dirs() -> (std::path::PathBuf, TestGuard) {
+    let cwd = crate::tests::acquire_cwd();
     let lock = crate::tests::STORAGE_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -39,7 +48,13 @@ pub(super) fn isolate_data_dirs() -> (std::path::PathBuf, std::sync::MutexGuard<
     std::fs::create_dir_all(&dir).unwrap();
     unsafe { std::env::set_var("ZS_DATA_DIR", &dir) };
     unsafe { std::env::set_var("ZS_CONFIG_DIR", &dir) };
-    (dir, lock)
+    (
+        dir,
+        TestGuard {
+            _cwd: cwd,
+            _storage: lock,
+        },
+    )
 }
 
 pub(super) fn test_cli(no_session: bool) -> Cli {

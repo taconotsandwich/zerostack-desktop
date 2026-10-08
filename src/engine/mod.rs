@@ -242,6 +242,25 @@ impl Engine {
         self
     }
 
+    /// Register MCP tools on the agents this engine builds from now on.
+    #[cfg(feature = "mcp")]
+    pub fn set_mcp(&mut self, manager: McpClientManager) {
+        self.mcp_manager = Some(manager);
+        self.agent = None;
+    }
+
+    /// Work in `dir` from now on: the process changes into it, and the
+    /// session, context files and agent follow.
+    pub fn change_dir(&mut self, dir: &std::path::Path) -> anyhow::Result<()> {
+        std::env::set_current_dir(dir)
+            .map_err(|e| anyhow::anyhow!("failed to change directory to {}: {e}", dir.display()))?;
+        self.session.working_dir = CompactString::new(dir.to_string_lossy());
+        self.context.reload();
+        crate::ui::apply_current_prompt_mode(&mut self.context, &self.permission);
+        self.agent = None;
+        Ok(())
+    }
+
     /// Publish run state over the same status socket the TUI reports to.
     pub fn with_status_signals(mut self, signals: StatusSignals) -> Self {
         self.status_signals = Some(signals);

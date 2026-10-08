@@ -97,20 +97,17 @@ pub(super) async fn handle_load(
     };
     let updates = replay(&stored.messages);
 
-    let session = match state.open_session(|engine| engine.resume_session(stored)) {
+    let started = state
+        .start_session(&req.cwd, req.mcp_servers, Some(&req.session_id), |engine| {
+            engine.resume_session(stored)
+        })
+        .await;
+    let session = match started {
         Ok((_, session)) => session,
-        Err(e) => return responder.respond_with_internal_error(e.to_string()),
+        Err(e) => return responder.respond_with_error(e),
     };
     let modes = mode_state(session.permission.as_ref());
     let config_options = config_options(&session.live.lock().await.engine);
-    let replaced = state
-        .sessions
-        .lock()
-        .await
-        .insert(req.session_id.clone(), session);
-    if let Some(replaced) = replaced {
-        replaced.cancel.cancel();
-    }
 
     for update in updates {
         send_update(&cx, &req.session_id, update);
