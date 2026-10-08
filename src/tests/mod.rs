@@ -50,6 +50,8 @@ mod hooks;
 #[cfg(test)]
 mod input_tests;
 #[cfg(test)]
+mod interactive_ask_tests;
+#[cfg(test)]
 mod list_dir_tests;
 #[cfg(test)]
 mod logging_tests;
