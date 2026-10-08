@@ -61,6 +61,28 @@ impl App {
         Task::none()
     }
 
+    /// Stops the running turn. The queue goes back into the composer, since
+    /// whoever stops a turn has not decided on what was meant to follow it,
+    /// and an open permission ask is answered as cancelled.
+    pub(super) fn stop(&mut self) {
+        if let Some(worker) = &self.worker {
+            worker.cancel();
+        }
+        if let Some(request) = self.permission.take() {
+            drop(
+                request
+                    .reply
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take(),
+            );
+        }
+        let queued = std::mem::take(&mut self.queued);
+        if !queued.is_empty() {
+            self.restore_into_composer(queued);
+        }
+    }
+
     /// Moves a queued `text` back into the composer to edit.
     pub(super) fn edit_queued(&mut self, text: String) -> Task<Message> {
         if !self.unqueue(&text) {

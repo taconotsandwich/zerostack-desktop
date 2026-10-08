@@ -87,6 +87,7 @@ pub(super) enum Message {
     Ready(worker::Reply),
     Edit(text_editor::Action),
     Send,
+    Stop,
     Unqueue(String),
     EditQueued(String),
     Copy(String),
@@ -615,6 +616,7 @@ impl App {
             Message::Send if self.busy && !self.picking && self.snapshot.is_some() => {
                 self.queue_composer()
             }
+            Message::Stop if self.busy => self.stop(),
             Message::Unqueue(text) => {
                 self.unqueue(&text);
             }
