@@ -682,6 +682,38 @@ mod tests {
     }
 
     #[test]
+    fn merge_prompt_names_the_branches_and_forbids_cleanup() {
+        let prompt = merge_prompt("feat", "main", "/repo", "/repo-feat");
+        assert!(prompt.contains("branch 'feat' at '/repo-feat'"));
+        assert!(prompt.contains("Merge it into 'main' in the main repo at '/repo'"));
+        assert!(prompt.contains("git merge --squash feat"));
+        assert!(prompt.contains("Do NOT run `git worktree remove`"));
+    }
+
+    #[test]
+    fn finish_agent_merge_cleans_up_only_a_landed_branch() {
+        let _lock = acquire_cwd();
+        let repo = TempRepo::new("finish", "main");
+        let info = worktree_info_for(&repo, &unique_name("feat"));
+        std::fs::write(info.worktree_path.join("f.txt"), "f\n").unwrap();
+        run(&info.worktree_path, &["add", "f.txt"]);
+        run(&info.worktree_path, &["commit", "-m", "f"]);
+        repo.cd();
+        let main_path = repo.root.display().to_string();
+        let wt_path = info.worktree_path.display().to_string();
+
+        let kept = finish_agent_merge(&main_path, &wt_path, &info.branch, "main", false);
+        assert!(kept.contains("is not merged into 'main'"), "{kept}");
+        assert!(info.worktree_path.exists());
+
+        run(&repo.root, &["merge", "--no-edit", &info.branch]);
+        let merged = finish_agent_merge(&main_path, &wt_path, &info.branch, "main", false);
+        assert!(merged.starts_with("merged '"), "{merged}");
+        assert!(!info.worktree_path.exists());
+        assert!(!branch_exists(&repo.root, &info.branch));
+    }
+
+    #[test]
     fn test_verify_merged_after_squash() {
         let _lock = acquire_cwd();
         let repo = TempRepo::new("verify", "main");
