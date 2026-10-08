@@ -519,6 +519,12 @@ impl Engine {
         Ok(Some(format!("added: {} ({size}B)", canonical.display())))
     }
 
+    /// Send media (an image, audio, a document) with the next prompt.
+    #[cfg(feature = "multimodal")]
+    pub fn attach_media(&mut self, attachment: crate::extras::multimodal::MediaAttachment) {
+        self.session.pending_media.push(attachment);
+    }
+
     /// Remove a file from context. Returns a status message when one applies.
     pub async fn drop_context_file(
         &mut self,
