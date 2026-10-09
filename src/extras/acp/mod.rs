@@ -1,6 +1,7 @@
 mod commands;
 pub mod config;
 mod events;
+mod meta;
 mod modes;
 mod options;
 mod permission;
@@ -569,24 +570,10 @@ async fn handle_new_session(
         NewSessionResponse::new(session_id.clone())
             .modes(modes)
             .config_options(config_options)
-            .meta(notices_meta(notices)),
+            .meta(meta::notices(notices)),
     )?;
     send_update(&cx, &session_id, commands::commands_update());
     Ok(())
-}
-
-/// What a client should show about a session it opened, as response
-/// `_meta`: `{"zerostack": {"notices": [...]}}`, when there is any.
-pub(super) fn notices_meta(notices: Vec<String>) -> Option<Meta> {
-    if notices.is_empty() {
-        return None;
-    }
-    let mut meta = Meta::new();
-    meta.insert(
-        "zerostack".to_string(),
-        serde_json::json!({ "notices": notices }),
-    );
-    Some(meta)
 }
 
 async fn handle_prompt(
@@ -611,6 +598,7 @@ async fn handle_prompt(
         }
     };
 
+    let unsaved = state.cli.no_session;
     // The turn runs off the dispatch loop: it streams updates and may wait on
     // the client, which needs the loop free.
     cx.spawn({
@@ -622,12 +610,13 @@ async fn handle_prompt(
                 live.engine.attach_media(attachment);
             }
             let out = live.run(prompt.text, &cx).await;
+            let meta = unsaved.then(|| meta::session(live.engine.session()));
             match out.error {
                 Some(error) => responder.respond_with_internal_error(error),
                 None if out.cancelled => {
-                    responder.respond(PromptResponse::new(StopReason::Cancelled))
+                    responder.respond(PromptResponse::new(StopReason::Cancelled).meta(meta))
                 }
-                None => responder.respond(PromptResponse::new(StopReason::EndTurn)),
+                None => responder.respond(PromptResponse::new(StopReason::EndTurn).meta(meta)),
             }
         }
     })
