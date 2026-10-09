@@ -70,7 +70,7 @@ impl App {
     pub(super) fn project_picker(&self) -> Element<'_, Message> {
         let mut choices = column![components::action(
             "Open folder…",
-            (!self.busy && !self.picking).then_some(Message::PickProject),
+            (self.can_switch() && !self.picking).then_some(Message::PickProject),
         )]
         .spacing(layout::SM);
         for path in &self.preferences.projects {
@@ -91,7 +91,10 @@ impl App {
                 .padding(layout::MD)
                 .width(Fill)
                 .style(style::flat)
-                .on_press_maybe((!self.busy).then_some(Message::OpenProject(path.clone()))),
+                .on_press_maybe(
+                    self.can_switch()
+                        .then_some(Message::OpenProject(path.clone())),
+                ),
             );
         }
         choices.into()

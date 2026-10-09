@@ -12,6 +12,7 @@ mod layout;
 mod live;
 mod operations;
 mod panels;
+mod parallel;
 mod preferences;
 mod queue;
 mod reply;

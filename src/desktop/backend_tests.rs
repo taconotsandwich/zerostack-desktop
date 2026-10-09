@@ -84,10 +84,11 @@ fn attaching_keeps_existing_files_once_and_reports_missing_ones() {
 }
 
 #[test]
-fn read_doc_serves_bundled_docs_and_rejects_traversal() {
-    let content = read_doc("GET_STARTED.md").expect("bundled doc");
-    assert!(content.to_lowercase().contains("zerostack"));
+fn read_doc_rejects_empty_and_path_names() {
+    // Reading a real doc goes through the global data directory, which other
+    // tests repoint concurrently, so only the name checks are tested here.
     assert!(read_doc("").is_err());
     assert!(read_doc("../secrets.md").is_err());
-    assert!(read_doc("missing-file.md").is_err());
+    assert!(read_doc("a/b.md").is_err());
+    assert!(read_doc(".hidden").is_err());
 }

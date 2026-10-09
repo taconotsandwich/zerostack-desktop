@@ -87,7 +87,7 @@ impl App {
             let new = components::icon_action(
                 Icon::NewChat,
                 "New conversation",
-                (!self.busy).then_some(Message::NewConversation),
+                self.can_switch().then_some(Message::NewConversation),
             )
             .width(Fill)
             .style(move |theme: &Theme, status| {
@@ -112,7 +112,7 @@ impl App {
             heading = heading.push(icon_button(
                 Icon::Folder,
                 "Open project",
-                (!self.busy).then_some(Message::Show(Panel::Projects)),
+                self.can_switch().then_some(Message::Show(Panel::Projects)),
             ));
             if let Some(command) = commands::find("/import") {
                 heading = heading.push(icon_button(
@@ -128,9 +128,20 @@ impl App {
                 .sessions
                 .iter()
                 .any(|session| session.id == current.id);
+            // Conversations running aside are listed even before their
+            // first turn has saved them.
+            let aside = self
+                .running
+                .iter()
+                .map(|running| &running.session)
+                .filter(|session| {
+                    session.id != current.id
+                        && !snapshot.sessions.iter().any(|saved| saved.id == session.id)
+                });
             let sessions = (!saved)
                 .then_some(current)
                 .into_iter()
+                .chain(aside)
                 .chain(&snapshot.sessions)
                 .filter(|session| !self.deleted.contains(session.id.as_str()));
             for group in groups(sessions, &self.project) {
@@ -235,7 +246,7 @@ impl App {
         let new = icon_button(
             Icon::NewChat,
             "New conversation",
-            (!self.busy).then_some(start),
+            self.can_switch().then_some(start),
         );
         hover(
             label,
@@ -258,7 +269,13 @@ impl App {
                 .on_submit(Message::SaveName)
                 .into();
         }
-        let title = worker::title(session);
+        let mut title = worker::title(session);
+        if let Some(running) = self.running(&id) {
+            title = match running.permission {
+                Some(_) => format!("Needs approval · {title}"),
+                None => format!("Running · {title}"),
+            };
+        }
         let label = mouse_area(components::row_label(title))
             .on_press(Message::Select(id.clone()))
             .on_double_click(Message::Rename(id.clone()));
