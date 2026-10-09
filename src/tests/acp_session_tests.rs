@@ -331,10 +331,19 @@ async fn sessions_are_saved_unless_no_session() {
         let mut peer = Peer::start(state_with(test_cli(no_session), Config::default(), model));
         peer.initialize().await;
         let session = peer.new_session().await;
-        peer.prompt(&session, "hello").await.expect("prompt");
+        let answer = peer.prompt(&session, "hello").await.expect("prompt");
 
         let file = dir.join("sessions").join(format!("{session}.json"));
         assert_eq!(file.exists(), !no_session, "{}", file.display());
+        // Unsaved, the conversation comes back with the answer instead.
+        let returned = &answer["_meta"]["zerostack"]["session"];
+        if no_session {
+            assert_eq!(returned["id"], session, "{answer}");
+            assert_eq!(returned["messages"][0]["content"], "hello", "{answer}");
+            assert_eq!(returned["messages"][1]["content"], "reply", "{answer}");
+        } else {
+            assert!(returned.is_null(), "{answer}");
+        }
     }
 }
 

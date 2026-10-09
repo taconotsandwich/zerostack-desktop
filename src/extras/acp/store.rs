@@ -134,7 +134,7 @@ pub(super) async fn handle_load(
         LoadSessionResponse::new()
             .modes(modes)
             .config_options(config_options)
-            .meta(super::notices_meta(notices)),
+            .meta(super::meta::notices(notices)),
     )?;
     send_update(&cx, &req.session_id, commands_update());
     send_update(&cx, &req.session_id, info);
