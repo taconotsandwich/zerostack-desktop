@@ -122,13 +122,21 @@ impl Engine {
         Ok(())
     }
 
-    /// `/loop <prompt>` runs the TUI's iteration loop inline until it
-    /// stops: the iteration cap, the plan completing, a failure or a cancel.
+    /// `/loop [--max <n>] <prompt>` runs the TUI's iteration loop inline
+    /// until it stops: the iteration cap (`--max`, else `--loop-max`), a
+    /// failure or a cancel.
     #[cfg(feature = "loop")]
     pub(super) async fn slash_loop(&mut self, parts: &[&str], sink: &mut StringSink) {
         use crate::extras::r#loop::{DEFAULT_PLAN_FILENAME, LoopState, SUMMARY_TRUNCATION_CHARS};
 
-        let prompt = parts[1..].join(" ");
+        let rest = parts[1..].join(" ");
+        let (max, prompt) = match loop_args(&rest) {
+            Ok(args) => args,
+            Err(usage) => {
+                sink.write_error(usage);
+                return;
+            }
+        };
         match prompt.trim() {
             "" | "status" => {
                 sink.write_ok("no active loop (/loop <prompt> runs one)");
@@ -148,10 +156,10 @@ impl Engine {
         let mut state = LoopState::new(
             prompt.trim().to_string(),
             plan_file,
-            self.cli.loop_max,
+            max.or(self.cli.loop_max),
             self.cli.loop_run.clone(),
         );
-        while !state.should_stop() {
+        while state.max_iterations.is_none_or(|max| state.iteration < max) {
             state.iteration += 1;
             self.announce(
                 sink,
@@ -361,5 +369,25 @@ impl Engine {
                 false,
             ),
         }
+    }
+}
+
+/// Split `/loop`'s arguments into the `--max <n>` cap, when given first, and
+/// the prompt.
+#[cfg(feature = "loop")]
+pub(crate) fn loop_args(rest: &str) -> Result<(Option<u32>, &str), &'static str> {
+    let rest = rest.trim_start();
+    let Some(after) = rest
+        .strip_prefix("--max")
+        .filter(|after| after.is_empty() || after.starts_with(char::is_whitespace))
+    else {
+        return Ok((None, rest));
+    };
+    let usage = "usage: /loop [--max <n>] <prompt>";
+    let after = after.trim_start();
+    let (count, prompt) = after.split_once(' ').unwrap_or((after, ""));
+    match count.parse::<u32>() {
+        Ok(max) if max > 0 && !prompt.trim().is_empty() => Ok((Some(max), prompt.trim())),
+        _ => Err(usage),
     }
 }

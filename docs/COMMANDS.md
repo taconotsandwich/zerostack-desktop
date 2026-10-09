@@ -11,7 +11,8 @@ Most also run without the TUI, sent as a prompt to an ACP session (see
 TUI's loop run inline instead: `/rewind` lists the messages and
 `/rewind <n>` cuts back to before message `n`; `/loop`, `/wt-merge` and
 `/mcp login` run to the end of the prompt, showing their progress as they go,
-and a cancel stops them. Commands about the terminal itself (`/quit`,
+and a cancel stops them. `/loop --max <n> <prompt>` caps a loop at `n`
+iterations, over `--loop-max`. Commands about the terminal itself (`/quit`,
 `/tutor`, the pickers) are not offered.
 
 ## Session

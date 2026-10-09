@@ -94,12 +94,11 @@ async fn loop_runs_its_iterations_and_shows_progress_as_it_goes() {
 
     let out = engine.run_string("/loop tidy the docs").await.unwrap();
 
-    let runs = model.requests().len();
-    assert!(runs >= 1, "{}", out.text);
+    assert_eq!(model.requests().len(), 1, "{}", out.text);
     assert!(out.text.contains("did a"), "{}", out.text);
+    assert!(!out.text.contains("did b"), "{}", out.text);
     assert!(
-        out.text
-            .contains(&format!("[loop] stopped after {runs} iteration(s)")),
+        out.text.contains("[loop] stopped after 1 iteration(s)"),
         "{}",
         out.text
     );
@@ -112,6 +111,42 @@ async fn loop_runs_its_iterations_and_shows_progress_as_it_goes() {
     assert!(streamed.contains("[loop] launching"), "{streamed}");
     assert!(streamed.contains("did a"), "{streamed}");
     assert!(streamed.contains("[loop] stopped"), "{streamed}");
+}
+
+#[cfg(feature = "loop")]
+#[tokio::test]
+async fn loop_max_caps_the_iterations_over_the_cli_cap() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let cli = Cli {
+        loop_max: Some(5),
+        ..test_cli()
+    };
+    let (mut engine, model) = engine(cli, vec![vec!["did a"], vec!["did b"], vec!["extra"]]);
+    let out = engine
+        .run_string("/loop --max 2 tidy the docs")
+        .await
+        .unwrap();
+    assert_eq!(model.requests().len(), 2, "{}", out.text);
+    assert!(
+        out.text.contains("[loop] stopped after 2 iteration(s)"),
+        "{}",
+        out.text
+    );
+}
+
+#[cfg(feature = "loop")]
+#[test]
+fn loop_args_read_a_leading_max() {
+    use crate::engine::headless::loop_args;
+    assert_eq!(loop_args("tidy up"), Ok((None, "tidy up")));
+    assert_eq!(loop_args("--max 3 tidy up"), Ok((Some(3), "tidy up")));
+    assert_eq!(
+        loop_args("--maximize speed"),
+        Ok((None, "--maximize speed"))
+    );
+    for bad in ["--max", "--max x tidy", "--max 0 tidy", "--max 3"] {
+        assert!(loop_args(bad).is_err(), "{bad}");
+    }
 }
 
 #[cfg(feature = "loop")]
