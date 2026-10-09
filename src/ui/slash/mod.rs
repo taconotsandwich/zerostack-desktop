@@ -282,7 +282,14 @@ pub(crate) fn write_error(renderer: &mut Renderer, msg: impl std::fmt::Display) 
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
 /// reuses the same undo primitive as `/undo`.
 pub fn undo_last(session: &mut Session) -> usize {
-    let len = session.messages.len();
+    // Command transcripts after the exchange go with it.
+    let commands = session
+        .messages
+        .iter()
+        .rev()
+        .take_while(|message| message.role == MessageRole::Command)
+        .count();
+    let len = session.messages.len() - commands;
     if len == 0 {
         return 0;
     }

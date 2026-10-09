@@ -802,7 +802,10 @@ impl Engine {
             if t == "/btw" || t.starts_with("/btw ") {
                 return Ok(self.run_btw(t).await);
             }
-            return Ok(self.run_slash(text).await);
+            let before = (self.session.id.clone(), self.session.messages.len());
+            let out = self.run_slash(text).await;
+            self.record_command(before, &out);
+            return Ok(out);
         }
         if let Some(out) = self.handle_dot_command(text).await? {
             return Ok(out);
@@ -1528,6 +1531,20 @@ impl Engine {
             sink.write_line(format!("> {line}"));
         }
         sink.write_line("");
+    }
+
+    /// Keep a slash command's transcript in a started conversation, unless
+    /// the command changed the conversation itself (`/clear`, `/undo`,
+    /// `/new`, a turn it ran, ...). A command alone does not start one.
+    fn record_command(&mut self, before: (CompactString, usize), out: &RunOutput) {
+        if out.text.trim().is_empty()
+            || before.1 == 0
+            || before != (self.session.id.clone(), self.session.messages.len())
+        {
+            return;
+        }
+        self.session.add_command(&out.text);
+        self.save_session_best_effort();
     }
 
     fn save_session_best_effort(&self) {
