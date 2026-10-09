@@ -29,6 +29,9 @@ impl CheckResult {
 pub struct PermissionChecker {
     rules: HashMap<String, Vec<(Pattern, Action)>>,
     default_action: Action,
+    /// What standard mode does with a bash command no rule matches: the
+    /// configured default, else ask.
+    command_default: Action,
     ext_dir_rules: Vec<(Pattern, Action)>,
     doom_loop_action: Action,
     working_dir: String,
@@ -100,11 +103,9 @@ impl PermissionChecker {
         working_dir: Option<std::path::PathBuf>,
         permission_modes: Option<Vec<String>>,
     ) -> Self {
-        let default_action = configs
-            .glob
-            .default
-            .or(configs.regex.default)
-            .unwrap_or(Action::Allow);
+        let configured_default = configs.glob.default.or(configs.regex.default);
+        let default_action = configured_default.unwrap_or(Action::Allow);
+        let command_default = configured_default.unwrap_or(Action::Ask);
         let doom_loop_action = configs
             .glob
             .doom_loop
@@ -192,6 +193,7 @@ impl PermissionChecker {
         PermissionChecker {
             rules,
             default_action,
+            command_default,
             ext_dir_rules,
             doom_loop_action,
             working_dir,
@@ -251,7 +253,11 @@ impl PermissionChecker {
                     Action::Ask
                 }
             }),
-            SecurityMode::Standard => base.unwrap_or(self.default_action),
+            SecurityMode::Standard => base.unwrap_or(if tool == "bash" {
+                self.command_default
+            } else {
+                self.default_action
+            }),
             SecurityMode::Yolo => match base {
                 Some(Action::Deny) => Action::Deny,
                 Some(other) => other,
