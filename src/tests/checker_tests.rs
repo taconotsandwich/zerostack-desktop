@@ -92,6 +92,31 @@ fn standard_allows_unknown_tool_with_default() {
     assert!(matches!(result, CheckResult::Allowed));
 }
 
+#[test]
+fn standard_asks_for_unrecognized_bash_commands() {
+    let mut checker = make_checker(SecurityMode::Standard);
+    assert!(matches!(
+        checker.check("bash", "rm notes.txt"),
+        CheckResult::Ask
+    ));
+    assert!(matches!(
+        checker.check("bash", "ls -la"),
+        CheckResult::Allowed
+    ));
+}
+
+#[test]
+fn standard_follows_a_configured_default_for_unrecognized_bash_commands() {
+    let mut configs = PermissionConfigs::default();
+    configs.glob.default = Some(Action::Allow);
+    let mut checker =
+        PermissionChecker::new(&configs, SecurityMode::Standard, None, default_modes());
+    assert!(matches!(
+        checker.check("bash", "rm notes.txt"),
+        CheckResult::Allowed
+    ));
+}
+
 // --- ReadOnly mode ---
 
 #[test]
@@ -1214,10 +1239,10 @@ fn empty_permission_modes_skips_rules_for_all_modes() {
         checker.check_path("read", "/home/user/project/src/main.rs"),
         CheckResult::Allowed
     ));
-    // Bash has no rules, default action is Allow
+    // Bash has no rules applied, so an unrecognized command asks
     assert!(matches!(
         checker.check("bash", "some_command"),
-        CheckResult::Allowed
+        CheckResult::Ask
     ));
 }
 

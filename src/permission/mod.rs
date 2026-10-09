@@ -148,6 +148,7 @@ pub fn default_deny_regex_rules() -> Vec<(/* tool */ &'static str, /* regex */ &
 
 pub fn default_bash_rules() -> Vec<(&'static str, Action)> {
     vec![
+        ("ls", Action::Allow),
         ("ls **", Action::Allow),
         ("cd **", Action::Allow),
         ("pwd", Action::Allow),
@@ -200,10 +201,15 @@ pub fn default_bash_rules() -> Vec<(&'static str, Action)> {
         ("git config --get", Action::Allow),
         ("git config --get **", Action::Allow),
         ("cargo check", Action::Allow),
+        ("cargo check **", Action::Allow),
         ("cargo build", Action::Allow),
+        ("cargo build **", Action::Allow),
         ("cargo test", Action::Allow),
+        ("cargo test **", Action::Allow),
         ("cargo fmt", Action::Allow),
+        ("cargo fmt **", Action::Allow),
         ("cargo clippy", Action::Allow),
+        ("cargo clippy **", Action::Allow),
         ("cargo install **", Action::Allow),
         ("mkdir **", Action::Allow),
         ("touch **", Action::Allow),
