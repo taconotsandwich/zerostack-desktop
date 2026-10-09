@@ -68,7 +68,11 @@ pub(super) struct App {
     pub document: Option<(String, markdown::Content)>,
     notices_shown: bool,
     pub follow_output: bool,
-    turn_id: u64,
+    pub turn_id: u64,
+    /// The last turn id handed out; turns running aside keep theirs.
+    turns: u64,
+    /// Conversations whose turn runs while another one is shown.
+    pub running: Vec<super::parallel::Running>,
 }
 
 #[derive(Debug, Clone)]
@@ -224,6 +228,8 @@ impl App {
                 notices_shown: false,
                 follow_output: true,
                 turn_id: 0,
+                turns: 0,
+                running: Vec::new(),
                 switching: None,
             },
             task,
@@ -244,7 +250,8 @@ impl App {
         self.status = "Working…".into();
         self.menu = None;
         self.live = LiveTurn::default();
-        self.turn_id += 1;
+        self.turns += 1;
+        self.turn_id = self.turns;
         let turn_id = self.turn_id;
         if matches!(operation, Operation::Prompt(_)) {
             self.follow_output = true;
@@ -331,6 +338,18 @@ impl App {
         match message {
             Message::Completed(id, reply) if id == self.turn_id => {
                 return self.update(Message::Ready(reply));
+            }
+            Message::Completed(id, reply) => return self.running_done(id, reply),
+            Message::Engine(id, event) if id != self.turn_id => {
+                return self.running_event(id, event);
+            }
+            Message::Select(id) if self.turn_running() || self.running(&id).is_some() => {
+                return self.switch_to(Some(id));
+            }
+            Message::NewConversation if self.turn_running() => return self.switch_to(None),
+            Message::OpenProject(path) if self.turn_running() => {
+                self.detach();
+                return self.open_project(path, None);
             }
             Message::Ready(result) => {
                 self.busy = false;
@@ -651,16 +670,7 @@ impl App {
                 }
             }
             Message::Engine(id, UiEvent::OpenUrl(url)) if self.busy && id == self.turn_id => {
-                return Task::perform(
-                    async move {
-                        tokio::task::spawn_blocking(move || {
-                            crate::ui::renderer::open_url(&url).map_err(|error| error.to_string())
-                        })
-                        .await
-                        .unwrap_or_else(|error| Err(error.to_string()))
-                    },
-                    Message::LinkOpened,
-                );
+                return open_url_task(url);
             }
             Message::AllowOnce => return self.answer_permission(UserDecision::AllowOnce),
             Message::AllowAlways => {
@@ -755,7 +765,7 @@ impl App {
                     return self.choose(command);
                 }
             }
-            Message::Delete(id) if !self.busy => {
+            Message::Delete(id) if !self.busy && self.running(&id).is_none() => {
                 if let Some(session) = self.session_by_id(&id) {
                     self.panel = Some(Panel::Delete {
                         id,
@@ -911,6 +921,7 @@ impl App {
             }
             Message::Close(id) => {
                 self.remember_draft();
+                self.stop_running();
                 if self.busy {
                     self.closing = Some(id);
                     self.status = "Waiting for the current operation before closing…".into();
@@ -925,7 +936,7 @@ impl App {
                 self.switching = None;
                 return self.update(Message::Ready(reply));
             }
-            Message::PickProject if !self.busy && !self.picking => {
+            Message::PickProject if self.can_switch() && !self.picking => {
                 self.picking = true;
                 let directory = self.project.clone();
                 return Task::perform(
@@ -943,7 +954,7 @@ impl App {
             Message::ProjectPicked(path) => {
                 self.picking = false;
                 if let Some(path) = path {
-                    return self.open_project(path, None);
+                    return self.update(Message::OpenProject(path));
                 }
             }
             Message::PickFiles if !self.busy && !self.picking && self.snapshot.is_some() => {
@@ -1183,4 +1194,18 @@ mod tests {
         assert!(!submitted_is_unchanged(None, "unfinished draft"));
         assert!(!submitted_is_unchanged(Some("/"), "/review"));
     }
+}
+
+/// Open `url` in the default browser.
+pub(super) fn open_url_task(url: String) -> Task<Message> {
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                crate::ui::renderer::open_url(&url).map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
+        },
+        Message::LinkOpened,
+    )
 }
