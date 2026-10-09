@@ -611,6 +611,7 @@ pub(crate) fn serialize_conversation(messages: &[SessionMessage]) -> String {
     let mut result = String::new();
     for msg in messages {
         let role_tag = match msg.role {
+            crate::session::MessageRole::Command => continue,
             crate::session::MessageRole::User => "User",
             crate::session::MessageRole::Assistant => "Assistant",
             crate::session::MessageRole::System => "System",
