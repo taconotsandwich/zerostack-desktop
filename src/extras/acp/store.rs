@@ -26,7 +26,9 @@ pub(super) fn replay(messages: &[SessionMessage]) -> Vec<SessionUpdate> {
             let text = || text_chunk(message.content.to_string());
             match (message.role, &message.tool) {
                 (MessageRole::User, _) => Some(SessionUpdate::UserMessageChunk(text())),
-                (MessageRole::Assistant, _) => Some(SessionUpdate::AgentMessageChunk(text())),
+                (MessageRole::Assistant | MessageRole::Command, _) => {
+                    Some(SessionUpdate::AgentMessageChunk(text()))
+                }
                 (MessageRole::ToolCall, Some(ToolRecord::Call { id, name, args })) => {
                     Some(SessionUpdate::ToolCall(
                         ToolCall::new(stored_call_id(*id), format_tool_call_summary(name, args))

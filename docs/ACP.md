@@ -120,7 +120,11 @@ answers with every option, since one change can move others.
 
 A prompt that starts with `/`, `.` or `!` runs as it does in the TUI: a slash
 command, a dot-prompt (`.name message`) or a shell command. Its output comes
-back as agent message text. The commands that work without the TUI are
+back as agent message text. Once the conversation has started, a slash
+command's output is kept in it as a `command` message, which `session/load`
+replays as agent message text and the model never sees; a command that
+changes the conversation itself (`/clear`, `/undo`, `/rewind <n>`, ...) is not
+kept. The commands that work without the TUI are
 announced with `available_commands_update`; see [COMMANDS.md](COMMANDS.md)
 for what each one does and how the TUI-only ones run here.
 

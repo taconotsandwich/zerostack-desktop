@@ -278,6 +278,7 @@ pub fn convert_history(session: &Session) -> Vec<Message> {
                 "[SubagentToolCall]: {}",
                 msg.content
             ))),
+            MessageRole::Command => {}
         }
     }
 
