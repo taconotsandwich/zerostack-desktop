@@ -549,6 +549,7 @@ async fn cancel_during_a_permission_ask_denies_nothing_runs() {
     let ask = peer
         .wait_for(|m| m["method"] == "session/request_permission")
         .await;
+    assert_eq!(ask["params"]["toolCall"]["name"], "write", "{ask}");
     peer.notify("session/cancel", json!({"sessionId": session}));
     peer.answer(&ask["id"], Ok(cancelled_outcome()));
     let result = peer.wait(id).await.expect("prompt answers");

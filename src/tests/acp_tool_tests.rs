@@ -1,4 +1,4 @@
-//! Tool calls over ACP: kind, title and location, diffs, failure, usage.
+//! Tool calls over ACP: name, kind, title and location, diffs, failure, usage.
 
 use serde_json::{Value, json};
 
@@ -39,6 +39,7 @@ async fn a_write_is_an_edit_with_its_file_and_a_diff() {
     let path = target.display().to_string();
     let call = update_of(&peer, "tool_call");
     assert_eq!(call["kind"], "edit");
+    assert_eq!(call["name"], "write");
     assert!(
         call["title"].as_str().unwrap().starts_with("write "),
         "{call}"
