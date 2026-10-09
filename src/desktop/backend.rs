@@ -252,9 +252,13 @@ impl Backend {
         Ok(Applied::default())
     }
 
-    /// The conversation as saved, with the settings it runs with now.
+    /// The conversation as saved, or as the process last sent it when it
+    /// does not save, with the settings it runs with now.
     fn current_session(&self) -> Session {
-        let mut session = saved_session(&self.session.id).unwrap_or_else(|_| self.session.clone());
+        let mut session = saved_session(&self.session.id)
+            .ok()
+            .or_else(|| self.conversation.as_ref()?.unsaved_session())
+            .unwrap_or_else(|| self.session.clone());
         if let Some(conversation) = &self.conversation {
             let options = conversation.options();
             if let Some((model, _)) = acp_client::select(&options, "model") {
@@ -296,7 +300,11 @@ impl Backend {
                 .map(|(system, _)| system)
                 .unwrap_or_else(|| "similarity".to_string()),
             show_reasoning: self.show_reasoning,
-            notices: Vec::new(),
+            notices: self
+                .conversation
+                .as_mut()
+                .map(Conversation::take_notices)
+                .unwrap_or_default(),
             rewind_points: crate::ui::rewind_targets(&self.session),
             document: applied.document,
             open_path: applied.open_path,
@@ -353,7 +361,10 @@ fn prompt_text(operation: &Operation, session: &Session) -> Option<String> {
         #[cfg(feature = "mcp")]
         Operation::McpLogout { server } => format!("/mcp logout {server}"),
         #[cfg(feature = "loop")]
-        Operation::StartLoop { prompt } => format!("/loop {prompt}"),
+        Operation::StartLoop { max, prompt } => match max {
+            Some(max) => format!("/loop --max {max} {prompt}"),
+            None => format!("/loop {prompt}"),
+        },
         _ => return None,
     };
     Some(text)

@@ -21,6 +21,7 @@ mod review_view;
 mod scroll;
 mod sidebar;
 mod style;
+mod transcript;
 mod view;
 mod worker;
 mod workspace;

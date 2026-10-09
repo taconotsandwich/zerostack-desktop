@@ -70,8 +70,12 @@ pub(super) fn typed_operation(input: &str) -> Option<Operation> {
         }
         #[cfg(feature = "loop")]
         "/loop" => {
-            let prompt = words.collect::<Vec<_>>().join(" ");
-            (!prompt.is_empty()).then_some(Operation::StartLoop { prompt })
+            let rest = words.collect::<Vec<_>>().join(" ");
+            let (max, prompt) = crate::engine::headless::loop_args(&rest).ok()?;
+            (!prompt.is_empty()).then(|| Operation::StartLoop {
+                max,
+                prompt: prompt.to_string(),
+            })
         }
         #[cfg(feature = "mcp")]
         "/mcp" => {
@@ -193,6 +197,15 @@ pub(super) fn form_operation(
         #[cfg(feature = "loop")]
         "/loop" => Ok(Operation::StartLoop {
             prompt: required_field(fields, 0)?,
+            max: match optional_field(fields, 1) {
+                Some(max) => Some(
+                    max.parse()
+                        .ok()
+                        .filter(|max| *max > 0)
+                        .ok_or("Max iterations must be a positive whole number.")?,
+                ),
+                None => None,
+            },
         }),
         #[cfg(feature = "mcp")]
         "/mcp login" => Ok(Operation::McpLogin {
@@ -346,10 +359,17 @@ mod tests {
             ));
         }
         #[cfg(feature = "loop")]
-        assert!(matches!(
-            typed_operation("/loop keep going"),
-            Some(Operation::StartLoop { .. })
-        ));
+        {
+            assert!(matches!(
+                typed_operation("/loop keep going"),
+                Some(Operation::StartLoop { max: None, .. })
+            ));
+            assert!(matches!(
+                typed_operation("/loop --max 2 keep going"),
+                Some(Operation::StartLoop { max: Some(2), prompt }) if prompt == "keep going"
+            ));
+            assert!(typed_operation("/loop --max 0 keep going").is_none());
+        }
         #[cfg(feature = "memory")]
         assert!(matches!(
             typed_operation("/memory editor"),
@@ -372,10 +392,21 @@ mod tests {
             Operation::OpenDocument { .. }
         ));
         #[cfg(feature = "loop")]
-        assert!(matches!(
-            form_operation(&command("/loop"), &["keep going".into()], None).unwrap(),
-            Operation::StartLoop { .. }
-        ));
+        {
+            let form = |max: &str| {
+                form_operation(&command("/loop"), &["keep going".into(), max.into()], None)
+            };
+            assert!(matches!(
+                form("").unwrap(),
+                Operation::StartLoop { max: None, .. }
+            ));
+            assert!(matches!(
+                form("4").unwrap(),
+                Operation::StartLoop { max: Some(4), .. }
+            ));
+            assert!(form("0").is_err());
+            assert!(form("many").is_err());
+        }
         #[cfg(feature = "git-worktree")]
         assert!(matches!(
             form_operation(&command("/wt-merge"), &[String::new()], None).unwrap(),

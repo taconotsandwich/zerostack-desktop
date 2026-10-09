@@ -66,7 +66,6 @@ pub(super) struct App {
     pub events: Option<UiSender>,
     /// Markdown of the document shown by [`Panel::Document`].
     pub document: Option<(String, markdown::Content)>,
-    notices_shown: bool,
     pub follow_output: bool,
     pub turn_id: u64,
     /// The last turn id handed out; turns running aside keep theirs.
@@ -225,7 +224,6 @@ impl App {
                 permission_scope_open: false,
                 events: None,
                 document: None,
-                notices_shown: false,
                 follow_output: true,
                 turn_id: 0,
                 turns: 0,
@@ -456,7 +454,14 @@ impl App {
                                 // Operation transcripts the conversation does
                                 // not already show (structured actions such as
                                 // merge/exit/loop report their outcome here).
+                                // A started conversation keeps a command's
+                                // output as its last message.
+                                let kept = new_messages
+                                    && snapshot.session.messages.last().is_some_and(|message| {
+                                        message.role == crate::session::MessageRole::Command
+                                    });
                                 let transcript = match &pending {
+                                    _ if kept => None,
                                     Some(Operation::Command(input))
                                         if !new_messages
                                             && self.error.is_empty()
@@ -506,8 +511,7 @@ impl App {
                             std::path::Path::new(&self.project),
                         );
                         self.model_input = snapshot.session.model.to_string();
-                        if !self.notices_shown && !snapshot.notices.is_empty() {
-                            self.notices_shown = true;
+                        if !snapshot.notices.is_empty() {
                             self.command_output = snapshot.notices.join("\n");
                             scroll = true;
                         }
