@@ -20,6 +20,9 @@ pub enum MessageRole {
     ToolCall,
     ToolResult,
     SubagentToolCall,
+    /// A slash command and its output, kept for the reader; not part of the
+    /// model's history.
+    Command,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,6 +410,17 @@ impl Session {
 
     pub fn add_message(&mut self, role: MessageRole, content: &str) {
         self.add_message_with_tool(role, content, None);
+    }
+
+    /// Record a slash command's transcript. It costs no context: the model
+    /// never sees it.
+    pub fn add_command(&mut self, transcript: &str) {
+        self.messages.push(SessionMessage {
+            role: MessageRole::Command,
+            content: CompactString::new(transcript),
+            estimated_tokens: 0,
+            tool: None,
+        });
     }
 
     fn add_message_with_tool(

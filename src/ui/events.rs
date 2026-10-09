@@ -86,6 +86,11 @@ pub fn render_session(
                     feed.push_line(BlockStyle::Tool, format!("⌥ {}", line));
                 }
             }
+            MessageRole::Command => {
+                for line in msg.content.lines() {
+                    feed.push_line(BlockStyle::System, line.to_string());
+                }
+            }
         }
         feed.push_line(BlockStyle::Plain, "");
     }

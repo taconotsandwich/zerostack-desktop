@@ -8,6 +8,7 @@ use crate::config::Config;
 use crate::engine::{Engine, RunKind};
 use crate::provider::AnyAgent;
 use crate::sandbox::Sandbox;
+use crate::session::MessageRole;
 use crate::tests::engine_tests::{
     isolate_data_dirs, test_cli, test_client, test_context, test_session,
 };
@@ -42,13 +43,13 @@ async fn rewind_lists_the_messages_and_cuts_back_to_one() {
     assert!(listed.text.contains("1  first"), "{}", listed.text);
     assert!(listed.text.contains("2  second"), "{}", listed.text);
     assert_eq!(
-        engine.session().messages.len(),
+        exchange(&engine).len(),
         4,
-        "listing changes nothing"
+        "listing changes nothing but its own transcript"
     );
 
     let out = engine.run_string("/rewind 2").await.unwrap();
-    assert!(out.text.contains("removed 2 message(s)"), "{}", out.text);
+    assert!(out.text.contains("removed 3 message(s)"), "{}", out.text);
     let kept: Vec<&str> = engine
         .session()
         .messages
@@ -58,7 +59,7 @@ async fn rewind_lists_the_messages_and_cuts_back_to_one() {
     assert_eq!(kept, ["first", "one"]);
 
     engine.run_string("/redo").await.unwrap();
-    assert_eq!(engine.session().messages.len(), 4);
+    assert_eq!(exchange(&engine).len(), 4);
 }
 
 #[tokio::test]
@@ -77,7 +78,58 @@ async fn rewind_refuses_a_message_that_is_not_there() {
             out.text
         );
     }
-    assert_eq!(engine.session().messages.len(), 2);
+    assert_eq!(exchange(&engine).len(), 2);
+}
+
+/// The conversation without the slash command transcripts kept beside it.
+fn exchange(engine: &Engine) -> Vec<&str> {
+    engine
+        .session()
+        .messages
+        .iter()
+        .filter(|message| message.role != MessageRole::Command)
+        .map(|message| message.content.as_str())
+        .collect()
+}
+
+#[tokio::test]
+async fn slash_output_is_kept_in_a_started_conversation_but_not_sent_to_the_model() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let (mut engine, model) = engine(test_cli(), vec![vec!["one"], vec!["two"]]);
+    engine.run_string("/help").await.unwrap();
+    assert!(
+        engine.session().messages.is_empty(),
+        "a command alone starts no conversation"
+    );
+
+    engine.run_string("first").await.unwrap();
+    let help = engine.run_string("/help").await.unwrap();
+    let last = engine.session().messages.last().unwrap();
+    assert_eq!(last.role, MessageRole::Command);
+    assert_eq!(last.content.as_str(), help.text);
+    assert_eq!(last.estimated_tokens, 0);
+
+    engine.run_string("second").await.unwrap();
+    let sent = format!("{:?}", model.requests().last().unwrap());
+    assert!(sent.contains("first"), "{sent}");
+    assert!(!sent.contains("/help"), "{sent}");
+}
+
+#[tokio::test]
+async fn commands_that_change_the_conversation_are_not_kept_and_undo_takes_transcripts_along() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let (mut engine, _) = engine(test_cli(), vec![vec!["one"], vec!["two"]]);
+    engine.run_string("first").await.unwrap();
+    engine.run_string("second").await.unwrap();
+    engine.run_string("/help").await.unwrap();
+    assert_eq!(engine.session().messages.len(), 5);
+
+    engine.run_string("/undo").await.unwrap();
+    assert_eq!(exchange(&engine), ["first", "one"]);
+    assert_eq!(engine.session().messages.len(), 2, "/undo is not kept");
+
+    engine.run_string("/clear").await.unwrap();
+    assert!(engine.session().messages.is_empty());
 }
 
 #[cfg(feature = "loop")]

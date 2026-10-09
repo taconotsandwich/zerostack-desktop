@@ -144,6 +144,7 @@ fn role_class_label(msg: &SessionMessage, session: &Session) -> (&'static str, S
         MessageRole::ToolCall => ("tool", "tool call".to_string()),
         MessageRole::ToolResult => ("tool", "tool result".to_string()),
         MessageRole::SubagentToolCall => ("tool", "subagent tool call".to_string()),
+        MessageRole::Command => ("system", "command".to_string()),
     }
 }
 
