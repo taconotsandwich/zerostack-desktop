@@ -28,7 +28,7 @@
 //! flow) reports a friendly error instead of blocking: headless runs never
 //! read stdin.
 
-mod headless;
+pub(crate) mod headless;
 pub mod sink;
 
 pub use sink::{EventSink, StringSink};
