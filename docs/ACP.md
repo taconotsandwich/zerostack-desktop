@@ -49,7 +49,9 @@ inside zerostack.
 
 Sessions are saved to the session store after each turn, like TUI sessions,
 unless zerostack runs with `--no-session`. A session started over ACP can be
-resumed in the TUI and the other way round.
+resumed in the TUI and the other way round. With `--no-session`, each
+`session/prompt` response carries the conversation instead, in its `_meta` as
+`{"zerostack": {"session": {...}}}`, the session as the store would hold it.
 
 `session/load` replays the stored conversation as `user_message_chunk`,
 `agent_message_chunk`, `tool_call` and `tool_call_update` updates, then
