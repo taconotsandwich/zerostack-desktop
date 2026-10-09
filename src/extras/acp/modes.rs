@@ -10,7 +10,7 @@ use crate::permission::checker::PermCheck;
 pub(super) const MODES: [(SecurityMode, &str); 6] = [
     (
         SecurityMode::Standard,
-        "Allow path tools within the working directory, ask for external paths.",
+        "Allow path tools within the working directory and known safe commands; ask for external paths and other commands.",
     ),
     (SecurityMode::Restrictive, "Ask for every operation."),
     (

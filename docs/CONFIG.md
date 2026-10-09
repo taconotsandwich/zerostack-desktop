@@ -824,7 +824,9 @@ permission tool keys are `bash`, `read`, `write`, `edit`, `grep`, `find_files`,
 `mcp_tool:{server_name}:{tool_name}`. Use `"*"` for the default action,
 `external_directory` for absolute-path rules outside the working directory, and
 `doom_loop` for repeated identical tool calls (default: `ask`). If `bash` is
-omitted, zerostack installs its built-in safe bash allow/deny rules.
+omitted, zerostack installs its built-in safe bash allow/deny rules. In
+standard mode a bash command that no rule matches follows `"*"` when it is set
+and asks otherwise; other tools follow `"*"`, else are allowed.
 
 There are two config fields for controlling permissions by pattern:
 
