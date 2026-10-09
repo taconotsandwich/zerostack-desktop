@@ -115,3 +115,37 @@ fn client_mcp_servers_join_the_configured_ones() {
         other => panic!("{other:?}"),
     }
 }
+
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn a_server_that_does_not_connect_is_a_session_notice() {
+    let _data = isolate_data_dirs();
+    let mut peer = peer();
+    peer.initialize().await;
+    let cwd = std::env::current_dir().unwrap();
+    let broken = json!([{
+        "name": "broken",
+        "command": "/nonexistent/zerostack-test-mcp",
+        "args": [],
+        "env": []
+    }]);
+    let opened = peer
+        .request("session/new", json!({"cwd": cwd, "mcpServers": broken}))
+        .await
+        .expect("session opens without the server");
+    let notices = opened["_meta"]["zerostack"]["notices"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{opened}"));
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.as_str().unwrap().contains("broken")),
+        "{opened}"
+    );
+
+    let quiet = peer
+        .request("session/new", json!({"cwd": cwd, "mcpServers": []}))
+        .await
+        .unwrap();
+    assert!(quiet.get("_meta").is_none(), "{quiet}");
+}

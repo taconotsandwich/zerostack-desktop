@@ -95,12 +95,13 @@ pub(crate) fn mcp_servers(
 }
 
 /// Connect to `servers`; `None` when there are none or none answer in time.
+/// The notices say which servers did not connect.
 #[cfg(feature = "mcp")]
 pub(super) async fn connect_mcp(
     servers: std::collections::HashMap<String, crate::extras::mcp::config::McpServerConfig>,
-) -> Option<crate::extras::mcp::McpClientManager> {
+) -> (Option<crate::extras::mcp::McpClientManager>, Vec<String>) {
     if servers.is_empty() {
-        return None;
+        return (None, Vec::new());
     }
     let connect = crate::extras::mcp::McpClientManager::connect_all(&servers);
     match tokio::time::timeout(std::time::Duration::from_secs(10), connect).await {
@@ -108,11 +109,13 @@ pub(super) async fn connect_mcp(
             for notice in &manager.notices {
                 tracing::warn!("ACP MCP: {notice}");
             }
-            Some(manager)
+            let notices = manager.notices.iter().map(ToString::to_string).collect();
+            (Some(manager), notices)
         }
         Err(_) => {
-            tracing::warn!("ACP MCP connect timed out after 10s");
-            None
+            let notice = "MCP servers did not connect within 10s".to_string();
+            tracing::warn!("ACP {notice}");
+            (None, vec![notice])
         }
     }
 }

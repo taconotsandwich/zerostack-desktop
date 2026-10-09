@@ -114,8 +114,8 @@ pub(super) async fn handle_load(
             engine.resume_session(stored)
         })
         .await;
-    let session = match started {
-        Ok((_, session)) => session,
+    let (session, notices) = match started {
+        Ok((_, session, notices)) => (session, notices),
         Err(e) => return responder.respond_with_error(e),
     };
     let modes = mode_state(session.permission.as_ref());
@@ -133,7 +133,8 @@ pub(super) async fn handle_load(
     responder.respond(
         LoadSessionResponse::new()
             .modes(modes)
-            .config_options(config_options),
+            .config_options(config_options)
+            .meta(super::notices_meta(notices)),
     )?;
     send_update(&cx, &req.session_id, commands_update());
     send_update(&cx, &req.session_id, info);
