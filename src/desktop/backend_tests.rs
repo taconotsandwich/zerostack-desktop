@@ -36,6 +36,23 @@ fn conversation_operations_become_prompt_text() {
     assert_eq!(text(Operation::ClearContextFiles), None);
 }
 
+#[cfg(feature = "loop")]
+#[test]
+fn a_loop_passes_its_max() {
+    let session = Session::new("p", "m", 0, "");
+    let text = |max| {
+        prompt_text(
+            &Operation::StartLoop {
+                max,
+                prompt: "go on".into(),
+            },
+            &session,
+        )
+    };
+    assert_eq!(text(None).as_deref(), Some("/loop go on"));
+    assert_eq!(text(Some(3)).as_deref(), Some("/loop --max 3 go on"));
+}
+
 #[test]
 fn rewind_names_the_user_message_by_its_position() {
     let mut session = Session::new("p", "m", 0, "");

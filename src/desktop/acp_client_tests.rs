@@ -229,6 +229,25 @@ fn attachments_follow_the_prompt_text() {
     std::fs::remove_dir_all(&folder).unwrap();
 }
 
+#[test]
+fn notices_and_an_unsaved_session_come_from_the_zerostack_meta() {
+    let mut session = crate::session::Session::new("p", "m", 0, "");
+    session.add_message(crate::session::MessageRole::User, "hello");
+    let meta = |value: serde_json::Value| -> Meta {
+        serde_json::from_value(serde_json::json!({ "zerostack": value })).unwrap()
+    };
+    let notices = meta(serde_json::json!({ "notices": ["docs did not connect"] }));
+    assert_eq!(meta_notices(Some(&notices)), ["docs did not connect"]);
+    assert!(meta_notices(None).is_empty());
+    assert!(meta_session(Some(&notices)).is_none());
+
+    let carried = meta(serde_json::json!({ "session": session }));
+    let read = meta_session(Some(&carried)).unwrap();
+    assert_eq!(read.id, session.id);
+    assert_eq!(read.messages[0].content, "hello");
+    assert!(meta_notices(Some(&carried)).is_empty());
+}
+
 #[cfg(feature = "mcp")]
 #[test]
 fn login_url_comes_from_the_mcp_login_announcement() {
