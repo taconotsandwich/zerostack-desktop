@@ -67,7 +67,9 @@ one zerostack process per folder to work in several. `cwd` must be absolute.
 
 A session connects the MCP servers of the config, plus the client's
 `mcpServers` (`stdio` and `http`). A client server with the same name as a
-configured one replaces it.
+configured one replaces it. Servers that do not connect leave the session
+working without them; the `session/new` or `session/load` response then says
+which in its `_meta`, as `{"zerostack": {"notices": ["..."]}}`.
 
 ## Updates
 
