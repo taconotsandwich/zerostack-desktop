@@ -57,6 +57,9 @@ struct Inner {
     replaying: bool,
     text: String,
     options: Vec<SessionConfigOption>,
+    /// The conversation as the last prompt answer carried it, when the
+    /// process does not save it (`--no-session`).
+    unsaved: Option<crate::session::Session>,
 }
 
 #[derive(Default)]
@@ -277,8 +280,29 @@ impl Stopper {
 pub(super) struct Conversation {
     cx: ConnectionTo<Agent>,
     pub session_id: SessionId,
+    /// What the process reported on opening, such as MCP servers that did
+    /// not connect; taken once.
+    notices: Vec<String>,
     shared: Arc<Shared>,
     _close: oneshot::Sender<()>,
+}
+
+/// zerostack's own entry `key` of an answer's `_meta`.
+fn zerostack_meta<'a>(meta: Option<&'a Meta>, key: &str) -> Option<&'a serde_json::Value> {
+    meta?.get("zerostack")?.get(key)
+}
+
+/// The notices an opening answer carries.
+pub(super) fn meta_notices(meta: Option<&Meta>) -> Vec<String> {
+    zerostack_meta(meta, "notices")
+        .and_then(|notices| serde_json::from_value(notices.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// The conversation a prompt answer carries, sent when the process does not
+/// save it.
+pub(super) fn meta_session(meta: Option<&Meta>) -> Option<crate::session::Session> {
+    serde_json::from_value(zerostack_meta(meta, "session")?.clone()).ok()
 }
 
 fn rpc_error(error: agent_client_protocol::Error) -> String {
@@ -311,7 +335,7 @@ impl Conversation {
             .block_task()
             .await
             .map_err(rpc_error)?;
-        let (session_id, options) = match load {
+        let (session_id, options, meta) = match load {
             Some(id) => {
                 shared.lock().replaying = true;
                 let loaded = cx
@@ -323,7 +347,11 @@ impl Conversation {
                     .await;
                 shared.lock().replaying = false;
                 let loaded = loaded.map_err(rpc_error)?;
-                (SessionId::new(id.to_string()), loaded.config_options)
+                (
+                    SessionId::new(id.to_string()),
+                    loaded.config_options,
+                    loaded.meta,
+                )
             }
             None => {
                 let created = cx
@@ -331,7 +359,7 @@ impl Conversation {
                     .block_task()
                     .await
                     .map_err(rpc_error)?;
-                (created.session_id, created.config_options)
+                (created.session_id, created.config_options, created.meta)
             }
         };
         if let Some(options) = options {
@@ -340,6 +368,7 @@ impl Conversation {
         Ok(Self {
             cx,
             session_id,
+            notices: meta_notices(meta.as_ref()),
             shared,
             _close: close,
         })
@@ -354,6 +383,14 @@ impl Conversation {
 
     pub fn options(&self) -> Vec<SessionConfigOption> {
         self.shared.lock().options.clone()
+    }
+
+    pub fn take_notices(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notices)
+    }
+
+    pub fn unsaved_session(&self) -> Option<crate::session::Session> {
+        self.shared.lock().unsaved.clone()
     }
 
     /// Send one prompt, streaming its updates to `events`. Returns the
@@ -377,6 +414,9 @@ impl Conversation {
         inner.stream = None;
         let text = std::mem::take(&mut inner.text);
         let response = result.map_err(rpc_error)?;
+        if let Some(session) = meta_session(response.meta.as_ref()) {
+            inner.unsaved = Some(session);
+        }
         Ok((text, response.stop_reason == StopReason::Cancelled))
     }
 

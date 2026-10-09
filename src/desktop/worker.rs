@@ -91,6 +91,8 @@ pub(super) enum Operation {
     },
     #[cfg(feature = "loop")]
     StartLoop {
+        /// The most iterations to run; the process's own cap otherwise.
+        max: Option<u32>,
         prompt: String,
     },
     OpenDocument {

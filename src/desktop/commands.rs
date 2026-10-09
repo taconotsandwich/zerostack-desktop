@@ -174,7 +174,13 @@ pub(super) fn available() -> Vec<Command> {
         command("Documentation", "/docs", &["File name"], true, None),
         command("Getting started guide", "/tutor", &[], false, None),
         #[cfg(feature = "loop")]
-        command("Run an iteration loop", "/loop", &["Prompt"], false, None),
+        command(
+            "Run an iteration loop",
+            "/loop",
+            &["Prompt", "Max iterations"],
+            true,
+            None,
+        ),
         #[cfg(feature = "mcp")]
         command(
             "Log in to MCP server",
