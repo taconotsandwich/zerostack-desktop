@@ -161,14 +161,14 @@ impl AcpState {
     /// `mcp_servers`, and hold it live, in place of the live session
     /// `replacing` names (whose prompt is cancelled). The process changes
     /// into `cwd` first, so the session's sandbox and context files are
-    /// those of that folder.
+    /// those of that folder. Also returns the notices of starting it.
     async fn start_session(
         &self,
         cwd: &std::path::Path,
         mcp_servers: Vec<McpServer>,
         replacing: Option<&SessionId>,
         prepare: impl FnOnce(&mut Engine) -> anyhow::Result<()>,
-    ) -> Result<(SessionId, Arc<AcpSession>), agent_client_protocol::Error> {
+    ) -> Result<(SessionId, Arc<AcpSession>, Vec<String>), agent_client_protocol::Error> {
         let internal =
             |e: anyhow::Error| agent_client_protocol::util::internal_error(e.to_string());
         let mut sessions = self.sessions.lock().await;
@@ -187,16 +187,23 @@ impl AcpState {
             })
             .map_err(internal)?;
         #[cfg(feature = "mcp")]
-        if let Some(manager) = setup::connect_mcp(setup::mcp_servers(&self.cfg, mcp_servers)).await
-        {
-            session.live.lock().await.engine.set_mcp(manager);
-        }
+        let notices = {
+            let (manager, notices) =
+                setup::connect_mcp(setup::mcp_servers(&self.cfg, mcp_servers)).await;
+            if let Some(manager) = manager {
+                session.live.lock().await.engine.set_mcp(manager);
+            }
+            notices
+        };
         #[cfg(not(feature = "mcp"))]
-        let _ = mcp_servers;
+        let notices = {
+            let _ = mcp_servers;
+            Vec::new()
+        };
         if let Some(replaced) = sessions.insert(id.clone(), session.clone()) {
             replaced.cancel.cancel();
         }
-        Ok((id, session))
+        Ok((id, session, notices))
     }
 }
 
@@ -546,7 +553,7 @@ async fn handle_new_session(
             Ok(())
         })
         .await;
-    let (session_id, session) = match started {
+    let (session_id, session, notices) = match started {
         Ok(started) => started,
         Err(e) => return responder.respond_with_error(e),
     };
@@ -561,10 +568,25 @@ async fn handle_new_session(
     responder.respond(
         NewSessionResponse::new(session_id.clone())
             .modes(modes)
-            .config_options(config_options),
+            .config_options(config_options)
+            .meta(notices_meta(notices)),
     )?;
     send_update(&cx, &session_id, commands::commands_update());
     Ok(())
+}
+
+/// What a client should show about a session it opened, as response
+/// `_meta`: `{"zerostack": {"notices": [...]}}`, when there is any.
+pub(super) fn notices_meta(notices: Vec<String>) -> Option<Meta> {
+    if notices.is_empty() {
+        return None;
+    }
+    let mut meta = Meta::new();
+    meta.insert(
+        "zerostack".to_string(),
+        serde_json::json!({ "notices": notices }),
+    );
+    Some(meta)
 }
 
 async fn handle_prompt(
