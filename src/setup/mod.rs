@@ -155,7 +155,7 @@ struct Ctx {
     message: Option<String>,
 }
 
-fn builtin_provider_names() -> &'static [&'static str] {
+pub(crate) fn builtin_provider_names() -> &'static [&'static str] {
     &[
         "openrouter",
         "openai",
