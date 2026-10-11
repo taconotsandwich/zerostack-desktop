@@ -64,6 +64,15 @@ async fn new_session_lists_the_settings() {
         "claude-sonnet-4-5"
     );
     assert_eq!(option(&options, "provider")["currentValue"], "anthropic");
+    let providers: Vec<&str> = option(&options, "provider")["options"]
+        .as_array()
+        .expect("provider options")
+        .iter()
+        .map(|provider| provider["value"].as_str().unwrap())
+        .collect();
+    assert_eq!(providers, crate::setup::builtin_provider_names());
+    assert!(providers.contains(&"opencode-zen"));
+    assert!(providers.contains(&"opencode-go"));
     assert_eq!(option(&options, "prompt")["currentValue"], "default");
     assert_eq!(option(&options, "reasoning")["currentValue"], true);
     assert_eq!(option(&options, "mode")["currentValue"], "guarded");

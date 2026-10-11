@@ -7,7 +7,6 @@ use agent_client_protocol::schema::v1::*;
 use super::AcpState;
 use super::modes::MODES;
 use crate::agent::tools::edit_system;
-use crate::auth::BUILTIN_PROVIDER_NAMES;
 use crate::config::types::EditSystem;
 use crate::engine::Engine;
 
@@ -62,7 +61,7 @@ fn model_option(engine: &Engine) -> SessionConfigOption {
 fn provider_option(engine: &Engine) -> SessionConfigOption {
     let mut custom: Vec<String> = engine.config().custom_providers_map().into_keys().collect();
     custom.sort();
-    let values = BUILTIN_PROVIDER_NAMES
+    let values = crate::setup::builtin_provider_names()
         .iter()
         .map(|name| name.to_string())
         .chain(custom)
