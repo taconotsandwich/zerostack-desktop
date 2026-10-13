@@ -170,3 +170,10 @@ pub fn expand_tilde_with_home(s: &str, home: Option<&Path>) -> String {
     }
     s.to_string()
 }
+
+/// Resolve a tool path against its owning engine's workspace.
+pub(crate) fn resolve_path(path: &str) -> String {
+    crate::engine::resources::resolve(expand_tilde(path))
+        .to_string_lossy()
+        .into_owned()
+}

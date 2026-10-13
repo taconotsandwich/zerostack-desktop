@@ -22,7 +22,7 @@ async fn initialize_advertises_the_mcp_transports() {
 }
 
 #[tokio::test]
-async fn sessions_share_the_process_folder() {
+async fn sessions_can_use_different_workspaces_without_changing_the_process_folder() {
     let _data = isolate_data_dirs();
     let mut peer = peer();
     peer.initialize().await;
@@ -32,18 +32,11 @@ async fn sessions_share_the_process_folder() {
     assert_ne!(first, second);
 
     let elsewhere = std::env::temp_dir();
-    let error = peer
+    let third = peer
         .request("session/new", json!({"cwd": elsewhere, "mcpServers": []}))
         .await
-        .expect_err("another folder while sessions are live");
-    assert_eq!(error["code"], -32602, "{error}");
-    assert!(
-        error["data"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("need a process of their own"),
-        "{error}"
-    );
+        .expect("independent workspace while other sessions are live");
+    assert_ne!(third["sessionId"].as_str().unwrap(), first);
     assert_eq!(std::env::current_dir().unwrap(), before);
 }
 

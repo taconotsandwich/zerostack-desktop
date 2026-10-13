@@ -27,7 +27,7 @@ struct HookedState {
 impl HookedState {
     fn build_ctx(&self) -> HookCtx {
         let (session_id, session_path) = session_context();
-        let cwd = std::env::current_dir()
+        let cwd = crate::engine::resources::working_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let permission_mode = self
@@ -67,13 +67,17 @@ impl HookedTool {
             dispatcher,
             permission,
         });
+        let owner = crate::engine::resources::current();
         DynamicTool::new_with_context(
             name,
             description,
             parameters,
             move |context: &mut ToolContext, args: serde_json::Value| {
                 let this = this.clone();
-                Box::pin(async move {
+                Box::pin(owner.clone().scope(async move {
+                    if crate::engine::resources::current().is_closed() {
+                        return Err(ToolExecutionError::other("engine is shut down"));
+                    }
                     // Only lifecycle hooks are configured: no tool event can
                     // fire for this call, so skip building the per-call
                     // context (a `current_dir` syscall + permission lock) and
@@ -161,7 +165,7 @@ impl HookedTool {
                     }
 
                     result
-                })
+                }))
             },
         )
     }

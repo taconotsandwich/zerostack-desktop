@@ -3,12 +3,16 @@
 Minimal coding agent in Rust, optimized for memory footprint and performance.
 Single crate, no workspace. All source under `src/`.
 
+The current engine/frontend boundary and embedding prerequisites are documented
+in [docs/ENGINE.md](docs/ENGINE.md).
+
 ## Directory Layout
 
 | Path | Responsibility |
 |---|---|
 | `src/main.rs` | Entry point, CLI dispatch, mode routing |
 | `src/cli.rs` | `clap::Parser` CLI argument definition |
+| `src/engine/` | Owned headless engine plus shared model actions, agent construction, turn accounting, compaction, workspace resources and cancellation |
 | `src/provider.rs` | LLM provider abstraction (type-erased: `AnyClient`, `AnyModel`, `AnyAgent` enums) |
 | `src/auth.rs` | API key resolution (`AuthResolver`, `ProviderKind` enum) |
 | `src/event.rs` | `AgentEvent` (streaming LLM output) and `UserEvent` (TUI input) enums |
@@ -56,7 +60,7 @@ CLI parse (main.rs:150) → config load → context load → session load
   └── (default) → ui::run_interactive()
 ```
 
-### Interactive TUI Event Loop (`src/ui/mod.rs`)
+### Interactive TUI Event Loop (`src/ui/app.rs`)
 
 Single `tokio::select!` with 6 branches plus an `else` fallback (line 1119):
 1. **`UserEvent` from `user_rx`** — keyboard/mouse/resize/paste from background event thread (polls crossterm every 50ms idle, 10ms while coalescing a paste burst)

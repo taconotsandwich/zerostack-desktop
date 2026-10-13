@@ -1,13 +1,11 @@
 use compact_str::CompactString;
 use crossterm::style::Color;
 
-use crate::agent::tools::todo::TODO_LIST;
 use crate::cli::Cli;
 use crate::config::ResolvedShowToolDetails;
 use crate::event::AgentEvent;
-use crate::provider::AnyAgent;
+use crate::session::Session;
 use crate::session::storage::save_session;
-use crate::session::{MessageRole, Session};
 use crate::ui::events::sanitize_output;
 use crate::ui::feed::BlockStyle;
 use crate::ui::renderer::Renderer;
@@ -20,28 +18,7 @@ use super::C_AGENT;
 use super::apply_current_prompt_mode;
 use super::{C_ERROR, C_TOOL};
 
-/// Build the main agent on first use, lazily connecting MCP as well. Callers
-/// only reach the build when `agent` is `None`, so MCP connects at most once.
-pub async fn ensure_agent(
-    agent: &mut Option<AnyAgent>,
-    ui: &mut UiContext<'_>,
-    reasoning_enabled: bool,
-) {
-    if agent.is_some() {
-        return;
-    }
-    #[cfg(feature = "mcp")]
-    crate::ui::ensure_mcp_manager(&mut ui.mcp_manager, ui.cfg).await;
-    *agent = Some(
-        ui.agent_build_ctx()
-            .rebuild_agent(&ui.session.model, reasoning_enabled)
-            .await,
-    );
-    // Keep the pre-calibration context estimate in sync with the preamble we
-    // just built (system prompt + tools + context files).
-    ui.session.overhead_tokens =
-        crate::agent::builder::estimate_overhead(ui.context, reasoning_enabled);
-}
+pub(crate) use crate::engine::runtime::ensure_agent;
 
 pub async fn handle_agent_event(
     event: AgentEvent,
@@ -51,6 +28,8 @@ pub async fn handle_agent_event(
     slash: &SlashState,
     chain: &mut ChainState,
 ) -> anyhow::Result<()> {
+    let owner = crate::engine::resources::current();
+    run.turn.observe(ui.session, ui.cfg, &event);
     match event {
         AgentEvent::Reasoning(text) => {
             if !slash.show_reasoning {
@@ -99,7 +78,7 @@ pub async fn handle_agent_event(
             run.agent_line_started = true;
         }
         AgentEvent::ToolCall {
-            call_id: event_id,
+            call_id: _,
             name,
             args,
         } => {
@@ -110,8 +89,6 @@ pub async fn handle_agent_event(
             }
             run.response_buf.clear();
             run.response_start_block = None;
-            let call_id = ui.session.add_tool_call(&name, &args);
-            run.push_pending_tool_call(event_id, call_id);
             save_session_if_enabled(ui.session, ui.cli, renderer)?;
             let line = format!(
                 "◈ {}",
@@ -128,8 +105,6 @@ pub async fn handle_agent_event(
             // `ToolCall` and `ToolResult`, while its id is still pending here.
             // (Best-effort under a parallel batch; see
             // `AgentRunState::newest_pending_tool_call`.)
-            ui.session
-                .add_subagent_tool_call(run.newest_pending_tool_call(), &name, &args);
             save_session_if_enabled(ui.session, ui.cli, renderer)?;
             let line = format!(
                 "⌥ {}",
@@ -138,16 +113,14 @@ pub async fn handle_agent_event(
             renderer.write_line(&sanitize_output(&line), C_TOOL)?;
         }
         AgentEvent::ToolResult {
-            call_id: event_id,
+            call_id: _,
             name,
             output,
             ..
         } => {
-            let call_id = resolve_tool_result_call_id(run, ui.session, &event_id, &name);
-            ui.session.add_tool_result(call_id, &name, &output);
             save_session_if_enabled(ui.session, ui.cli, renderer)?;
             if name == "todo_write" {
-                let list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());
+                let list = owner.todos.lock().unwrap_or_else(|e| e.into_inner());
                 if list.is_empty() {
                     renderer.write_line("tasks cleared", Color::DarkGrey)?;
                 } else {
@@ -241,49 +214,7 @@ pub async fn handle_agent_event(
             )
             .await?;
         }
-        AgentEvent::CompletionCall {
-            input_tokens,
-            output_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-        } => {
-            // Real provider-reported usage for the call that just finished.
-            // The local len()/4 heuristic in session.total_estimated_tokens
-            // undercounts code-heavy turns; trust the real number as a floor
-            // so the status bar's x/y/% reflects what the provider actually saw.
-            // Use the cache-inclusive prompt size so Anthropic cache hits (which
-            // report input_tokens excluding cached tokens) don't deflate it.
-            let real = Session::real_input_tokens(
-                ui.cfg
-                    .is_anthropic_native(&ui.session.provider, &ui.session.model),
-                input_tokens,
-                cached_input_tokens,
-                cache_creation_input_tokens,
-            )
-            .saturating_add(output_tokens);
-            if real > ui.session.total_estimated_tokens {
-                ui.session.total_estimated_tokens = real;
-            }
-            // Accumulate cost for intermediate calls (tool-use turns). The Done
-            // event only carries the final call's usage, so without this every
-            // tool-call round-trip would go uncosted.
-            ui.session.total_input_tokens =
-                ui.session.total_input_tokens.saturating_add(input_tokens);
-            ui.session.total_output_tokens =
-                ui.session.total_output_tokens.saturating_add(output_tokens);
-            ui.session.total_cost += crate::pricing::estimate_cost(
-                crate::pricing::billable_input_tokens(
-                    ui.cfg
-                        .is_anthropic_native(&ui.session.provider, &ui.session.model),
-                    input_tokens,
-                    cached_input_tokens,
-                    cache_creation_input_tokens,
-                ),
-                output_tokens,
-                ui.session.input_token_cost,
-                ui.session.output_token_cost,
-            );
-        }
+        AgentEvent::CompletionCall { .. } => {}
         AgentEvent::Retrying { attempt, max } => {
             run.was_reasoning = false;
             if run.agent_line_started {
@@ -314,32 +245,8 @@ pub async fn handle_agent_event(
     Ok(())
 }
 
-/// Session call id a `ToolResult` event's output belongs to.
-///
-/// Normally the matching `ToolCall` event left a pending entry. rig also has a
-/// path that streams a result for a call that never produced a `ToolCall`
-/// stream item (an invalid tool call the hook stack skips, abandoning the
-/// turn), so an unmatched result is possible. Session call id 0 is a real call
-/// (`Session::next_tool_call_id` starts there), so such a result must not be
-/// linked to it — that would rewrite the first call's recorded evidence.
-/// Instead a call is synthesized for it, with no arguments because none were
-/// ever streamed, keeping the recorded pair self-consistent.
-pub(crate) fn resolve_tool_result_call_id(
-    run: &mut AgentRunState,
-    session: &mut Session,
-    id: &str,
-    name: &str,
-) -> u64 {
-    if let Some(call_id) = run.take_pending_tool_call(id) {
-        return call_id;
-    }
-    tracing::warn!(
-        "ToolResult for {name} arrived with no matching pending ToolCall (id={escaped}); \
-         recording it against a synthesized orphan call",
-        escaped = id.escape_debug(),
-    );
-    session.add_tool_call(name, &serde_json::Value::Null)
-}
+#[cfg(test)]
+pub(crate) use crate::engine::turn::resolve_tool_result_call_id;
 
 fn save_session_if_enabled(
     session: &Session,
@@ -386,45 +293,7 @@ async fn handle_agent_done(
 
     renderer.write_line("", Color::White)?;
     renderer.write_line("", Color::White)?;
-    ui.session.add_message(MessageRole::Assistant, &response);
-    // `total_input_tokens`/`total_output_tokens` keep the raw provider-reported
-    // counts (that's what those fields mean), but cost prices the *billable*
-    // input — for Anthropic that folds in cache reads/writes, which the raw
-    // `input_tokens` excludes yet are still billed (see `billable_input_tokens`).
-    ui.session.total_input_tokens = ui
-        .session
-        .total_input_tokens
-        .saturating_add(usage.input_tokens);
-    ui.session.total_output_tokens = ui
-        .session
-        .total_output_tokens
-        .saturating_add(usage.output_tokens);
-    ui.session.total_cost += crate::pricing::estimate_cost(
-        crate::pricing::billable_input_tokens(
-            ui.cfg
-                .is_anthropic_native(&ui.session.provider, &ui.session.model),
-            usage.input_tokens,
-            usage.cached_input_tokens,
-            usage.cache_creation_input_tokens,
-        ),
-        usage.output_tokens,
-        ui.session.input_token_cost,
-        ui.session.output_token_cost,
-    );
-    // Anchor context-size accounting to the provider's real usage. Context
-    // measurement needs the full prompt size, so use the cache-inclusive count
-    // (Anthropic reports input_tokens excluding cached/cache-creation tokens,
-    // which would otherwise collapse the context meter to ~0 on cache hits).
-    // Must come after add_message so the anchor includes the just-appended response.
-    let context_input_tokens = Session::real_input_tokens(
-        ui.cfg
-            .is_anthropic_native(&ui.session.provider, &ui.session.model),
-        usage.input_tokens,
-        usage.cached_input_tokens,
-        usage.cache_creation_input_tokens,
-    );
-    ui.session
-        .set_calibration(context_input_tokens, usage.output_tokens);
+    crate::engine::turn::finish_response(ui.session, ui.cfg, &response, usage);
     run.agent_line_started = false;
     run.response_buf.clear();
     run.response_start_block = None;
@@ -484,6 +353,7 @@ async fn handle_agent_done(
             let shell = if cfg!(windows) { "powershell" } else { "sh" };
             let shell_arg = if cfg!(windows) { "-Command" } else { "-c" };
             match tokio::process::Command::new(shell)
+                .current_dir(crate::engine::resources::working_dir().unwrap_or_default())
                 .arg(shell_arg)
                 .arg(cmd)
                 .output()
@@ -574,7 +444,7 @@ async fn handle_agent_done(
     #[cfg(feature = "git-worktree")]
     if let Some(ret) = chain.wt_return_path.take() {
         let outcome_msg = super::resolve_agent_merge_outcome(&ret);
-        match std::env::set_current_dir(&ret.main_path) {
+        match crate::engine::resources::change_dir(&ret.main_path) {
             Ok(()) => {
                 ui.session.working_dir = compact_str::CompactString::new(&ret.main_path);
                 ui.context.reload();

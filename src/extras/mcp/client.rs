@@ -77,6 +77,7 @@ impl McpClientHandle {
                     env.len(),
                 );
                 let mut cmd = Command::new(command);
+                cmd.current_dir(crate::engine::resources::working_dir()?);
                 cmd.args(args);
                 for (k, v) in env {
                     cmd.env(k, v);
@@ -91,7 +92,7 @@ impl McpClientHandle {
                     .spawn()?;
                 if let Some(stderr) = stderr {
                     let name = server_name.clone();
-                    tokio::spawn(async move {
+                    crate::engine::resources::spawn(async move {
                         let mut lines = BufReader::new(stderr).lines();
                         while let Ok(Some(line)) = lines.next_line().await {
                             tracing::debug!("[mcp {name}] {line}");

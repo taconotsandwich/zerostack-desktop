@@ -165,7 +165,7 @@ impl PermissionChecker {
             .unwrap_or_default();
 
         let working_dir = working_dir
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default())
+            .unwrap_or_else(|| crate::engine::resources::working_dir().unwrap_or_default())
             .to_string_lossy()
             .to_string();
 

@@ -23,13 +23,35 @@ pub struct AgentRunner {
     /// Cancels the underlying agent task. Without this a superseded or
     /// interrupted run keeps driving its stream — and therefore keeps executing
     /// tools (edit/write/bash) — invisibly. Aborting stops it for real.
-    pub abort_handle: tokio::task::AbortHandle,
+    pub abort_handle: RunGuard,
+}
+
+/// Owns a background turn. Dropping a prompt future or replacing its runner
+/// must stop tool execution even when the caller never explicitly cancels.
+pub struct RunGuard(tokio::task::AbortHandle);
+
+impl From<tokio::task::AbortHandle> for RunGuard {
+    fn from(handle: tokio::task::AbortHandle) -> Self {
+        Self(handle)
+    }
+}
+
+impl RunGuard {
+    pub fn abort(&self) {
+        self.0.abort();
+    }
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 /// Handle to an in-flight `/btw` side-question task. The `abort_handle` lets the
 /// UI cancel the side question (e.g. on Ctrl-C) without touching the main agent.
 pub struct BtwRunner {
-    pub abort_handle: tokio::task::AbortHandle,
+    pub abort_handle: RunGuard,
 }
 
 /// A user prompt together with the media attached to it.
@@ -140,7 +162,7 @@ pub fn spawn_btw(
     id: u32,
     retry_config: RetryConfig,
 ) -> BtwRunner {
-    let join = tokio::spawn(async move {
+    let join = crate::engine::resources::spawn(async move {
         let mut stream = match start_stream(
             &agent,
             UserPrompt::text(prompt),
@@ -214,7 +236,7 @@ pub fn spawn_btw(
     });
 
     BtwRunner {
-        abort_handle: join.abort_handle(),
+        abort_handle: join.abort_handle().into(),
     }
 }
 
@@ -323,7 +345,7 @@ pub fn spawn_agent(
     #[cfg(feature = "subagents")]
     crate::extras::subagents::set_subagent_event_tx(event_tx.clone());
 
-    let join = tokio::spawn(async move {
+    let join = crate::engine::resources::spawn(async move {
         tracing::debug!(
             "spawn_agent: prompt_len={}, media={}, history_len={}, max_attempts={}",
             prompt.text.len(),
@@ -538,7 +560,7 @@ pub fn spawn_agent(
 
     AgentRunner {
         event_rx,
-        abort_handle: join.abort_handle(),
+        abort_handle: join.abort_handle().into(),
     }
 }
 

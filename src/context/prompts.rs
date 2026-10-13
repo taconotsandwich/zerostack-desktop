@@ -10,7 +10,7 @@ pub fn global_dir() -> PathBuf {
 }
 
 pub fn zerostack_dir() -> PathBuf {
-    PathBuf::from(".zerostack/prompts")
+    crate::engine::resources::resolve(".zerostack/prompts")
 }
 
 /// [`load_with_extra`] with no extra dirs. Kept for non-CLI call sites
@@ -32,7 +32,9 @@ pub fn load_with_extra(extra: &[PathBuf]) -> HashMap<String, String> {
     for (name, content) in crate::context::load_dir_files(&global_dir(), "md") {
         prompts.insert(name, content);
     }
-    for (name, content) in crate::context::load_dir_files(&PathBuf::from("data/prompts"), "md") {
+    for (name, content) in
+        crate::context::load_dir_files(&crate::engine::resources::resolve("data/prompts"), "md")
+    {
         prompts.insert(name, content);
     }
     for (name, content) in crate::context::load_dir_files(&zerostack_dir(), "md") {
@@ -58,7 +60,11 @@ fn precedence_dirs(extra: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .rev()
         .cloned()
-        .chain([zerostack_dir(), PathBuf::from("data/prompts"), global_dir()])
+        .chain([
+            zerostack_dir(),
+            crate::engine::resources::resolve("data/prompts"),
+            global_dir(),
+        ])
         .collect()
 }
 
@@ -91,9 +97,9 @@ pub fn source_of_with_extra(name: &str, extra: &[PathBuf]) -> crate::session::Pr
     use crate::session::PromptSource;
 
     let file_name = format!("{name}.md");
-    let effective = precedence_dirs(extra)
-        .into_iter()
-        .find_map(|dir| std::fs::read_to_string(dir.join(&file_name)).ok());
+    let effective = precedence_dirs(extra).into_iter().find_map(|dir| {
+        std::fs::read_to_string(crate::engine::resources::resolve(dir).join(&file_name)).ok()
+    });
 
     match effective {
         // Nothing on disk, so `load()` served the embedded copy. A name with
@@ -158,8 +164,8 @@ mod tests {
             unsafe {
                 std::env::set_var("ZS_DATA_DIR", dir.to_str().unwrap());
             }
-            let orig_cwd = std::env::current_dir().unwrap();
-            std::env::set_current_dir(&dir).unwrap();
+            let orig_cwd = crate::engine::resources::working_dir().unwrap();
+            crate::engine::resources::change_dir(&dir).unwrap();
             TestDir {
                 dir,
                 orig_cwd,
@@ -170,7 +176,7 @@ mod tests {
 
     impl Drop for TestDir {
         fn drop(&mut self) {
-            let _ = std::env::set_current_dir(&self.orig_cwd);
+            let _ = crate::engine::resources::change_dir(&self.orig_cwd);
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }

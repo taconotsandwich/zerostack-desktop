@@ -7,7 +7,7 @@ pub(crate) fn resolve_path(s: &str) -> PathBuf {
     if p.is_absolute() {
         p
     } else {
-        std::env::current_dir()
+        crate::engine::resources::working_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
             .join(p)
     }

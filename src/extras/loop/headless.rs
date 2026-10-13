@@ -108,6 +108,7 @@ pub(crate) async fn run_headless_loop(
             let shell = if cfg!(windows) { "powershell" } else { "sh" };
             let shell_arg = if cfg!(windows) { "-Command" } else { "-c" };
             match tokio::process::Command::new(shell)
+                .current_dir(crate::engine::resources::working_dir().unwrap_or_default())
                 .arg(shell_arg)
                 .arg(cmd)
                 .output()

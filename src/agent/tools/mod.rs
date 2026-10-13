@@ -15,45 +15,36 @@ pub(crate) mod write;
 
 pub(crate) use normalize::{NormalizedText, levenshtein_similarity, normalize_whitespace};
 
-use std::sync::Mutex;
-
 use crate::config::types::EditSystem;
-
-static EDIT_SYSTEM: Mutex<EditSystem> = Mutex::new(EditSystem::Similarity);
 
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
 /// reads/writes the edit system via `/editsys` without a TUI.
 pub fn set_edit_system(es: EditSystem) {
-    *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner()) = es;
+    let owner = crate::engine::resources::current();
+    *owner.edit_system.lock().unwrap_or_else(|e| e.into_inner()) = es;
 }
 
 /// `pub` (not `pub(crate)`): see [`set_edit_system`].
 pub fn edit_system() -> EditSystem {
-    *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner())
+    let owner = crate::engine::resources::current();
+    *owner.edit_system.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-static DENY_REPEATED_READS: Mutex<bool> = Mutex::new(false);
-
 pub(crate) fn set_deny_repeated_reads(v: bool) {
-    *DENY_REPEATED_READS
+    let owner = crate::engine::resources::current();
+    *owner
+        .deny_repeated_reads
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = v;
 }
 
 pub(crate) fn deny_repeated_reads() -> bool {
-    *DENY_REPEATED_READS
+    let owner = crate::engine::resources::current();
+    *owner
+        .deny_repeated_reads
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
-
-struct ReadRecord {
-    path: String,
-    offset: usize,
-    limit: usize,
-    fingerprint: u32,
-}
-
-static READ_TRACKER: Mutex<Vec<ReadRecord>> = Mutex::new(Vec::new());
 
 pub(crate) fn track_read(
     path: &str,
@@ -61,10 +52,11 @@ pub(crate) fn track_read(
     limit: usize,
     fingerprint: u32,
 ) -> Option<String> {
+    let owner = crate::engine::resources::current();
     if !deny_repeated_reads() {
         return None;
     }
-    let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tracker = owner.reads.lock().unwrap_or_else(|e| e.into_inner());
     if tracker
         .iter()
         .any(|r| r.path == path && r.fingerprint != fingerprint)
@@ -82,7 +74,7 @@ pub(crate) fn track_read(
             if end > 0 { end } else { offset + 1 }
         ))
     } else {
-        tracker.push(ReadRecord {
+        tracker.push(crate::engine::resources::ReadRecord {
             path: path.to_string(),
             offset,
             limit,
@@ -93,7 +85,8 @@ pub(crate) fn track_read(
 }
 
 pub(crate) fn untrack_read_path(path: &str) {
-    let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let owner = crate::engine::resources::current();
+    let mut tracker = owner.reads.lock().unwrap_or_else(|e| e.into_inner());
     tracker.retain(|r| r.path != path);
 }
 

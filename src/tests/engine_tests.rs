@@ -689,3 +689,130 @@ async fn resume_session_continues_the_stored_conversation() {
     assert!(history.contains("stored question"), "{history}");
     assert!(history.contains("stored answer"), "{history}");
 }
+
+#[tokio::test]
+async fn model_commands_share_target_and_provider_qualified_selection() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _) = engine_with_turns(vec![]);
+    for command in [
+        "/model main anthropic::first-id",
+        "/models main anthropic::second-id",
+    ] {
+        let out = engine.run_string(command).await.unwrap();
+        assert!(out.error.is_none(), "{out:?}");
+        assert_eq!(engine.session().provider, "anthropic");
+        assert_eq!(engine.session().model, command.rsplit("::").next().unwrap());
+    }
+    let before = engine.session().clone();
+    let out = engine
+        .run_string("/model main missing-provider::bad-id")
+        .await
+        .unwrap();
+    assert!(out.text.contains("Unknown provider") || out.text.contains("unknown provider"));
+    assert_eq!(engine.session().model, before.model);
+    assert_eq!(engine.session().provider, before.provider);
+}
+
+#[tokio::test]
+async fn engines_keep_workspaces_and_tool_state_independent() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let cwd = std::env::current_dir().unwrap();
+    let root = std::env::temp_dir().join(format!("zs-engine-isolation-{}", uuid::Uuid::new_v4()));
+    let a_dir = root.join("a");
+    let b_dir = root.join("b");
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::create_dir_all(&b_dir).unwrap();
+    let (mut a, _) = engine_with_turns(vec![]);
+    let (mut b, _) = engine_with_turns(vec![]);
+    a.change_dir(&a_dir).unwrap();
+    b.change_dir(&b_dir).unwrap();
+    assert_eq!(std::env::current_dir().unwrap(), cwd);
+    let (a_out, b_out) = tokio::join!(
+        a.run_shell("printf alpha > note.txt; cat note.txt".into()),
+        b.run_shell("printf beta > note.txt; cat note.txt".into())
+    );
+    assert_eq!(a_out.unwrap().text, "alpha");
+    assert_eq!(b_out.unwrap().text, "beta");
+    assert_eq!(
+        std::fs::read_to_string(a_dir.join("note.txt")).unwrap(),
+        "alpha"
+    );
+    assert_eq!(
+        std::fs::read_to_string(b_dir.join("note.txt")).unwrap(),
+        "beta"
+    );
+    a.set_edit_system("hashedit").unwrap();
+    assert_eq!(
+        a.resources().sync(crate::agent::tools::edit_system),
+        crate::config::EditSystem::Hashedit
+    );
+    assert_eq!(
+        b.resources().sync(crate::agent::tools::edit_system),
+        crate::config::EditSystem::Similarity
+    );
+    a.resources()
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_none()));
+    b.resources()
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_none()));
+    a.resources()
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_some()));
+    a.shutdown().await;
+    b.shutdown().await;
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(not(feature = "subagents"))]
+#[tokio::test]
+async fn disabled_subagent_selection_never_changes_the_main_model() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let (mut engine, _) = engine_with_turns(vec![]);
+    let original = engine.session().model.clone();
+    for command in ["/model subagents", "/model subagents another-id"] {
+        let output = engine.run_string(command).await.unwrap();
+        assert!(output.text.contains("not enabled"), "{output:?}");
+        assert_eq!(engine.session().model, original);
+    }
+}
+
+#[cfg(feature = "subagents")]
+#[tokio::test]
+async fn engine_subagent_configuration_is_independent() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let make = |name: &str| {
+        Engine::new(
+            test_cli(),
+            Config {
+                subagent_model: Some(name.into()),
+                ..Config::default()
+            },
+            test_session(),
+            test_context(),
+            test_client(),
+            None,
+            Sandbox::new(false, "bwrap"),
+        )
+    };
+    let mut a = make("subagent-a");
+    let mut b = make("subagent-b");
+    let read_model = || crate::extras::subagents::model_settings().unwrap().1;
+    assert_eq!(a.resources().sync(read_model), "subagent-a");
+    assert_eq!(b.resources().sync(read_model), "subagent-b");
+    a.select_model(
+        crate::engine::models::ModelTarget::Subagent,
+        crate::engine::models::ModelChoice::new("anthropic", "changed-a"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(a.resources().sync(read_model), "changed-a");
+    assert_eq!(b.resources().sync(read_model), "subagent-b");
+    a.shutdown().await;
+    a.shutdown().await;
+    assert!(
+        a.run_prompt("late".into())
+            .await
+            .error
+            .unwrap()
+            .contains("shut down")
+    );
+    b.shutdown().await;
+}

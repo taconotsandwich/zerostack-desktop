@@ -24,7 +24,7 @@ pub(crate) fn file_uri(path: &Path) -> Option<String> {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir().ok()?.join(path)
+        crate::engine::resources::working_dir().ok()?.join(path)
     };
     let s = abs.to_str()?;
     let mut out = String::with_capacity(s.len() + 7);
@@ -76,6 +76,7 @@ impl LspClient {
         diag_notify: Arc<Notify>,
     ) -> Option<Arc<Self>> {
         let mut child = tokio::process::Command::new(cfg.command.as_str())
+            .current_dir(crate::engine::resources::working_dir().ok()?)
             .args(cfg.args.iter().map(|a| a.as_str()))
             .envs(&cfg.env)
             .stdin(Stdio::piped())
@@ -104,7 +105,7 @@ impl LspClient {
             let pending = pending.clone();
             let stdin = stdin.clone();
             let server_name = name.to_string();
-            tokio::spawn(async move {
+            crate::engine::resources::spawn(async move {
                 let mut stdout = stdout;
                 loop {
                     let frame = match rpc::read_frame(&mut stdout).await {
@@ -159,7 +160,7 @@ impl LspClient {
         // Drain stderr into the trace log so noisy servers don't fill pipes.
         {
             let server_name = name.to_string();
-            tokio::spawn(async move {
+            crate::engine::resources::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
                     tracing::trace!("lsp[{server_name}] stderr: {line}");

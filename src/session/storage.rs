@@ -25,6 +25,9 @@ fn dirs_path() -> PathBuf {
 }
 
 pub fn data_dir() -> PathBuf {
+    if let Some(path) = &crate::engine::resources::current().data_dir {
+        return path.clone();
+    }
     if let Some(dir) = std::env::var_os("ZS_DATA_DIR") {
         let expanded = crate::fs::expand_tilde(&dir.to_string_lossy());
         return PathBuf::from(expanded);
@@ -34,6 +37,9 @@ pub fn data_dir() -> PathBuf {
 }
 
 pub(crate) fn config_path() -> PathBuf {
+    if let Some(path) = &crate::engine::resources::current().config_dir {
+        return path.clone();
+    }
     if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
         let expanded = crate::fs::expand_tilde(&dir.to_string_lossy());
         return PathBuf::from(expanded);

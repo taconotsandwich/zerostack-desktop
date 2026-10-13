@@ -23,9 +23,10 @@ pub(crate) fn load_embedded_files(embedded: &Dir, ext: &str) -> Vec<(String, Str
 }
 
 pub(crate) fn load_dir_files(dir: &Path, ext: &str) -> Vec<(String, String)> {
+    let dir = crate::engine::resources::resolve(dir);
     let mut results = Vec::new();
     if dir.exists()
-        && let Ok(entries) = std::fs::read_dir(dir)
+        && let Ok(entries) = std::fs::read_dir(&dir)
     {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -224,7 +225,7 @@ fn walk_context_files() -> (Option<String>, Option<String>) {
         }
     }
 
-    let cwd = std::env::current_dir().ok();
+    let cwd = crate::engine::resources::working_dir().ok();
     if let Some(cwd) = cwd {
         let mut current = Some(cwd.as_path());
         while let Some(dir) = current {

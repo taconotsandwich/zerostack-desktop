@@ -45,6 +45,9 @@ pub(crate) fn pick_existing(dir: &Path) -> PathBuf {
 }
 
 fn resolve_config_path() -> PathBuf {
+    if let Some(dir) = &crate::engine::resources::current().config_dir {
+        return pick_existing(dir);
+    }
     if let Some(dir) = std::env::var_os("ZS_CONFIG_DIR") {
         return pick_existing(&PathBuf::from(dir));
     }
@@ -407,11 +410,11 @@ pub const LOCAL_CONFIG_PATH: &str = ".zerostack/config.toml";
 /// key, including `yolo` or permission rules — so a startup note is printed
 /// whenever an override is applied.
 fn apply_local_override(cfg: &mut Config) {
-    let path = std::path::Path::new(LOCAL_CONFIG_PATH);
+    let path = crate::engine::resources::resolve(LOCAL_CONFIG_PATH);
     if !path.exists() {
         return;
     }
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
+    let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         eprintln!(
             "error: failed to read project config ({}): {}",
             path.display(),

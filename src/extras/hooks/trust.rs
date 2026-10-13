@@ -98,7 +98,7 @@ pub(crate) fn confirm_untrusted_hook(description: &str) -> bool {
 // Async variant that runs `stdin.read_line` on the blocking pool so it does
 // not stall the tokio async worker.
 /*pub(crate) async fn confirm_untrusted_hook_async(description: String) -> bool {
-    tokio::task::spawn_blocking(move || confirm_untrusted_hook(&description))
+    crate::engine::resources::spawn_blocking(move || confirm_untrusted_hook(&description))
         .await
         .unwrap_or(false)
 }*/
@@ -241,7 +241,7 @@ pub(crate) fn build_dispatcher_from_paths(
 /// current directory, falling back to the non-canonical current directory,
 /// then to `.` if even that is unavailable. Never panics.
 fn current_project_root() -> PathBuf {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::engine::resources::working_dir().unwrap_or_else(|_| PathBuf::from("."));
     cwd.canonicalize().unwrap_or(cwd)
 }
 
@@ -267,7 +267,7 @@ pub(crate) async fn load_dispatcher_async(no_hooks_flag: bool, headless: bool) -
     // Run the entire sync load on the blocking pool. The stdin prompts inside
     // `filter_trusted_project_hooks` will block the blocking thread, not the async worker.
     let no_hooks = no_hooks_flag;
-    tokio::task::spawn_blocking(move || load_dispatcher(no_hooks, headless))
+    crate::engine::resources::spawn_blocking(move || load_dispatcher(no_hooks, headless))
         .await
         .unwrap_or_else(|_| HookDispatcher::from_config(&HashMap::new()).expect("empty"))
 }
