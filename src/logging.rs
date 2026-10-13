@@ -108,6 +108,11 @@ pub fn build_stderr_filter(cli: &Cli) -> EnvFilter {
     EnvFilter::new("warn,rig=off")
 }
 
+#[cfg(feature = "logging")]
+pub(crate) fn build_file_filter() -> EnvFilter {
+    EnvFilter::new("zerostack=trace,rmcp=warn,rig=off")
+}
+
 /// No-op when the `logging` feature is disabled: the `tracing` macros still
 /// compile but no subscriber is installed, so log lines are dropped.
 #[cfg(not(feature = "logging"))]
@@ -116,7 +121,7 @@ pub fn init(_cli: &Cli) {}
 #[cfg(feature = "logging")]
 pub fn init(cli: &Cli) {
     let stderr_filter = build_stderr_filter(cli);
-    let file_filter = EnvFilter::new("zerostack=trace,rig=off");
+    let file_filter = build_file_filter();
 
     let stderr_layer = tracing_subscriber::fmt::layer()
         .with_writer(io::stderr)

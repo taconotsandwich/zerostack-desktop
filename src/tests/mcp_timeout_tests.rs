@@ -195,3 +195,54 @@ async fn tool_call_on_dead_server_reports_reconnect_failure() {
         "error should name the server: {msg}"
     );
 }
+
+#[tokio::test]
+async fn shutdown_closes_services_while_tools_retain_shared_handles() {
+    use crate::extras::mcp::McpClientManager;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (client_io, server_io) = tokio::io::duplex(8192);
+    let server = tokio::spawn(async move {
+        let mut stream = BufReader::new(server_io);
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        let init: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let reply = serde_json::json!({
+            "jsonrpc": "2.0", "id": init["id"],
+            "result": {"protocolVersion": init["params"]["protocolVersion"],
+                "capabilities": {}, "serverInfo": {"name": "fixture", "version": "1"}}
+        });
+        stream
+            .get_mut()
+            .write_all(format!("{reply}\n").as_bytes())
+            .await
+            .unwrap();
+        loop {
+            line.clear();
+            if stream.read_line(&mut line).await.unwrap() == 0 {
+                break;
+            }
+        }
+    });
+    let client = rmcp::service::serve_client((), client_io).await;
+    let shared = Arc::new(RwLock::new(McpClientHandle {
+        server_name: "retained-by-tools".into(),
+        running_service: client.unwrap(),
+        tool_timeout: Duration::from_secs(1),
+        config: command_config("unused", vec![], None, None, None),
+    }));
+    // This clone models the reference kept by every MCP dynamic tool.
+    let tool_handle = shared.clone();
+    let manager = McpClientManager {
+        handles: vec![shared],
+        notices: vec![],
+    };
+    manager.shutdown().await;
+    assert!(tool_handle.read().await.running_service.is_closed());
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("server must observe transport close before runtime exits")
+        .unwrap();
+}
