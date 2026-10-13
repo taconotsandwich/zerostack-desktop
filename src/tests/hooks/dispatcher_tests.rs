@@ -367,4 +367,13 @@ async fn once_handler_runs_on_first_dispatch_and_is_skipped_on_second() {
 
     let contents = std::fs::read_to_string(&marker).unwrap_or_default();
     assert_eq!(contents, "x", "handler with once:true must not run twice");
+    dispatcher
+        .fresh()
+        .dispatch_pre_tool_use(&ctx(), "bash", serde_json::json!({}))
+        .await;
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "xx",
+        "another runtime gets fresh once state"
+    );
 }

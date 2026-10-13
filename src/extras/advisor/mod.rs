@@ -1,4 +1,3 @@
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rig::DynModel;
@@ -47,10 +46,8 @@ pub struct AdvisorToolConfig {
     pub kilobytes_limit: u32,
 }
 
-static CONFIG: Mutex<Option<AdvisorToolConfig>> = Mutex::new(None);
-static SESSION_MESSAGES: Mutex<Vec<SessionMessage>> = Mutex::new(Vec::new());
-
 pub fn init_config(cfg: AdvisorToolConfig) {
+    let owner = crate::engine::resources::current();
     tracing::debug!(
         "advisor init: model={}, enabled={}, max_uses={:?}, human_handoff={}",
         cfg.advisor_model,
@@ -58,14 +55,15 @@ pub fn init_config(cfg: AdvisorToolConfig) {
         cfg.max_uses,
         cfg.human_handoff,
     );
-    *CONFIG.lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg);
+    *owner.advisor.lock().unwrap_or_else(|e| e.into_inner()) = Some(cfg);
 }
 
 pub fn with_config<F, R>(f: F) -> R
 where
     F: FnOnce(&AdvisorToolConfig) -> R,
 {
-    let guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    let owner = crate::engine::resources::current();
+    let guard = owner.advisor.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = guard.as_ref().expect("advisor config not initialized");
     f(cfg)
 }
@@ -74,7 +72,9 @@ where
 /// has not run yet (headless engines and tests build agents before, or
 /// without, advisor startup).
 pub fn is_enabled() -> bool {
-    CONFIG
+    let owner = crate::engine::resources::current();
+    owner
+        .advisor
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .as_ref()
@@ -82,14 +82,19 @@ pub fn is_enabled() -> bool {
 }
 
 pub fn update_client(client: AnyClient) {
-    let mut guard = CONFIG.lock().unwrap_or_else(|e| e.into_inner());
+    let owner = crate::engine::resources::current();
+    let mut guard = owner.advisor.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ref mut cfg) = *guard {
         cfg.client = Some(client);
     }
 }
 
 pub fn set_session_messages(msgs: Vec<SessionMessage>) {
-    *SESSION_MESSAGES.lock().unwrap_or_else(|e| e.into_inner()) = msgs;
+    let owner = crate::engine::resources::current();
+    *owner
+        .advisor_messages
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = msgs;
 }
 
 #[derive(Deserialize)]
@@ -116,7 +121,9 @@ impl Tool for AdvisorTool {
     type Output = String;
 
     fn description(&self) -> String {
-        let human_handoff = CONFIG
+        let owner = crate::engine::resources::current();
+        let human_handoff = owner
+            .advisor
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(|c| c.human_handoff))
@@ -157,6 +164,7 @@ conversation, so focus your question on the specific decision you need help with
     }
 
     async fn call(&self, args: AdvisorArgs) -> Result<String, ToolError> {
+        let owner = crate::engine::resources::current();
         if args.question.is_empty() {
             return Err(ToolError::Msg("advisor: question must not be empty".into()));
         }
@@ -207,7 +215,8 @@ conversation, so focus your question on the specific decision you need help with
             };
 
             let model = client.completion_model(cfg.advisor_model.clone()).as_dyn();
-            let messages = SESSION_MESSAGES
+            let messages = owner
+                .advisor_messages
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clone();

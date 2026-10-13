@@ -88,7 +88,7 @@ impl Tool for GrepTool {
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex pattern: {}", e)))?;
 
-        let search_path = crate::fs::expand_tilde(args.path.as_deref().unwrap_or("."));
+        let search_path = crate::fs::resolve_path(args.path.as_deref().unwrap_or("."));
         let context = args.context_lines.unwrap_or(0);
 
         let include_re = args.include.as_ref().map(|g| {

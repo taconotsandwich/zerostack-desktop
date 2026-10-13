@@ -318,11 +318,12 @@ mod worktree {
         let _cwd = crate::tests::acquire_cwd();
         let repo = Repo::new();
         let (mut engine, model) = engine(test_cli(), vec![]);
+        std::env::set_current_dir(&repo.orig).unwrap();
 
         let out = engine.run_string("/wt-exit").await.unwrap();
 
         assert!(out.text.contains("returned to main repo"), "{}", out.text);
-        assert_eq!(std::env::current_dir().unwrap(), repo.main);
+        assert_eq!(std::env::current_dir().unwrap(), repo.orig);
         assert_eq!(engine.session().working_dir, repo.main.to_string_lossy());
         assert!(repo.worktree.exists());
         assert!(model.requests().is_empty());
@@ -336,6 +337,7 @@ mod worktree {
         // Nothing to merge: the branch is already in `main`, so the
         // verification finds it merged whatever the agent did.
         let (mut engine, model) = engine(test_cli(), vec![vec!["merged it"]]);
+        std::env::set_current_dir(&repo.orig).unwrap();
 
         let out = engine.run_string("/wt-merge").await.unwrap();
 
@@ -348,7 +350,8 @@ mod worktree {
             "{}",
             out.text
         );
-        assert_eq!(std::env::current_dir().unwrap(), repo.main);
+        assert_eq!(std::env::current_dir().unwrap(), repo.orig);
+        assert_eq!(engine.session().working_dir, repo.main.to_string_lossy());
         assert!(!repo.worktree.exists(), "the worktree is cleaned up");
     }
 

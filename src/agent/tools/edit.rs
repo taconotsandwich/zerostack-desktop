@@ -554,7 +554,7 @@ impl Tool for EditTool {
     }
 
     async fn call(&self, args: EditArgs) -> Result<String, ToolError> {
-        let path = crate::fs::expand_tilde(&args.path);
+        let path = crate::fs::resolve_path(&args.path);
         let es = edit_system();
         tracing::debug!(
             "tool edit start: path={}, mode={:?}, has_block={}, has_edits={}",

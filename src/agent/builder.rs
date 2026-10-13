@@ -29,13 +29,18 @@ where
     let description = PortableTool::description(&tool);
     let parameters = PortableTool::parameters(&tool);
     let tool = Arc::new(tool);
+    let owner = crate::engine::resources::current();
     DynamicTool::new_with_context(
         name,
         description,
         parameters,
         move |_context: &mut ToolContext, args: serde_json::Value| {
             let tool = Arc::clone(&tool);
-            Box::pin(async move {
+            let owner = owner.clone();
+            Box::pin(owner.scope(async move {
+                if crate::engine::resources::current().is_closed() {
+                    return Err(ToolExecutionError::other("engine is shut down"));
+                }
                 let parsed: T::Args = serde_json::from_value(args).map_err(|error| {
                     ToolExecutionError::invalid_args(format!(
                         "failed to parse tool arguments: {error}"
@@ -54,7 +59,7 @@ where
                         Err(mapped.with_model_output(rig::tool::ToolOutput::text(message)))
                     }
                 }
-            })
+            }))
         },
     )
 }
@@ -75,7 +80,7 @@ pub fn build_preamble(context: &ContextFiles, reasoning_enabled: bool) -> String
     #[cfg(feature = "archmd")]
     let context_architecture = context.architecture.as_deref().unwrap_or("");
     let context_prompt = context.current_prompt.as_deref().unwrap_or("");
-    let cwd = std::env::current_dir()
+    let cwd = crate::engine::resources::working_dir()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
@@ -285,7 +290,10 @@ pub async fn build_agent_inner(model: DynModel<Completion>, build: AgentBuild<'_
         None
     } else {
         cfg.resolve_lsp().map(|c| {
-            crate::extras::lsp::LspManager::new(c, std::env::current_dir().unwrap_or_default())
+            crate::extras::lsp::LspManager::new(
+                c,
+                crate::engine::resources::working_dir().unwrap_or_default(),
+            )
         })
     };
 
@@ -502,7 +510,7 @@ pub fn build_btw_agent_inner(model: DynModel<Completion>, build: AgentBuild<'_>)
         ..
     } = build;
 
-    let cwd = std::env::current_dir()
+    let cwd = crate::engine::resources::working_dir()
         .ok()
         .map(|p| p.display().to_string())
         .unwrap_or_default();

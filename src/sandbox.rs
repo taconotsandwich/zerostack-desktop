@@ -411,7 +411,7 @@ impl Sandbox {
     /// directory the sandbox mounts (the ACP server never chdirs), so warning
     /// about it would both fire spuriously and stay silent on the real case.
     pub(crate) fn shadowed_mask_warning(&self) -> Option<String> {
-        let cwd = std::env::current_dir().ok()?;
+        let cwd = crate::engine::resources::working_dir().ok()?;
         let root = self.shadowed_mask_root(&cwd)?;
         Some(format!(
             "sandbox: the working directory is inside {}, so the project bind partially shadows the mask on it",
@@ -480,6 +480,9 @@ impl Sandbox {
 
     fn bare_command(&self, command: &str) -> Command {
         let mut cmd = Command::new(&self.shell);
+        if let Ok(cwd) = crate::engine::resources::working_dir() {
+            cmd.current_dir(cwd);
+        }
         cmd.arg("-c").arg(command);
         configure_child_lifetime(&mut cmd);
         cmd
@@ -506,10 +509,11 @@ impl Sandbox {
             return Ok(self.bare_command(command));
         }
 
-        let cwd = std::env::current_dir().unwrap_or_default();
+        let cwd = crate::engine::resources::working_dir().unwrap_or_default();
 
         if self.backend == "zerobox" {
             let mut cmd = Command::new("zerobox");
+            cmd.current_dir(&cwd);
             cmd.arg("--allow-write");
             cmd.arg(cwd.as_os_str());
             cmd.arg("--");
@@ -521,6 +525,7 @@ impl Sandbox {
         }
 
         let mut cmd = Command::new("bwrap");
+        cmd.current_dir(&cwd);
         cmd.arg("--clearenv");
         for (k, v) in essential_env() {
             cmd.arg("--setenv").arg(k).arg(v);
@@ -905,7 +910,7 @@ fn spawn_pipe_reader(
 ) {
     let output = Arc::new(Mutex::new(Vec::new()));
     let reader_output = output.clone();
-    let handle = tokio::spawn(async move {
+    let handle = crate::engine::resources::spawn(async move {
         if let Some(mut pipe) = pipe {
             let mut buf = [0; 8192];
             loop {

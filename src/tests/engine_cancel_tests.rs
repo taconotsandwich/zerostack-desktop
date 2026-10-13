@@ -118,3 +118,106 @@ async fn cancel_stops_the_turn_and_keeps_the_conversation_going() {
 fn cancel_without_a_running_turn_does_nothing() {
     crate::engine::CancelHandle::default().cancel();
 }
+
+struct ObservedTool {
+    started: std::sync::Arc<tokio::sync::Notify>,
+    stopped: std::sync::Arc<tokio::sync::Notify>,
+}
+
+impl Tool for ObservedTool {
+    const NAME: &'static str = "observed";
+    type Error = ToolError;
+    type Args = NoArgs;
+    type Output = String;
+    fn description(&self) -> String {
+        "Wait until dropped".into()
+    }
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type":"object","properties":{}})
+    }
+    async fn call(&self, _: NoArgs) -> Result<String, ToolError> {
+        struct Stopped(std::sync::Arc<tokio::sync::Notify>);
+        impl Drop for Stopped {
+            fn drop(&mut self) {
+                self.0.notify_one();
+            }
+        }
+        let _stopped = Stopped(self.stopped.clone());
+        self.started.notify_one();
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn dropping_engine_prompt_future_cancels_the_active_tool() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let started = std::sync::Arc::new(tokio::sync::Notify::new());
+    let stopped = std::sync::Arc::new(tokio::sync::Notify::new());
+    let model = FakeModel::from_stream_turns(vec![vec![
+        MockStreamEvent::tool_call("call", "observed", serde_json::json!({})),
+        MockStreamEvent::final_response_with_default_usage(),
+    ]]);
+    let agent = AgentBuilder::new(model)
+        .tool(ObservedTool {
+            started: started.clone(),
+            stopped: stopped.clone(),
+        })
+        .build();
+    let mut engine = Engine::new(
+        super::engine_tests::test_cli(),
+        Config::default(),
+        super::engine_tests::test_session(),
+        super::engine_tests::test_context(),
+        super::engine_tests::test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(AnyAgent::Mock(agent));
+    let mut prompt = Box::pin(engine.run_prompt("go".into()));
+    tokio::select! {
+        result = &mut prompt => panic!("tool should stall: {result:?}"),
+        started = tokio::time::timeout(Duration::from_secs(2), started.notified()) => started.expect("tool started"),
+    }
+    drop(prompt);
+    tokio::time::timeout(Duration::from_secs(2), stopped.notified())
+        .await
+        .expect("dropping the prompt must drop its running tool");
+    engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropping_runner_stops_background_work() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    struct OnDrop(Arc<AtomicBool>);
+    impl Drop for OnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let stopped = Arc::new(AtomicBool::new(false));
+    let guard = OnDrop(stopped.clone());
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        let _guard = guard;
+        let _ = started_tx.send(());
+        std::future::pending::<()>().await;
+    });
+    started_rx.await.unwrap();
+    let (_tx, rx) = tokio::sync::mpsc::channel(1);
+    let runner = crate::agent::runner::AgentRunner {
+        event_rx: rx,
+        abort_handle: task.abort_handle().into(),
+    };
+    drop(runner);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap_err()
+            .is_cancelled()
+    );
+    assert!(stopped.load(Ordering::SeqCst));
+}

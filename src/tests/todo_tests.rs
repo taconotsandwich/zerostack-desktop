@@ -1,10 +1,12 @@
 use crate::agent::tools::WriteTodoList;
-use crate::agent::tools::todo::{TODO_LIST, TodoItem, TodoWriteArgs};
+use crate::agent::tools::todo::{TodoItem, TodoWriteArgs};
 use compact_str::CompactString;
 use rig::tool::PortableTool as Tool;
 
 fn reset_todo_list() {
-    let mut list = TODO_LIST
+    let owner = crate::engine::resources::current();
+    let mut list = owner
+        .todos
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
     list.clear();
@@ -92,6 +94,7 @@ async fn call_formats_todo_items_with_icons() {
 
 #[tokio::test]
 async fn call_updates_global_todo_list() {
+    let owner = crate::engine::resources::current();
     reset_todo_list();
     let tool = WriteTodoList::new(None, None);
     let args = TodoWriteArgs {
@@ -110,7 +113,8 @@ async fn call_updates_global_todo_list() {
     };
     let _ = tool.call(args).await;
 
-    let list = TODO_LIST
+    let list = owner
+        .todos
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
     assert_eq!(list.len(), 2);
@@ -120,6 +124,7 @@ async fn call_updates_global_todo_list() {
 
 #[tokio::test]
 async fn call_overwrites_previous_list() {
+    let owner = crate::engine::resources::current();
     reset_todo_list();
     let tool = WriteTodoList::new(None, None);
 
@@ -141,7 +146,8 @@ async fn call_overwrites_previous_list() {
     };
     let _ = tool.call(args2).await;
 
-    let list = TODO_LIST
+    let list = owner
+        .todos
         .lock()
         .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
     assert_eq!(list.len(), 1);

@@ -113,7 +113,7 @@ editing in a known location, grepping for a literal you will act on immediately.
             let event_tx = subagent_event_tx.clone();
             let architecture = architecture.clone();
             let config = config.clone();
-            let join_handle = tokio::spawn(async move {
+            let join_handle = crate::engine::resources::spawn(async move {
                 #[cfg(feature = "hooks")]
                 let prompt_text =
                     match crate::extras::hooks::dispatch_subagent_start("explore").await {

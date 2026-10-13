@@ -4,15 +4,7 @@ use crate::ui::slash::{SlashCtx, write_error, write_ok};
 
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
 /// spawns the same deferred prompt as `/init`.
-pub const AGENTS_CREATION_PROMPT: &str = "\
-Create an AGENTS.md file for this project. Read existing AGENTS.md or CLAUDE.md files \
-in parent directories, README.md, and any config files to understand the project first. \
-Then write a comprehensive AGENTS.md that documents: \
-1) the overall purpose and architecture \
-2) build/test/lint commands \
-3) coding style and conventions \
-4) directory layout \
-Keep it focused and actionable for a coding agent.";
+pub use crate::engine::actions::AGENTS_CREATION_PROMPT;
 
 const AGENTS_DESC: &str = "tells coding agents how to build, test, and work with this codebase";
 const ARCHITECTURE_DESC: &str = "documents high-level codebase architecture for AI agents";
@@ -47,7 +39,8 @@ fn build_question(label: &str, desc: &str, exists: bool, cwd: &std::path::Path) 
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     let force = parts.len() >= 2 && parts[1] == "force";
 
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cwd =
+        crate::engine::resources::working_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let agents_path = cwd.join("AGENTS.md");
     let arch_path = cwd.join("ARCHITECTURE.md");
 

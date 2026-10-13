@@ -16,8 +16,9 @@ struct ChdirGuard {
 
 impl ChdirGuard {
     fn new(target: &Path) -> Result<Self, String> {
-        let orig_dir = std::env::current_dir().map_err(|e| format!("current_dir: {}", e))?;
-        std::env::set_current_dir(target)
+        let orig_dir =
+            crate::engine::resources::working_dir().map_err(|e| format!("current_dir: {}", e))?;
+        crate::engine::resources::change_dir(target)
             .map_err(|e| format!("cd to {}: {}", target.display(), e))?;
         Ok(ChdirGuard { orig_dir })
     }
@@ -25,7 +26,7 @@ impl ChdirGuard {
 
 impl Drop for ChdirGuard {
     fn drop(&mut self) {
-        let _ = std::env::set_current_dir(&self.orig_dir);
+        let _ = crate::engine::resources::change_dir(&self.orig_dir);
     }
 }
 
@@ -86,7 +87,7 @@ fn absolutize(p: &str) -> PathBuf {
     let abs = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        match std::env::current_dir() {
+        match crate::engine::resources::working_dir() {
             Ok(cwd) => cwd.join(path),
             Err(_) => path.to_path_buf(),
         }
@@ -95,7 +96,7 @@ fn absolutize(p: &str) -> PathBuf {
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+    let output = git_command().args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -105,7 +106,7 @@ fn git_output(args: &[&str]) -> Option<String> {
 /// True when `branch` exists as a local branch of the repo at `repo_path`.
 pub fn branch_exists(repo_path: &Path, branch: &str) -> bool {
     // `--quiet` only silences error output; the exit status is what matters.
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(repo_path)
         .args([
@@ -121,7 +122,7 @@ pub fn branch_exists(repo_path: &Path, branch: &str) -> bool {
 /// True when `wt_path` is currently registered as a linked worktree of the
 /// repo at `main_repo_path`.
 pub fn is_worktree_registered(main_repo_path: &Path, wt_path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(main_repo_path)
         .args(["worktree", "list", "--porcelain"])
@@ -172,7 +173,7 @@ pub fn validate_branch_name(name: &str) -> Result<(), String> {
     if name.starts_with('-') {
         return Err(format!("invalid name '{}': must not start with '-'", name));
     }
-    let output = Command::new("git")
+    let output = git_command()
         .args(["check-ref-format", "--branch", name])
         .output()
         .map_err(|e| format!("failed to run git: {}", e))?;
@@ -236,7 +237,7 @@ pub fn detect() -> Option<WorktreeInfo> {
 }
 
 pub fn current_branch() -> Option<String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .ok()?;
@@ -249,7 +250,7 @@ pub fn current_branch() -> Option<String> {
 
 pub fn default_branch(repo_path: &Path) -> Option<String> {
     for name in &["main", "master"] {
-        let output = Command::new("git")
+        let output = git_command()
             .arg("-C")
             .arg(repo_path)
             .args(["rev-parse", "--verify", name])
@@ -309,7 +310,7 @@ pub fn create(name: &str, base_dir: Option<&Path>) -> Result<(PathBuf, WorktreeI
             .map_err(|e| format!("failed to create base dir {}: {}", parent.display(), e))?;
     }
 
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(&main_repo)
         .args(["worktree", "add", "-b", name])
@@ -349,7 +350,7 @@ pub fn repo_name(path: &Path) -> String {
 /// On Success or Conflicts, current directory is left in the main repo (on target).
 /// On Error, the function cleans up (pops any stash) and restores the original directory.
 pub fn try_merge(info: &WorktreeInfo, target: &str) -> (MergeState, MergeOutcome) {
-    let orig_dir = match std::env::current_dir() {
+    let orig_dir = match crate::engine::resources::working_dir() {
         Ok(d) => d,
         Err(e) => {
             return (
@@ -598,13 +599,11 @@ pub fn cleanup_worktree(wt_path: &str, branch: &str, main_repo_path: &str, force
         }
     };
     let remove_output = if force {
-        Command::new("git")
+        git_command()
             .args(["worktree", "remove", "--force", wt_path])
             .output()
     } else {
-        Command::new("git")
-            .args(["worktree", "remove", wt_path])
-            .output()
+        git_command().args(["worktree", "remove", wt_path]).output()
     };
     if let Ok(out) = &remove_output {
         if out.status.success() {
@@ -624,9 +623,7 @@ pub fn cleanup_worktree(wt_path: &str, branch: &str, main_repo_path: &str, force
     // before cleanup_worktree there): an agent may have done a true merge,
     // where -d is a meaningful safety check. complete_merge always uses -D
     // because it only ever runs after a squash merge.
-    let branch_output = Command::new("git")
-        .args(["branch", branch_flag, branch])
-        .output();
+    let branch_output = git_command().args(["branch", branch_flag, branch]).output();
     if let Ok(out) = &branch_output {
         if out.status.success() {
             tracing::info!(branch, "cleanup_worktree: deleted branch");
@@ -674,18 +671,20 @@ pub fn cancel_merge(state: &MergeState) -> Result<(), String> {
 
 /// Check if there is an active merge conflict in the current directory.
 pub fn has_merge_conflict() -> bool {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd = crate::engine::resources::working_dir().unwrap_or_else(|_| PathBuf::from("."));
     repo_has_merge_conflict(&cwd)
 }
 
 /// List files with merge conflicts in the current directory.
 pub fn conflicted_files() -> Vec<String> {
-    repo_conflicted_files(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+    repo_conflicted_files(
+        &crate::engine::resources::working_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    )
 }
 
 /// Check for an active merge conflict in `repo_path` without changing CWD.
 pub fn repo_has_merge_conflict(repo_path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_path)
         .args(["rev-parse", "--git-path", "MERGE_HEAD"])
@@ -707,7 +706,7 @@ pub fn repo_has_merge_conflict(repo_path: &Path) -> bool {
             }
         }
     }
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_path)
         .args(["diff", "--name-only", "--diff-filter=U"])
@@ -720,7 +719,7 @@ pub fn repo_has_merge_conflict(repo_path: &Path) -> bool {
 
 /// List files with merge conflicts in `repo_path` without changing CWD.
 pub fn repo_conflicted_files(repo_path: &Path) -> Vec<String> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(repo_path)
         .args(["diff", "--name-only", "--diff-filter=U"])
@@ -777,7 +776,7 @@ pub fn verify_branch_merged(main_repo: &Path, target: &str, branch: &str) -> Age
 }
 
 fn branch_is_ancestor(main_repo: &Path, branch: &str, target: &str) -> bool {
-    Command::new("git")
+    git_command()
         .arg("-C")
         .arg(main_repo)
         .args(["merge-base", "--is-ancestor", branch, target])
@@ -788,7 +787,7 @@ fn branch_is_ancestor(main_repo: &Path, branch: &str, target: &str) -> bool {
 /// Number of `branch` commits with no patch-equivalent in `target`.
 /// Errors when refs are missing or share no merge base (conservative: not merged).
 fn cherry_unmerged_count(main_repo: &Path, target: &str, branch: &str) -> Result<usize, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(main_repo)
         .args(["cherry", target, branch])
@@ -817,14 +816,14 @@ fn cherry_unmerged_count(main_repo: &Path, target: &str, branch: &str) -> Result
 /// `git diff --cached --quiet` is empty exactly when there is nothing
 /// staged to commit.
 fn is_nothing_to_commit(_err: &str) -> bool {
-    Command::new("git")
+    git_command()
         .args(["diff", "--cached", "--quiet"])
         .status()
         .is_ok_and(|s| s.success())
 }
 
 fn run_git<const N: usize>(args: [&str; N]) -> Result<String, String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .map_err(|e| format!("git failed: {}", e))?;
@@ -838,7 +837,7 @@ fn run_git<const N: usize>(args: [&str; N]) -> Result<String, String> {
 }
 
 fn run_git_quiet<const N: usize>(args: [&str; N]) -> Option<String> {
-    let output = Command::new("git").args(args).output().ok()?;
+    let output = git_command().args(args).output().ok()?;
     if output.status.success() {
         Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
     } else {
@@ -849,7 +848,7 @@ fn run_git_quiet<const N: usize>(args: [&str; N]) -> Option<String> {
 }
 
 fn run_git_quiet_logged<const N: usize>(args: [&str; N], context: &str) -> Result<(), String> {
-    let output = Command::new("git")
+    let output = git_command()
         .args(args)
         .output()
         .map_err(|e| format!("git failed: {}", e))?;
@@ -868,7 +867,7 @@ fn run_git_quiet_logged<const N: usize>(args: [&str; N], context: &str) -> Resul
 }
 
 fn has_uncommitted_changes() -> bool {
-    let output = Command::new("git").args(["status", "--porcelain"]).output();
+    let output = git_command().args(["status", "--porcelain"]).output();
     match output {
         Ok(out) if out.status.success() => !String::from_utf8_lossy(&out.stdout).trim().is_empty(),
         _ => false,
@@ -876,7 +875,7 @@ fn has_uncommitted_changes() -> bool {
 }
 
 pub fn worktree_has_uncommitted(wt_path: &Path) -> bool {
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(wt_path)
         .args(["status", "--porcelain"])
@@ -890,7 +889,7 @@ pub fn worktree_has_uncommitted(wt_path: &Path) -> bool {
 pub fn worktree_auto_commit_all(wt_path: &Path) -> Result<(), String> {
     // Use `-u` (update tracked files only) instead of `-A` (all including
     // untracked) to avoid auto-committing new files that may contain secrets.
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(wt_path)
         .args(["add", "-u"])
@@ -900,7 +899,7 @@ pub fn worktree_auto_commit_all(wt_path: &Path) -> Result<(), String> {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git add -u failed: {}", stderr.trim()));
     }
-    let status = Command::new("git")
+    let status = git_command()
         .arg("-C")
         .arg(wt_path)
         .args(["diff", "--cached", "--quiet"])
@@ -910,7 +909,7 @@ pub fn worktree_auto_commit_all(wt_path: &Path) -> Result<(), String> {
         // Nothing staged: either clean, or only untracked files (which `-u`
         // deliberately skips). Committing would fail with "nothing to commit",
         // so surface that distinction instead.
-        let untracked = Command::new("git")
+        let untracked = git_command()
             .arg("-C")
             .arg(wt_path)
             .args(["status", "--porcelain"])
@@ -928,7 +927,7 @@ pub fn worktree_auto_commit_all(wt_path: &Path) -> Result<(), String> {
             Ok(())
         };
     }
-    let output = Command::new("git")
+    let output = git_command()
         .arg("-C")
         .arg(wt_path)
         .args(["commit", "-m", "auto-commit: save changes before merge"])
@@ -1019,4 +1018,13 @@ pub fn finish_agent_merge(
             branch, target, reason, wt_path
         ),
     }
+}
+
+/// Run repository operations in this engine’s workspace.
+fn git_command() -> Command {
+    let mut command = Command::new("git");
+    if let Ok(cwd) = crate::engine::resources::working_dir() {
+        command.current_dir(cwd);
+    }
+    command
 }

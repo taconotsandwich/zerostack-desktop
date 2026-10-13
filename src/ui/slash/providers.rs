@@ -1,9 +1,7 @@
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
-
-use crate::cli::Cli;
-use crate::config::{self, Config};
-use crate::provider::{AnyClient, ModelEntry};
+use crate::config;
+use crate::engine::models::{
+    ModelChoice, cached_model_ids, fetch_models_cached, resolve_model_choice,
+};
 use crate::ui::slash::{SlashCtx, write_error, write_ok, write_result};
 
 pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
@@ -20,221 +18,16 @@ pub async fn handle(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()
     }
 }
 
-static MODEL_CACHE: LazyLock<Mutex<HashMap<String, Arc<[ModelEntry]>>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Returns the provider's models.
-///
-/// Network is only touched on `refresh`, for custom gateways, or for built-in
-/// providers that aren't baked (e.g. ollama). Baked built-ins are served from
-/// the embedded catalog with no network call — this is what keeps startup instant.
-pub(crate) async fn fetch_models_cached(
-    provider: &str,
-    is_custom: bool,
-    client: &AnyClient,
-    cli: &Cli,
-    cfg: &Config,
-    refresh: bool,
-) -> anyhow::Result<Arc<[ModelEntry]>> {
-    if !refresh {
-        if let Some(hit) = MODEL_CACHE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(provider)
-        {
-            return Ok(Arc::clone(hit)); // guard dropped here, NOT across any await
-        }
-        // No cache yet: serve the baked catalog for built-in providers — no network.
-        if !is_custom && let Some(entries) = crate::models_catalog::catalog_entries(provider) {
-            let models: Vec<ModelEntry> = entries
-                .iter()
-                .filter(|m| crate::provider::is_agent_model(m))
-                .cloned()
-                .collect();
-            let arc: Arc<[ModelEntry]> = Arc::from(models.into_boxed_slice());
-            MODEL_CACHE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(provider.to_string(), Arc::clone(&arc));
-            return Ok(arc);
-        }
-    }
-    tracing::debug!(
-        "fetching model list for provider '{}' over the network (custom={}, refresh={})",
-        provider,
-        is_custom,
-        refresh
+async fn apply_choice(ctx: &mut SlashCtx<'_>, choice: ModelChoice) -> anyhow::Result<()> {
+    let choice =
+        crate::engine::models::select_model(ctx.cli, ctx.cfg, ctx.session, ctx.client, choice)
+            .await?;
+    ctx.rebuild_agent().await;
+    write_ok(
+        ctx.renderer,
+        format!("switched to model: {}", choice.key.id),
     );
-    let mut models = if is_custom {
-        // Single GET that yields both listing and pricing — avoids duplicate
-        // `GET /models` for custom gateways.
-        let (m, pricing) = crate::provider::fetch_custom_models_raw(
-            provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        )
-        .await?;
-        let mut m = m;
-        m.retain(crate::provider::is_agent_model);
-        for entry in &mut m {
-            if let Some(info) = pricing.get(&entry.id) {
-                entry.input_price = Some(info.input_cost);
-                entry.output_price = Some(info.output_cost);
-            }
-        }
-        // Return early with enriched models, skip the second fetch below.
-        let arc: Arc<[ModelEntry]> = Arc::from(m.into_boxed_slice());
-        MODEL_CACHE
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(provider.to_string(), Arc::clone(&arc));
-        return Ok(arc);
-    } else {
-        let mut m = client.list_models().await?;
-        m.retain(crate::provider::is_agent_model);
-        m
-    };
-
-    if provider == "openrouter" {
-        match crate::provider::fetch_live_model_info(
-            provider,
-            cli.api_key.as_deref(),
-            &cfg.custom_providers_map(),
-            cfg.api_keys.as_ref(),
-        )
-        .await
-        {
-            Ok(prices) => {
-                for m in &mut models {
-                    if let Some(info) = prices.get(&m.id) {
-                        m.input_price = Some(info.input_cost);
-                        m.output_price = Some(info.output_cost);
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("failed to fetch live model info for {provider}: {e}");
-            }
-        }
-    }
-
-    let arc: Arc<[ModelEntry]> = Arc::from(models.into_boxed_slice());
-    MODEL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(provider.to_string(), Arc::clone(&arc));
-    Ok(arc)
-}
-
-/// sync read for the picker (no await)
-pub(crate) fn cached_model_ids(provider: &str) -> Vec<String> {
-    MODEL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(provider)
-        .map(|v| v.iter().map(|m| m.id.clone()).collect())
-        .unwrap_or_default()
-}
-
-/// best-effort warm; returns id list (empty on failure, never errors)
-pub(crate) async fn warm_model_cache(
-    provider: &str,
-    is_custom: bool,
-    client: &AnyClient,
-    cli: &Cli,
-    cfg: &Config,
-) -> Vec<String> {
-    let start = std::time::Instant::now();
-    match fetch_models_cached(provider, is_custom, client, cli, cfg, false).await {
-        Ok(models) => {
-            tracing::debug!(
-                "model list for '{}': {} entries in {:?}",
-                provider,
-                models.len(),
-                start.elapsed()
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                "model list fetch for '{}' failed after {:?}: {}",
-                provider,
-                start.elapsed(),
-                e
-            );
-        }
-    }
-    cached_model_ids(provider)
-}
-
-fn lookup_pricing_from_cache(provider: &str, model_id: &str) -> Option<(f64, f64)> {
-    MODEL_CACHE
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(provider)
-        .and_then(|models| {
-            models.iter().find_map(|m| {
-                if m.id == model_id {
-                    m.input_price.zip(m.output_price).or_else(|| {
-                        crate::models_catalog::catalog_entries(provider).and_then(|entries| {
-                            entries.iter().find_map(|e| {
-                                if e.id == model_id {
-                                    e.input_price.zip(e.output_price)
-                                } else {
-                                    None
-                                }
-                            })
-                        })
-                    })
-                } else {
-                    None
-                }
-            })
-        })
-}
-
-async fn apply_model(ctx: &mut SlashCtx<'_>, model_id: &str) {
-    let new_model = compact_str::CompactString::new(model_id);
-    let new_agent = ctx
-        .agent_build_ctx()
-        .rebuild_agent(&new_model, *ctx.reasoning_enabled)
-        .await;
-    *ctx.agent = Some(new_agent);
-    ctx.session.model = new_model.clone();
-    ctx.session
-        .update_context_window(ctx.cfg.resolve_context_window(
-            &ctx.session.provider,
-            &new_model,
-            &crate::config::quick_models_map(ctx.cfg),
-        ));
-    if let Some((input, output)) = lookup_pricing_from_cache(&ctx.session.provider, model_id) {
-        ctx.session.input_token_cost = input;
-        ctx.session.output_token_cost = output;
-    } else if (ctx.session.provider == "openrouter"
-        || ctx
-            .cfg
-            .custom_providers_map()
-            .contains_key(ctx.session.provider.as_str()))
-        && let Ok(prices) = crate::provider::fetch_live_model_info(
-            &ctx.session.provider,
-            ctx.cli.api_key.as_deref(),
-            &ctx.cfg.custom_providers_map(),
-            ctx.cfg.api_keys.as_ref(),
-        )
-        .await
-        && let Some(info) = prices.get(model_id)
-    {
-        ctx.session.input_token_cost = info.input_cost;
-        ctx.session.output_token_cost = info.output_cost;
-        if ctx.cfg.context_window.is_none()
-            && crate::config::Config::catalog_context_window(&ctx.session.provider, model_id)
-                .is_none()
-            && let Some(cw) = info.context_length
-        {
-            ctx.session.update_context_window(cw);
-        }
-    }
-    write_ok(ctx.renderer, format!("switched to model: {}", new_model));
+    Ok(())
 }
 
 async fn handle_provider(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
@@ -245,44 +38,8 @@ async fn handle_provider(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
         );
         return Ok(());
     }
-    let new_provider = parts[1].trim();
-    if crate::provider::parse_provider(new_provider).is_none()
-        && !ctx.cfg.custom_providers_map().contains_key(new_provider)
-    {
-        write_error(
-            ctx.renderer,
-            format!("unknown provider: '{}'", new_provider),
-        );
-        return Ok(());
-    }
-    // Default the model to something valid for the new provider BEFORE rebuilding,
-    // since rebuild_agent_with_client reads session.model. Otherwise the old id
-    // (e.g. an OpenRouter id) is carried onto a provider where it is invalid.
-    if let Some((model, costs)) = crate::provider::default_model_for_provider(new_provider, ctx.cfg)
-    {
-        ctx.session.model = compact_str::CompactString::new(&model);
-        if let Some((inc, outc)) = costs {
-            ctx.session.input_token_cost = inc;
-            ctx.session.output_token_cost = outc;
-        }
-    }
-    ctx.rebuild_agent_with_client(new_provider, *ctx.reasoning_enabled)
-        .await?;
-    ctx.session.provider = compact_str::CompactString::new(new_provider);
-    ctx.session
-        .update_context_window(ctx.cfg.resolve_context_window(
-            new_provider,
-            &ctx.session.model,
-            &crate::config::quick_models_map(ctx.cfg),
-        ));
-    write_ok(
-        ctx.renderer,
-        format!(
-            "switched to provider: {} (model: {})",
-            new_provider, ctx.session.model
-        ),
-    );
-    Ok(())
+    let choice = crate::engine::models::provider_default(ctx.cfg, parts[1].trim())?;
+    apply_choice(ctx, choice).await
 }
 
 async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
@@ -293,49 +50,13 @@ async fn handle_model(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<
         );
         return Ok(());
     }
-    let new_model = compact_str::CompactString::new(parts[1].trim());
-    let new_agent = ctx
-        .agent_build_ctx()
-        .rebuild_agent(&new_model, *ctx.reasoning_enabled)
-        .await;
-    *ctx.agent = Some(new_agent);
-    ctx.session.model = new_model.clone();
-    ctx.session.provider = ctx.cli.resolve_provider(ctx.cfg);
-    ctx.session
-        .update_context_window(ctx.cfg.resolve_context_window(
-            &ctx.session.provider,
-            &new_model,
-            &crate::config::quick_models_map(ctx.cfg),
-        ));
-    if let Some((input, output)) = lookup_pricing_from_cache(&ctx.session.provider, &new_model) {
-        ctx.session.input_token_cost = input;
-        ctx.session.output_token_cost = output;
-    } else if (ctx.session.provider == "openrouter"
-        || ctx
-            .cfg
-            .custom_providers_map()
-            .contains_key(ctx.session.provider.as_str()))
-        && let Ok(prices) = crate::provider::fetch_live_model_info(
-            &ctx.session.provider,
-            ctx.cli.api_key.as_deref(),
-            &ctx.cfg.custom_providers_map(),
-            ctx.cfg.api_keys.as_ref(),
-        )
-        .await
-        && let Some(info) = prices.get(&*new_model)
-    {
-        ctx.session.input_token_cost = info.input_cost;
-        ctx.session.output_token_cost = info.output_cost;
-        if ctx.cfg.context_window.is_none()
-            && crate::config::Config::catalog_context_window(&ctx.session.provider, &new_model)
-                .is_none()
-            && let Some(cw) = info.context_length
-        {
-            ctx.session.update_context_window(cw);
-        }
-    }
-    write_ok(ctx.renderer, format!("switched to model: {}", new_model));
-    Ok(())
+    let choice = resolve_model_choice(
+        ctx.cfg,
+        &ctx.session.provider,
+        &ctx.session.model,
+        parts[1].trim(),
+    );
+    apply_choice(ctx, choice).await
 }
 
 async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
@@ -347,26 +68,8 @@ async fn handle_models(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
 
     // /models <name-or-id> — quick-model name first, else raw model id for current provider
     if parts.len() >= 2 && !refresh {
-        let arg = parts[1].trim();
-        if let Some(q) = qm.get(arg) {
-            ctx.rebuild_agent_with_client(&q.provider, *ctx.reasoning_enabled)
-                .await?;
-            apply_model(ctx, &q.model).await;
-            ctx.session.provider = compact_str::CompactString::new(&q.provider);
-            // preserve v1.4.x pricing/cost tracking
-            ctx.session.input_token_cost = q.input_token_cost;
-            ctx.session.output_token_cost = q.output_token_cost;
-            write_result(
-                ctx.renderer,
-                format!(
-                    "  quick model {} — ${:.4}/M in  ${:.4}/M out",
-                    arg, q.input_token_cost, q.output_token_cost
-                ),
-            );
-            return Ok(());
-        }
-        apply_model(ctx, arg).await;
-        return Ok(());
+        let choice = resolve_model_choice(ctx.cfg, &provider, &ctx.session.model, parts[1].trim());
+        return apply_choice(ctx, choice).await;
     }
 
     // ---- list mode (+ optional refresh) ----
@@ -511,7 +214,7 @@ async fn handle_model_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow
 
     if parts.len() < 2 {
         let (provider_name, model_name) =
-            subagents::with_config(|cfg| (cfg.client.provider_name(), cfg.model_name.clone()));
+            subagents::with_config(|cfg| (cfg.provider_name.clone(), cfg.model_name.clone()));
         write_ok(
             ctx.renderer,
             format!("current subagent model: {} / {}", provider_name, model_name),
@@ -519,10 +222,11 @@ async fn handle_model_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow
         return Ok(());
     }
 
+    let (provider, current, _) = subagents::model_settings()
+        .ok_or_else(|| anyhow::anyhow!("Subagent configuration is not initialized"))?;
     let new_model = parts[1].trim().to_string();
-    let model = ctx.client.completion_model(new_model.clone());
-    model_for_subagent(ctx, model).await?;
-    subagents::set_model_name(new_model.clone());
+    let choice = resolve_model_choice(ctx.cfg, &provider, &current, &new_model);
+    crate::engine::models::select_subagent(ctx.cli, ctx.cfg, &choice)?;
     write_ok(
         ctx.renderer,
         format!("switched subagent to model: {}", new_model),
@@ -540,7 +244,7 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
 
     if parts.len() < 2 {
         let (provider_name, model_name) =
-            subagents::with_config(|cfg| (cfg.client.provider_name(), cfg.model_name.clone()));
+            subagents::with_config(|cfg| (cfg.provider_name.clone(), cfg.model_name.clone()));
         if sorted.is_empty() {
             write_ok(
                 ctx.renderer,
@@ -573,21 +277,8 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
 
     let name = parts[1].trim();
     if let Some(q) = qm.get(name) {
-        if q.provider.as_str() != ctx.client.provider_name() {
-            let new_client = crate::provider::create_client(
-                &q.provider,
-                ctx.cli.api_key.as_deref(),
-                &ctx.cfg.custom_providers_map(),
-                ctx.cfg.api_keys.as_ref(),
-            )?;
-            let model = new_client.completion_model(q.model.to_string());
-            model_for_subagent(ctx, model).await?;
-            subagents::set_client_and_model(new_client, q.model.to_string());
-        } else {
-            let model = ctx.client.completion_model(q.model.to_string());
-            model_for_subagent(ctx, model).await?;
-            subagents::set_model_name(q.model.to_string());
-        }
+        let choice = resolve_model_choice(ctx.cfg, &q.provider, &q.model, name);
+        crate::engine::models::select_subagent(ctx.cli, ctx.cfg, &choice)?;
         write_ok(
             ctx.renderer,
             format!(
@@ -604,24 +295,5 @@ async fn handle_models_subagent(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyho
             }
         }
     }
-    Ok(())
-}
-
-/// Validate a model handle by trying to build a subagent with it.
-/// If it fails, the error is shown but does not abort the command.
-#[cfg(feature = "subagents")]
-async fn model_for_subagent(
-    ctx: &mut SlashCtx<'_>,
-    model: crate::provider::AnyModel,
-) -> anyhow::Result<()> {
-    let max_turns = ctx.cfg.task_max_turns.unwrap_or(20);
-    let _agent = crate::extras::subagents::builder::build_explore_agent(
-        model,
-        max_turns,
-        ctx.cfg,
-        #[cfg(feature = "archmd")]
-        None,
-    )
-    .await;
     Ok(())
 }

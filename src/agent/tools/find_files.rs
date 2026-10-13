@@ -62,7 +62,7 @@ impl Tool for FindFilesTool {
         let re = Regex::new(&args.pattern)
             .map_err(|e| ToolError::Msg(format!("Invalid regex: {}", e)))?;
 
-        let search_path = args.path.as_deref().unwrap_or(".");
+        let search_path = crate::fs::resolve_path(args.path.as_deref().unwrap_or("."));
 
         let walker = WalkBuilder::new(search_path)
             .git_ignore(true)

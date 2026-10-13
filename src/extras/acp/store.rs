@@ -174,6 +174,7 @@ pub(super) async fn handle_delete(
     let live = state.sessions.lock().await.remove(&req.session_id);
     if let Some(live) = &live {
         live.cancel.cancel();
+        live.live.lock().await.engine.shutdown().await;
     }
     let stored = match storage::load_session(&req.session_id.0) {
         Ok(stored) => stored,

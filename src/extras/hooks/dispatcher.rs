@@ -12,6 +12,7 @@ use super::{Decision, HookCtx, PreDecision, Verdict};
 /// Default per-hook timeout when a handler doesn't declare one.
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 
+#[derive(Clone)]
 enum CompiledMatcher {
     All,
     Names(HashSet<String>),
@@ -49,6 +50,7 @@ fn is_plain_name_list(s: &str) -> bool {
         .all(|c| c.is_alphanumeric() || c == '_' || c == '|' || c == ',' || c.is_whitespace())
 }
 
+#[derive(Clone)]
 struct MatcherEntry {
     matcher: CompiledMatcher,
     handlers: Vec<HookHandler>,
@@ -66,6 +68,13 @@ pub(crate) struct HookDispatcher {
 }
 
 impl HookDispatcher {
+    /// Copy immutable hook definitions, with fresh per-session `once` state.
+    pub(crate) fn fresh(&self) -> Self {
+        Self {
+            events: self.events.clone(),
+            once_ran: Default::default(),
+        }
+    }
     pub(crate) fn from_config(config: &HooksConfig) -> Result<Self, String> {
         let mut events = HashMap::new();
         for (event, groups) in config {
@@ -305,7 +314,7 @@ impl HookDispatcher {
             let project_dir = project_dir.to_string();
             let args = handler.args.clone();
             if handler.is_async {
-                tokio::spawn(async move {
+                crate::engine::resources::spawn(async move {
                     let _ =
                         run_hook(&command, args.as_deref(), &stdin, timeout, &project_dir).await;
                 });

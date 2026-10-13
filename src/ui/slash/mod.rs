@@ -18,7 +18,7 @@ pub(crate) mod settings;
 
 pub use outcome::SlashOutcome;
 
-pub(crate) use providers::{cached_model_ids, warm_model_cache};
+pub(crate) use crate::engine::models::{cached_model_ids, warm_model_cache};
 
 use smallvec::SmallVec;
 
@@ -29,7 +29,7 @@ use crate::permission::ask::AskSender;
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
-use crate::session::{MessageRole, Session};
+use crate::session::Session;
 use crate::ui::events::render_session;
 use crate::ui::input::InputEditor;
 use crate::ui::renderer::Renderer;
@@ -119,69 +119,30 @@ impl SlashCtx<'_> {
     /// agent was rebuilt). When `false`, the caller should call
     /// `rebuild_agent()` to pick up other prompt changes (mode directive, etc.).
     pub async fn switch_to_prompt_model(&mut self, prompt_name: &str) -> bool {
-        let qm_name = match self.cfg.resolve_prompt_model(prompt_name) {
-            Some(name) => name,
-            None => return false,
-        };
-
-        let qm = crate::config::quick_models_map(self.cfg);
-        let Some(qmc) = qm.get(qm_name) else {
+        let Some((alias, choice)) =
+            crate::engine::models::prompt_model_choice(self.cfg, prompt_name)
+        else {
             return false;
         };
-
-        let new_model = compact_str::CompactString::from(&*qmc.model);
-        let provider_changed = qmc.provider != self.session.provider;
-
-        // Update model before rebuild so the agent is built with it.
-        self.session.model = new_model.clone();
-
-        if provider_changed {
-            match self
-                .rebuild_agent_with_client(&qmc.provider, *self.reasoning_enabled)
-                .await
-            {
-                Ok(()) => {
-                    self.session.provider = compact_str::CompactString::from(&*qmc.provider);
-                }
-                Err(e) => {
-                    let _ = self.renderer.write_line(
-                        &format!(
-                            "failed to switch provider for prompt '{}': {}",
-                            prompt_name, e
-                        ),
-                        C_ERROR,
-                    );
-                    return false;
-                }
-            }
-        } else {
-            #[cfg(feature = "advisor")]
-            {
-                crate::extras::advisor::update_client(self.client.clone());
-                crate::extras::advisor::set_session_messages(self.session.messages.clone());
-            }
-            let new_agent = self
-                .agent_build_ctx()
-                .rebuild_agent(&new_model, *self.reasoning_enabled)
-                .await;
-            *self.agent = Some(new_agent);
+        if let Err(error) = crate::engine::models::select_model(
+            self.cli,
+            self.cfg,
+            self.session,
+            self.client,
+            choice,
+        )
+        .await
+        {
+            write_error(
+                self.renderer,
+                format!("failed to switch provider for prompt '{prompt_name}': {error}"),
+            );
+            return false;
         }
-
-        self.session.input_token_cost = qmc.input_token_cost;
-        self.session.output_token_cost = qmc.output_token_cost;
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                &self.session.provider,
-                &self.session.model,
-                &crate::config::quick_models_map(self.cfg),
-            ));
-
-        let _ = self.renderer.write_line(
-            &format!(
-                "switched to model: {} (from prompt '{}')",
-                qm_name, prompt_name
-            ),
-            C_AGENT,
+        self.rebuild_agent().await;
+        write_ok(
+            self.renderer,
+            format!("switched to model: {alias} (from prompt '{prompt_name}')"),
         );
         true
     }
@@ -197,46 +158,20 @@ pub(crate) async fn apply_prompt_model(
     reasoning_enabled: bool,
     renderer: &mut Renderer,
 ) -> bool {
-    let qm_name = match ui.cfg.resolve_prompt_model(prompt_name) {
-        Some(name) => name,
-        None => return false,
-    };
-
-    let qm = crate::config::quick_models_map(ui.cfg);
-    let Some(qmc) = qm.get(qm_name) else {
+    let Some((alias, choice)) = crate::engine::models::prompt_model_choice(ui.cfg, prompt_name)
+    else {
         return false;
     };
-
-    let new_model = compact_str::CompactString::from(&*qmc.model);
-    let provider_changed = qmc.provider != ui.session.provider;
-
-    ui.session.model = new_model.clone();
-
-    if provider_changed {
-        match crate::provider::create_client(
-            &qmc.provider,
-            ui.cli.api_key.as_deref(),
-            &ui.cfg.custom_providers_map(),
-            ui.cfg.api_keys.as_ref(),
-        ) {
-            Ok(new_client) => {
-                ui.client = new_client;
-                ui.session.provider = compact_str::CompactString::from(&*qmc.provider);
-                // Fall through to rebuild agent below
-            }
-            Err(e) => {
-                let _ = renderer.write_line(
-                    &format!(
-                        "failed to switch provider for prompt '{}': {}",
-                        prompt_name, e
-                    ),
-                    C_ERROR,
-                );
-                return false;
-            }
-        }
+    if let Err(error) =
+        crate::engine::models::select_model(ui.cli, ui.cfg, ui.session, &mut ui.client, choice)
+            .await
+    {
+        write_error(
+            renderer,
+            format!("failed to switch provider for prompt '{prompt_name}': {error}"),
+        );
+        return false;
     }
-
     #[cfg(feature = "advisor")]
     {
         crate::extras::advisor::update_client(ui.client.clone());
@@ -244,25 +179,12 @@ pub(crate) async fn apply_prompt_model(
     }
     *agent = Some(
         ui.agent_build_ctx()
-            .rebuild_agent(&new_model, reasoning_enabled)
+            .rebuild_agent(&ui.session.model, reasoning_enabled)
             .await,
     );
-
-    ui.session.input_token_cost = qmc.input_token_cost;
-    ui.session.output_token_cost = qmc.output_token_cost;
-    ui.session
-        .update_context_window(ui.cfg.resolve_context_window(
-            &ui.session.provider,
-            &ui.session.model,
-            &qm,
-        ));
-
-    let _ = renderer.write_line(
-        &format!(
-            "switched to model: {} (from prompt '{}')",
-            qm_name, prompt_name
-        ),
-        C_AGENT,
+    write_ok(
+        renderer,
+        format!("switched to model: {alias} (from prompt '{prompt_name}')"),
     );
     true
 }
@@ -281,38 +203,7 @@ pub(crate) fn write_error(renderer: &mut Renderer, msg: impl std::fmt::Display) 
 
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
 /// reuses the same undo primitive as `/undo`.
-pub fn undo_last(session: &mut Session) -> usize {
-    // Command transcripts after the exchange go with it.
-    let commands = session
-        .messages
-        .iter()
-        .rev()
-        .take_while(|message| message.role == MessageRole::Command)
-        .count();
-    let len = session.messages.len() - commands;
-    if len == 0 {
-        return 0;
-    }
-    let removed = if session.messages[len - 1].role == MessageRole::Assistant {
-        if len >= 2 && session.messages[len - 2].role == MessageRole::User {
-            2
-        } else {
-            1
-        }
-    } else if session.messages[len - 1].role == MessageRole::User {
-        1
-    } else {
-        0
-    };
-    // Rewind via the session helper so the context figure tracks the shortened
-    // history (subtracts the removed turn from the calibration anchor rather than
-    // going stale or resetting to a cold estimate) and the cut is reversible with
-    // /redo.
-    if removed > 0 {
-        session.rewind_to(len - removed);
-    }
-    removed
-}
+pub use crate::engine::actions::undo_last;
 
 pub async fn handle_compress(
     instructions: Option<&str>,
@@ -322,39 +213,23 @@ pub async fn handle_compress(
     ui: &mut UiContext<'_>,
     reasoning_enabled: bool,
 ) -> anyhow::Result<()> {
-    // Mirror the auto-compaction trigger's reserve exactly (including memory's
-    // effective_reserve) so the budget gate here can never disagree with the
-    // gate that decided to call us.
-    let qm = crate::config::quick_models_map(ui.cfg);
-    #[cfg(feature = "memory")]
-    let reserve = crate::extras::memory::effective_reserve(
-        ui.cfg.resolve_reserve_tokens(&ui.session.model, &qm),
-        ui.context.memory.as_deref(),
-    );
-    #[cfg(not(feature = "memory"))]
-    let reserve = ui.cfg.resolve_reserve_tokens(&ui.session.model, &qm);
-    let keep_recent = ui.cfg.resolve_keep_recent_tokens();
-    let max_tokens = ui.session.context_window.saturating_sub(reserve);
-
-    // Auto-compaction only makes sense when actually over budget; manual
-    // /compress is the user's explicit intent, so it skips the budget gate and
-    // proceeds regardless of how full the context is.
-    if auto && ui.session.effective_context_tokens() <= max_tokens {
-        return Ok(());
-    }
-
-    let cut_idx = crate::session::Session::select_compaction_cut(&ui.session.messages, keep_recent);
-
-    // Nothing old enough to summarize (everything is within keep_recent). This
-    // is a real physical limit even when forced, so report it for manual runs;
-    // stay silent under auto so an over-budget-but-unsummarizable turn does not
-    // announce a no-op on every completion.
-    if cut_idx == 0 {
-        if !auto {
-            renderer.write_line("not enough conversation history to compact yet", C_AGENT)?;
+    use crate::engine::compaction;
+    let reserve = compaction::reserve(ui.session, ui.cfg, ui.context);
+    let cut_idx = match compaction::plan(
+        ui.session,
+        ui.cfg.resolve_keep_recent_tokens(),
+        reserve,
+        auto,
+    ) {
+        compaction::Plan::BelowBudget => return Ok(()),
+        compaction::Plan::NothingToCompact => {
+            if !auto {
+                renderer.write_line("not enough conversation history to compact yet", C_AGENT)?;
+            }
+            return Ok(());
         }
-        return Ok(());
-    }
+        compaction::Plan::Summarize { cut } => cut,
+    };
 
     // Announce only once we know compression will actually run.
     if auto {
@@ -364,31 +239,7 @@ pub async fn handle_compress(
     }
     renderer.write_line("", crossterm::style::Color::White)?;
 
-    let messages_to_summarize = &ui.session.messages[..cut_idx];
-    let previous_summary = ui.session.compactions.last().map(|c| c.summary.as_str());
-
-    let summary = ui
-        .client
-        .compress_messages(
-            &ui.session.model,
-            messages_to_summarize,
-            previous_summary,
-            instructions,
-        )
-        .await?;
-
-    let tokens_before: u64 = messages_to_summarize
-        .iter()
-        .map(|m| m.estimated_tokens)
-        .sum();
-
-    #[cfg(feature = "memory")]
-    crate::extras::memory::flush_compaction_summary(
-        &crate::extras::memory::Mem::open(),
-        &summary,
-        Some(cut_idx), // = first_kept_index: how many messages were summarized
-    );
-    ui.session.compress(summary, cut_idx, tokens_before);
+    let tokens_before = compaction::apply(ui.session, &ui.client, cut_idx, instructions).await?;
 
     *agent = Some(
         ui.agent_build_ctx()
@@ -423,7 +274,7 @@ pub async fn handle_slash(
     let _ = &chain;
     let parts: SmallVec<[&str; 3]> = text.trim().splitn(3, ' ').collect();
     let mut ctx = SlashCtx {
-        agent: &mut run.agent,
+        agent: &mut run.execution.agent,
         client: &mut ui.client,
         renderer,
         session: ui.session,
@@ -432,7 +283,7 @@ pub async fn handle_slash(
         context: ui.context,
         show_reasoning: &mut slash.show_reasoning,
         reasoning_enabled: &mut slash.reasoning_enabled,
-        is_running: &mut run.is_running,
+        is_running: &mut run.execution.is_running,
         input,
         permission: &ui.permission,
         ask_tx: &ui.ask_tx,

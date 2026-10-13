@@ -9,35 +9,15 @@ fn invalid(message: String) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(serde_json::json!({ "message": message }))
 }
 
-/// The folder a session must change into, if any. A process works in one
-/// folder at a time: it changes into `cwd` only while no other session is
-/// live, and refuses a different folder otherwise.
-pub(super) fn folder_to_enter(
-    cwd: &Path,
-    live_sessions: usize,
-) -> Result<Option<PathBuf>, agent_client_protocol::Error> {
+/// Validate a session workspace without mutating the host process.
+pub(super) fn workspace(cwd: &Path) -> Result<PathBuf, agent_client_protocol::Error> {
     if !cwd.is_absolute() {
         return Err(invalid(format!("cwd must be absolute: {}", cwd.display())));
-    }
-    let current = std::env::current_dir().map_err(|e| invalid(e.to_string()))?;
-    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => a == b,
-    };
-    if same(cwd, &current) {
-        return Ok(None);
     }
     if !cwd.is_dir() {
         return Err(invalid(format!("cwd is not a folder: {}", cwd.display())));
     }
-    if live_sessions > 0 {
-        return Err(invalid(format!(
-            "this process works in {}; sessions in {} need a process of their own",
-            current.display(),
-            cwd.display()
-        )));
-    }
-    Ok(Some(cwd.to_path_buf()))
+    cwd.canonicalize().map_err(|e| invalid(e.to_string()))
 }
 
 /// The MCP transports a client may hand a session.

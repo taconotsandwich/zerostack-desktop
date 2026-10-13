@@ -28,8 +28,16 @@
 //! flow) reports a friendly error instead of blocking: headless runs never
 //! read stdin.
 
+pub mod actions;
+pub(crate) mod compaction;
 pub(crate) mod headless;
+pub mod models;
+pub(crate) mod resources;
+pub(crate) mod runtime;
+pub(crate) mod shell;
 pub mod sink;
+pub mod text;
+pub mod turn;
 
 pub use sink::{EventSink, StringSink};
 
@@ -52,7 +60,7 @@ use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
 use crate::sandbox::Sandbox;
 use crate::session::{MessageRole, Session};
-use crate::ui::state::TurnUsage;
+pub use turn::TurnUsage;
 
 /// What `run_string` did with the input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,12 +93,19 @@ pub struct RunOutput {
 
 /// Stops the agent turn an [`Engine`] is running, from outside the borrow
 /// that runs it. A cancel with no turn running does nothing.
-#[derive(Clone, Default)]
-pub struct CancelHandle(std::sync::Arc<tokio::sync::Notify>);
+#[derive(Clone)]
+pub struct CancelHandle(tokio::sync::watch::Sender<u64>);
+
+impl Default for CancelHandle {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(0).0)
+    }
+}
 
 impl CancelHandle {
     pub fn cancel(&self) {
-        self.0.notify_waiters();
+        self.0
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 }
 
@@ -155,6 +170,7 @@ impl RunOutput {
 /// in-process state, no disk writes unless a command needs them), then chain
 /// [`Engine::with_agent`] to inject a scripted agent in tests.
 pub struct Engine {
+    resources: std::sync::Arc<resources::Resources>,
     cli: Cli,
     cfg: Config,
     session: Session,
@@ -178,14 +194,45 @@ pub struct Engine {
     reasoning_enabled: bool,
     /// Scratch for one in-flight turn: pending tool-call ids (rig
     /// `internal_call_id` → session call id), streamed text, turn trace.
-    pending_tool_calls: Vec<(CompactString, u64)>,
+    turn: turn::TurnState,
     response_buf: String,
     turn_trace: Vec<CompactString>,
     /// One-shot prompt restore for `.prompt msg` (see `ChainState`).
     dot_prompt_restore: Option<String>,
 }
 
+impl Drop for Engine {
+    fn drop(&mut self) {
+        self.resources.abort_tasks();
+        self.sandbox.kill_active();
+    }
+}
+
 impl Engine {
+    #[cfg(feature = "acp")]
+    pub(crate) fn resource_context(&self) -> std::sync::Arc<resources::Resources> {
+        self.resources.clone()
+    }
+    /// Stop owned tasks and finish transport cleanup while the host runtime lives.
+    pub async fn shutdown(&mut self) {
+        if self.resources.is_closed() {
+            return;
+        }
+        self.cancel.cancel();
+        self.resources.shutdown().await;
+        self.sandbox.kill_active();
+        self.agent = None;
+        #[cfg(feature = "mcp")]
+        if let Some(manager) = self.mcp_manager.take() {
+            manager.shutdown().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resources(&self) -> std::sync::Arc<resources::Resources> {
+        self.resources.clone()
+    }
+
     /// Build an engine from owned state. The agent is built lazily on the
     /// first run that needs it (mirrors `ensure_agent`).
     pub fn new(
@@ -197,8 +244,85 @@ impl Engine {
         permission: Option<PermCheck>,
         sandbox: Sandbox,
     ) -> Self {
+        let resources = resources::Resources::for_workspace(std::path::PathBuf::from(
+            session.working_dir.as_str(),
+        ));
+        resources.clone().sync(|| {
+            crate::provider::set_opencode_session_id(&session.id);
+            crate::agent::tools::set_edit_system(cli.resolve_edit_system(&cfg));
+            crate::agent::tools::set_deny_repeated_reads(cfg.deny_repeated_reads.unwrap_or(true));
+            #[cfg(feature = "subagents")]
+            {
+                let provider = cfg
+                    .subagent_provider
+                    .as_deref()
+                    .unwrap_or(&session.provider);
+                let selection = cfg.subagent_model.as_deref().unwrap_or(&session.model);
+                let choice =
+                    models::resolve_model_choice(&cfg, provider, &session.model, selection);
+                let (sub_client, sub_provider, sub_model) = match crate::provider::create_client(
+                    &choice.key.provider,
+                    cli.api_key.as_deref(),
+                    &cfg.custom_providers_map(),
+                    cfg.api_keys.as_ref(),
+                ) {
+                    Ok(client) => (
+                        client,
+                        choice.key.provider.to_string(),
+                        choice.key.id.to_string(),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            "subagent configuration unavailable: {error}; using main model"
+                        );
+                        (
+                            client.clone(),
+                            session.provider.to_string(),
+                            session.model.to_string(),
+                        )
+                    }
+                };
+                crate::extras::subagents::init(
+                    sub_client,
+                    sub_provider,
+                    sub_model,
+                    cfg.task_max_turns.unwrap_or(10),
+                    std::sync::Arc::new(cfg.clone()),
+                    cli.resolve_tools(&cfg),
+                    #[cfg(feature = "archmd")]
+                    context.architecture.clone(),
+                );
+            }
+            #[cfg(feature = "advisor")]
+            {
+                let selected = cli.resolve_advisor_model(&cfg);
+                let choice = models::resolve_model_choice(
+                    &cfg,
+                    &session.provider,
+                    &session.model,
+                    &selected,
+                );
+                let advisor_client = crate::provider::create_client(
+                    &choice.key.provider,
+                    cli.api_key.as_deref(),
+                    &cfg.custom_providers_map(),
+                    cfg.api_keys.as_ref(),
+                )
+                .ok();
+                crate::extras::advisor::init_config(crate::extras::advisor::AdvisorToolConfig {
+                    client: advisor_client,
+                    advisor_model: choice.key.id.to_string(),
+                    enabled: cli.resolve_advisor_enabled(&cfg),
+                    max_uses: cli.resolve_advisor_max_uses(&cfg),
+                    kilobytes_limit: cli.resolve_advisor_kilobytes_limit(&cfg),
+                    human_handoff: false,
+                    handoff_tx: None,
+                });
+            }
+        });
         let show_reasoning = cfg.resolve_show_reasoning();
         Self {
+            resources,
             cli,
             cfg,
             session,
@@ -215,7 +339,7 @@ impl Engine {
             cancel: CancelHandle::default(),
             show_reasoning,
             reasoning_enabled: true,
-            pending_tool_calls: Vec::new(),
+            turn: turn::TurnState::default(),
             response_buf: String::new(),
             turn_trace: Vec::new(),
             dot_prompt_restore: None,
@@ -250,14 +374,24 @@ impl Engine {
         self.agent = None;
     }
 
-    /// Work in `dir` from now on: the process changes into it, and the
-    /// session, context files and agent follow.
+    /// Change this engine’s workspace, context files and agent without
+    /// changing the host process working directory.
     pub fn change_dir(&mut self, dir: &std::path::Path) -> anyhow::Result<()> {
-        std::env::set_current_dir(dir)
+        let owner = self.resources.clone();
+        owner.sync(|| self.change_dir_scoped(dir))
+    }
+
+    fn change_dir_scoped(&mut self, dir: &std::path::Path) -> anyhow::Result<()> {
+        let resolved = resources::resolve(dir).canonicalize()?;
+        if resources::working_dir()?.canonicalize().ok().as_ref() == Some(&resolved) {
+            self.session.working_dir = CompactString::new(resolved.to_string_lossy());
+            return Ok(());
+        }
+        crate::engine::resources::change_dir(dir)
             .map_err(|e| anyhow::anyhow!("failed to change directory to {}: {e}", dir.display()))?;
-        self.session.working_dir = CompactString::new(dir.to_string_lossy());
+        self.session.working_dir = CompactString::new(resources::working_dir()?.to_string_lossy());
         self.context.reload();
-        crate::ui::apply_current_prompt_mode(&mut self.context, &self.permission);
+        actions::apply_current_prompt_mode(&mut self.context, &self.permission);
         self.agent = None;
         Ok(())
     }
@@ -289,30 +423,33 @@ impl Engine {
     /// "allow always" answers apply again, and the client and agent follow
     /// its provider and model.
     pub fn resume_session(&mut self, session: Session) -> anyhow::Result<()> {
-        if session.provider != self.session.provider {
-            self.client = crate::provider::create_client(
-                &session.provider,
-                self.cli.api_key.as_deref(),
-                &self.cfg.custom_providers_map(),
-                self.cfg.api_keys.as_ref(),
-            )?;
-        }
-        if session.provider != self.session.provider || session.model != self.session.model {
-            self.agent = None;
-        }
-        if let Some(permission) = &self.permission {
-            let allowlist: Vec<(String, String)> = session
-                .permission_allowlist
-                .iter()
-                .map(|entry| (entry.tool.to_string(), entry.pattern.to_string()))
-                .collect();
-            permission
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .load_session_allowlist(&allowlist);
-        }
-        self.session = session;
-        Ok(())
+        let owner = self.resources.clone();
+        owner.sync(|| {
+            if session.provider != self.session.provider {
+                self.client = crate::provider::create_client(
+                    &session.provider,
+                    self.cli.api_key.as_deref(),
+                    &self.cfg.custom_providers_map(),
+                    self.cfg.api_keys.as_ref(),
+                )?;
+            }
+            if session.provider != self.session.provider || session.model != self.session.model {
+                self.agent = None;
+            }
+            if let Some(permission) = &self.permission {
+                let allowlist: Vec<(String, String)> = session
+                    .permission_allowlist
+                    .iter()
+                    .map(|entry| (entry.tool.to_string(), entry.pattern.to_string()))
+                    .collect();
+                permission
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .load_session_allowlist(&allowlist);
+            }
+            self.session = session;
+            Ok(())
+        })
     }
 
     /// Keep an "allow always" answer with the session, so the session still
@@ -359,6 +496,14 @@ impl Engine {
 
     /// Run a plain prompt as an agent turn.
     pub async fn run_prompt(&mut self, prompt: String) -> RunOutput {
+        let owner = self.resources.clone();
+        owner.scope(self.run_prompt_scoped(prompt)).await
+    }
+
+    async fn run_prompt_scoped(&mut self, prompt: String) -> RunOutput {
+        if self.resources.is_closed() {
+            return RunOutput::failed("engine is shut down");
+        }
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return RunOutput::ignored();
@@ -368,6 +513,12 @@ impl Engine {
 
     /// Run a shell command without a leading `!`.
     pub async fn run_shell(&mut self, command: String) -> anyhow::Result<RunOutput> {
+        let owner = self.resources.clone();
+        owner.scope(self.run_shell_scoped(command)).await
+    }
+
+    async fn run_shell_scoped(&mut self, command: String) -> anyhow::Result<RunOutput> {
+        anyhow::ensure!(!self.resources.is_closed(), "engine is shut down");
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "shell command cannot be empty");
         Ok(self.run_bang(&format!("!{command}")).await)
@@ -375,6 +526,16 @@ impl Engine {
 
     /// Ask a separate question without mutating the session.
     pub async fn ask_separate_question(&mut self, question: String) -> anyhow::Result<RunOutput> {
+        let owner = self.resources.clone();
+        owner
+            .scope(self.ask_separate_question_scoped(question))
+            .await
+    }
+
+    async fn ask_separate_question_scoped(
+        &mut self,
+        question: String,
+    ) -> anyhow::Result<RunOutput> {
         let question = question.trim();
         anyhow::ensure!(!question.is_empty(), "question cannot be empty");
         Ok(self.run_btw(&format!("/btw {question}")).await)
@@ -382,85 +543,89 @@ impl Engine {
 
     /// Switch provider and apply its default model.
     pub async fn set_provider(&mut self, provider: &str) -> anyhow::Result<()> {
-        let new_provider = provider.trim();
-        anyhow::ensure!(!new_provider.is_empty(), "provider cannot be empty");
-        if crate::provider::parse_provider(new_provider).is_none()
-            && !self.cfg.custom_providers_map().contains_key(new_provider)
-        {
-            anyhow::bail!("unknown provider: '{new_provider}'");
-        }
-        if let Some((model, costs)) =
-            crate::provider::default_model_for_provider(new_provider, &self.cfg)
-        {
-            self.session.model = CompactString::new(&model);
-            if let Some((inc, outc)) = costs {
-                self.session.input_token_cost = inc;
-                self.session.output_token_cost = outc;
+        let choice = models::provider_default(&self.cfg, provider.trim())?;
+        self.select_model(models::ModelTarget::Conversation, choice)
+            .await
+    }
+
+    pub async fn select_model(
+        &mut self,
+        target: models::ModelTarget,
+        choice: models::ModelChoice,
+    ) -> anyhow::Result<()> {
+        let owner = self.resources.clone();
+        owner.scope(self.select_model_scoped(target, choice)).await
+    }
+
+    async fn select_model_scoped(
+        &mut self,
+        target: models::ModelTarget,
+        choice: models::ModelChoice,
+    ) -> anyhow::Result<()> {
+        match target {
+            models::ModelTarget::Conversation => {
+                models::select_model(
+                    &self.cli,
+                    &self.cfg,
+                    &mut self.session,
+                    &mut self.client,
+                    choice,
+                )
+                .await?;
+                let model = self.session.model.to_string();
+                self.rebuild_agent(&model).await;
+            }
+            #[cfg(feature = "subagents")]
+            models::ModelTarget::Subagent => {
+                models::select_subagent(&self.cli, &self.cfg, &choice)?
             }
         }
-        self.rebuild_agent_with_client(new_provider).await?;
-        self.session.provider = CompactString::new(new_provider);
-        let qm = config::quick_models_map(&self.cfg);
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                new_provider,
-                &self.session.model,
-                &qm,
-            ));
         Ok(())
     }
 
     /// Select a quick model by name or switch to a raw model ID.
     pub async fn set_model_selection(&mut self, selection: &str) -> anyhow::Result<()> {
-        let selection = selection.trim();
-        anyhow::ensure!(!selection.is_empty(), "model selection cannot be empty");
-        anyhow::ensure!(
-            !selection.contains(char::is_whitespace),
-            "model selection cannot contain spaces"
-        );
-        let qm = config::quick_models_map(&self.cfg);
-        if let Some(q) = qm.get(selection) {
-            let provider = q.provider.to_string();
-            let model = q.model.to_string();
-            let in_cost = q.input_token_cost;
-            let out_cost = q.output_token_cost;
-            self.rebuild_agent_with_client(&provider).await?;
-            self.session.provider = CompactString::from(&provider);
-            self.rebuild_agent(&model).await;
-            self.session.model = CompactString::from(&model);
-            let qm2 = config::quick_models_map(&self.cfg);
-            self.session
-                .update_context_window(self.cfg.resolve_context_window(
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let selection = selection.trim();
+                anyhow::ensure!(
+                    !selection.is_empty() && !selection.contains(char::is_whitespace),
+                    "model selection must be nonempty and cannot contain spaces"
+                );
+                let choice = models::resolve_model_choice(
+                    &self.cfg,
                     &self.session.provider,
                     &self.session.model,
-                    &qm2,
-                ));
-            self.session.input_token_cost = in_cost;
-            self.session.output_token_cost = out_cost;
-            return Ok(());
-        }
-        let selection_owned = selection.to_string();
-        self.rebuild_agent(&selection_owned).await;
-        self.session.model = CompactString::new(selection);
-        Ok(())
+                    selection,
+                );
+                self.select_model(models::ModelTarget::Conversation, choice)
+                    .await
+            })
+            .await
     }
 
     /// Activate a prompt by name, or `"default"` to clear the active prompt.
     pub async fn set_prompt(&mut self, prompt: &str) -> anyhow::Result<()> {
-        let prompt = prompt.trim();
-        anyhow::ensure!(!prompt.is_empty(), "prompt cannot be empty");
-        let mut sink = StringSink::new();
-        let parts = if prompt == "default" {
-            vec!["/prompt", "default"]
-        } else {
-            vec!["/prompt", prompt]
-        };
-        self.cmd_prompt(&parts, &mut sink).await?;
-        let transcript = sink.transcript();
-        if sink.lines().iter().any(|line| line.starts_with("error: ")) {
-            anyhow::bail!("{transcript}");
-        }
-        Ok(())
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let prompt = prompt.trim();
+                anyhow::ensure!(!prompt.is_empty(), "prompt cannot be empty");
+                let mut sink = StringSink::new();
+                let parts = if prompt == "default" {
+                    vec!["/prompt", "default"]
+                } else {
+                    vec!["/prompt", prompt]
+                };
+                self.cmd_prompt(&parts, &mut sink).await?;
+                let transcript = sink.transcript();
+                if sink.lines().iter().any(|line| line.starts_with("error: ")) {
+                    anyhow::bail!("{transcript}");
+                }
+                Ok(())
+            })
+            .await
     }
 
     /// Switch the permission mode.
@@ -503,6 +668,12 @@ impl Engine {
 
     /// Switch the file-editing system.
     pub fn set_edit_system(&self, system: &str) -> anyhow::Result<()> {
+        self.resources
+            .clone()
+            .sync(|| self.set_edit_system_scoped(system))
+    }
+
+    fn set_edit_system_scoped(&self, system: &str) -> anyhow::Result<()> {
         let system = system.trim();
         match system {
             "similarity" => {
@@ -522,33 +693,38 @@ impl Engine {
         &mut self,
         path: std::path::PathBuf,
     ) -> anyhow::Result<Option<String>> {
-        let path = Self::resolve_path(path.to_string_lossy().as_ref());
-        if !path.exists() {
-            anyhow::bail!("file not found: {}", path.display());
-        }
-        if !path.is_file() {
-            anyhow::bail!("not a file: {}", path.display());
-        }
-        #[cfg(feature = "multimodal")]
-        if crate::extras::multimodal::detect_media(&path).is_some() {
-            match crate::extras::multimodal::load_attachment(&path) {
-                Ok(attachment) => {
-                    let size = attachment.size();
-                    self.session.pending_media.push(attachment);
-                    return Ok(Some(format!("attached: {} ({size}B)", path.display())));
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let path = Self::resolve_path(path.to_string_lossy().as_ref());
+                if !path.exists() {
+                    anyhow::bail!("file not found: {}", path.display());
                 }
-                Err(error) => anyhow::bail!("failed to load media: {error}"),
-            }
-        }
-        let canonical = path.canonicalize().unwrap_or(path);
-        if self.context.extra_files.contains(&canonical) {
-            return Ok(Some(format!("already added: {}", canonical.display())));
-        }
-        let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
-        self.context.extra_files.push(canonical.clone());
-        let model_id = self.session.model.to_string();
-        self.rebuild_agent(&model_id).await;
-        Ok(Some(format!("added: {} ({size}B)", canonical.display())))
+                if !path.is_file() {
+                    anyhow::bail!("not a file: {}", path.display());
+                }
+                #[cfg(feature = "multimodal")]
+                if crate::extras::multimodal::detect_media(&path).is_some() {
+                    match crate::extras::multimodal::load_attachment(&path) {
+                        Ok(attachment) => {
+                            let size = attachment.size();
+                            self.session.pending_media.push(attachment);
+                            return Ok(Some(format!("attached: {} ({size}B)", path.display())));
+                        }
+                        Err(error) => anyhow::bail!("failed to load media: {error}"),
+                    }
+                }
+                let canonical = path.canonicalize().unwrap_or(path);
+                if self.context.extra_files.contains(&canonical) {
+                    return Ok(Some(format!("already added: {}", canonical.display())));
+                }
+                let size = std::fs::metadata(&canonical).map(|m| m.len()).unwrap_or(0);
+                self.context.extra_files.push(canonical.clone());
+                let model_id = self.session.model.to_string();
+                self.rebuild_agent(&model_id).await;
+                Ok(Some(format!("added: {} ({size}B)", canonical.display())))
+            })
+            .await
     }
 
     /// Send media (an image, audio, a document) with the next prompt.
@@ -562,74 +738,92 @@ impl Engine {
         &mut self,
         path: std::path::PathBuf,
     ) -> anyhow::Result<Option<String>> {
-        let path = Self::resolve_path(path.to_string_lossy().as_ref());
-        let canonical = path.canonicalize().unwrap_or(path);
-        if let Some(index) = self
-            .context
-            .extra_files
-            .iter()
-            .position(|file| file == &canonical)
-        {
-            self.context.extra_files.remove(index);
-            let model_id = self.session.model.to_string();
-            self.rebuild_agent(&model_id).await;
-            return Ok(Some(format!("dropped: {}", canonical.display())));
-        }
-        anyhow::bail!("not in context: {} (use /add to see)", canonical.display())
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let path = Self::resolve_path(path.to_string_lossy().as_ref());
+                let canonical = path.canonicalize().unwrap_or(path);
+                if let Some(index) = self
+                    .context
+                    .extra_files
+                    .iter()
+                    .position(|file| file == &canonical)
+                {
+                    self.context.extra_files.remove(index);
+                    let model_id = self.session.model.to_string();
+                    self.rebuild_agent(&model_id).await;
+                    return Ok(Some(format!("dropped: {}", canonical.display())));
+                }
+                anyhow::bail!("not in context: {} (use /add to see)", canonical.display())
+            })
+            .await
     }
 
     /// Remove all context files and pending media.
     pub async fn clear_context_files(&mut self) -> anyhow::Result<Option<String>> {
-        let file_count = self.context.extra_files.len();
-        #[cfg(feature = "multimodal")]
-        let media_count = self.session.pending_media.len();
-        #[cfg(not(feature = "multimodal"))]
-        let media_count = 0;
-        if file_count == 0 && media_count == 0 {
-            return Ok(None);
-        }
-        if file_count > 0 {
-            self.context.extra_files.clear();
-            let model_id = self.session.model.to_string();
-            self.rebuild_agent(&model_id).await;
-        }
-        #[cfg(feature = "multimodal")]
-        self.session.pending_media.clear();
-        Ok(Some(format!("dropped {file_count} file(s)")))
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let file_count = self.context.extra_files.len();
+                #[cfg(feature = "multimodal")]
+                let media_count = self.session.pending_media.len();
+                #[cfg(not(feature = "multimodal"))]
+                let media_count = 0;
+                if file_count == 0 && media_count == 0 {
+                    return Ok(None);
+                }
+                if file_count > 0 {
+                    self.context.extra_files.clear();
+                    let model_id = self.session.model.to_string();
+                    self.rebuild_agent(&model_id).await;
+                }
+                #[cfg(feature = "multimodal")]
+                self.session.pending_media.clear();
+                Ok(Some(format!("dropped {file_count} file(s)")))
+            })
+            .await
     }
 
     /// Clear session messages and related turn state.
     pub async fn clear_messages(&mut self) {
-        #[cfg(feature = "hooks")]
-        crate::extras::hooks::dispatch_session_end("clear").await;
-        self.session.messages.clear();
-        self.session.total_estimated_tokens = 0;
-        self.session.reset_calibration();
-        self.session.compactions.clear();
-        self.context.chain_declined.clear();
-        #[cfg(feature = "hooks")]
-        crate::extras::hooks::dispatch_session_start("clear").await;
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                #[cfg(feature = "hooks")]
+                crate::extras::hooks::dispatch_session_end("clear").await;
+                self.session.messages.clear();
+                self.session.total_estimated_tokens = 0;
+                self.session.reset_calibration();
+                self.session.compactions.clear();
+                self.context.chain_declined.clear();
+                #[cfg(feature = "hooks")]
+                crate::extras::hooks::dispatch_session_start("clear").await;
+            })
+            .await
     }
 
     /// Swap in a fresh conversation that keeps the settings the user picked
     /// (provider, model, context window, prompt), mirroring the session
     /// `startup` creates on launch. The replaced session stays on disk.
     pub fn new_session(&mut self) {
-        let mut session = crate::session::Session::new(
-            &self.session.provider,
-            &self.session.model,
-            self.session.context_window,
-            "",
-        );
-        session.input_token_cost = self.session.input_token_cost;
-        session.output_token_cost = self.session.output_token_cost;
-        session.prompt = self.session.prompt.clone();
-        self.session = session;
+        let owner = self.resources.clone();
+        owner.sync(|| {
+            let mut session = crate::session::Session::new(
+                &self.session.provider,
+                &self.session.model,
+                self.session.context_window,
+                "",
+            );
+            session.input_token_cost = self.session.input_token_cost;
+            session.output_token_cost = self.session.output_token_cost;
+            session.prompt = self.session.prompt.clone();
+            self.session = session;
+        })
     }
 
     /// Undo the last exchange. Returns the removed message count.
     pub fn undo_messages(&mut self) -> usize {
-        crate::ui::slash::undo_last(&mut self.session)
+        actions::undo_last(&mut self.session)
     }
 
     /// Restore the last rewind. Returns false when there is nothing to redo.
@@ -640,7 +834,7 @@ impl Engine {
     /// Rewind candidate points, mirroring the TUI rewind picker: the index and
     /// an 80-character preview of every user message.
     pub fn rewind_points(&self) -> Vec<(usize, String)> {
-        crate::ui::rewind_targets(&self.session)
+        actions::rewind_targets(&self.session)
     }
 
     /// Rewind the conversation to `new_len` messages; the TUI picker passes the
@@ -652,12 +846,17 @@ impl Engine {
 
     /// Retry the last user message as a new agent turn.
     pub async fn retry_last_message(&mut self) -> anyhow::Result<RunOutput> {
-        let Some(message) = self.last_user_message() else {
-            anyhow::bail!("no previous message to retry");
-        };
-        let output = self.run_agent_text(&message.content).await;
-        self.save_session_best_effort();
-        Ok(output)
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let Some(message) = self.last_user_message() else {
+                    anyhow::bail!("no previous message to retry");
+                };
+                let output = self.run_agent_text(&message.content).await;
+                self.save_session_best_effort();
+                Ok(output)
+            })
+            .await
     }
 
     fn last_user_message(&self) -> Option<crate::session::SessionMessage> {
@@ -671,10 +870,15 @@ impl Engine {
 
     /// Toggle reasoning on or off.
     pub async fn toggle_reasoning(&mut self) {
-        self.reasoning_enabled = !self.reasoning_enabled;
-        self.show_reasoning = self.reasoning_enabled;
-        let model_id = self.session.model.to_string();
-        self.rebuild_agent(&model_id).await;
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                self.reasoning_enabled = !self.reasoning_enabled;
+                self.show_reasoning = self.reasoning_enabled;
+                let model_id = self.session.model.to_string();
+                self.rebuild_agent(&model_id).await;
+            })
+            .await
     }
 
     /// Compact the context with optional instructions.
@@ -682,11 +886,16 @@ impl Engine {
         &mut self,
         instructions: Option<String>,
     ) -> anyhow::Result<()> {
-        let mut sink = StringSink::new();
-        self.compress(instructions.as_deref(), false, &mut sink)
-            .await?;
-        self.save_session_best_effort();
-        Ok(())
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let mut sink = StringSink::new();
+                self.compress(instructions.as_deref(), false, &mut sink)
+                    .await?;
+                self.save_session_best_effort();
+                Ok(())
+            })
+            .await
     }
 
     /// Export the active session. Returns the success message.
@@ -695,97 +904,114 @@ impl Engine {
         &self,
         destination: Option<std::path::PathBuf>,
     ) -> anyhow::Result<String> {
-        let default_name = format!(
-            "zerostack-session-{}.html",
-            &self.session.id[..8.min(self.session.id.len())]
-        );
-        let default_path = std::path::PathBuf::from(default_name);
-        let path = destination.unwrap_or(default_path);
-        let path = path.to_string_lossy().into_owned();
-        let (content, kind) = if path.ends_with(".jsonl") {
-            (
-                crate::extras::export::session_to_jsonl(&self.session),
-                "JSONL",
-            )
-        } else {
-            (
-                crate::extras::export::session_to_html(&self.session),
-                "HTML",
-            )
-        };
-        std::fs::write(&path, content)
-            .map_err(|error| anyhow::anyhow!("export failed: {error}"))?;
-        Ok(format!("exported {kind} to {path}"))
+        let owner = self.resources.clone();
+        owner.sync(|| {
+            let default_name = format!(
+                "zerostack-session-{}.html",
+                &self.session.id[..8.min(self.session.id.len())]
+            );
+            let default_path = std::path::PathBuf::from(default_name);
+            let path = resources::resolve(destination.unwrap_or(default_path));
+            let path = path.to_string_lossy().into_owned();
+            let (content, kind) = if path.ends_with(".jsonl") {
+                (
+                    crate::extras::export::session_to_jsonl(&self.session),
+                    "JSONL",
+                )
+            } else {
+                (
+                    crate::extras::export::session_to_html(&self.session),
+                    "HTML",
+                )
+            };
+            std::fs::write(&path, content)
+                .map_err(|error| anyhow::anyhow!("export failed: {error}"))?;
+            Ok(format!("exported {kind} to {path}"))
+        })
     }
 
     /// Import a session file and make it active. Returns the success message.
     #[cfg(feature = "export")]
     pub fn import_conversation(&mut self, path: std::path::PathBuf) -> anyhow::Result<String> {
-        use compact_str::CompactString;
+        let owner = self.resources.clone();
+        owner.sync(|| {
+            use compact_str::CompactString;
 
-        let path = path.to_string_lossy().into_owned();
-        anyhow::ensure!(
-            !path.trim().is_empty(),
-            "usage: /import <file.jsonl|session.json>"
-        );
-        let content = std::fs::read_to_string(&path)
-            .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
-        // JSONL lines start with `{` too, so pick the format by extension.
-        let mut session = if !path.ends_with(".jsonl") {
-            serde_json::from_str::<Session>(&content)
-                .map_err(|error| anyhow::anyhow!("invalid session file: {error}"))?
-        } else {
-            let messages = crate::extras::export::parse_jsonl_import(&content)
-                .map_err(|error| anyhow::anyhow!("invalid JSONL session: {error}"))?;
-            let name = std::path::Path::new(&path)
-                .file_stem()
-                .map(|stem| stem.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "imported".to_string());
-            let mut session = Session::new(
-                self.session.provider.as_str(),
-                self.session.model.as_str(),
-                self.session.context_window,
-                &name,
+            let path = resources::resolve(path).to_string_lossy().into_owned();
+            anyhow::ensure!(
+                !path.trim().is_empty(),
+                "usage: /import <file.jsonl|session.json>"
             );
-            for message in messages {
-                session.add_message(message.role, &message.content);
+            let content = std::fs::read_to_string(&path)
+                .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
+            // JSONL lines start with `{` too, so pick the format by extension.
+            let mut session = if !path.ends_with(".jsonl") {
+                serde_json::from_str::<Session>(&content)
+                    .map_err(|error| anyhow::anyhow!("invalid session file: {error}"))?
+            } else {
+                let messages = crate::extras::export::parse_jsonl_import(&content)
+                    .map_err(|error| anyhow::anyhow!("invalid JSONL session: {error}"))?;
+                let name = std::path::Path::new(&path)
+                    .file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "imported".to_string());
+                let mut session = Session::new(
+                    self.session.provider.as_str(),
+                    self.session.model.as_str(),
+                    self.session.context_window,
+                    &name,
+                );
+                for message in messages {
+                    session.add_message(message.role, &message.content);
+                }
+                session
+            };
+            if session.name.is_empty() {
+                session.name = CompactString::new("imported");
             }
-            session
-        };
-        if session.name.is_empty() {
-            session.name = CompactString::new("imported");
-        }
-        let message_count = session.messages.len();
-        crate::session::storage::save_session(&session)
-            .map_err(|error| anyhow::anyhow!("failed to save session: {error}"))?;
-        self.session = session;
-        Ok(format!(
-            "imported session from {path} ({message_count} msgs)"
-        ))
+            let message_count = session.messages.len();
+            crate::session::storage::save_session(&session)
+                .map_err(|error| anyhow::anyhow!("failed to save session: {error}"))?;
+            self.session = session;
+            Ok(format!(
+                "imported session from {path} ({message_count} msgs)"
+            ))
+        })
     }
 
     /// Publish the active session as a secret gist. Returns the run output.
     #[cfg(feature = "export")]
     pub async fn share_conversation(&self) -> anyhow::Result<RunOutput> {
-        let filename = format!(
-            "zerostack-session-{}.html",
-            &self.session.id[..8.min(self.session.id.len())]
-        );
-        let html = crate::extras::export::session_to_html(&self.session);
-        let description = if self.session.name.is_empty() {
-            "zerostack session".to_string()
-        } else {
-            format!("zerostack session: {}", self.session.name)
-        };
-        match crate::extras::export::share_gist(&filename, &html, &description).await {
-            Ok(url) => Ok(RunOutput::command(format!("shared as secret gist: {url}"))),
-            Err(error) => anyhow::bail!("share failed: {error}"),
-        }
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let filename = format!(
+                    "zerostack-session-{}.html",
+                    &self.session.id[..8.min(self.session.id.len())]
+                );
+                let html = crate::extras::export::session_to_html(&self.session);
+                let description = if self.session.name.is_empty() {
+                    "zerostack session".to_string()
+                } else {
+                    format!("zerostack session: {}", self.session.name)
+                };
+                match crate::extras::export::share_gist(&filename, &html, &description).await {
+                    Ok(url) => Ok(RunOutput::command(format!("shared as secret gist: {url}"))),
+                    Err(error) => anyhow::bail!("share failed: {error}"),
+                }
+            })
+            .await
     }
 
     /// Run one user input string: plain message, `/` slash command, `.`
     /// dot-prompt command, or `!` shell command.
     pub async fn run_string(&mut self, input: &str) -> anyhow::Result<RunOutput> {
+        let owner = self.resources.clone();
+        owner.scope(self.run_string_scoped(input)).await
+    }
+
+    async fn run_string_scoped(&mut self, input: &str) -> anyhow::Result<RunOutput> {
+        anyhow::ensure!(!self.resources.is_closed(), "engine is shut down");
         let text = input.trim();
         if text.is_empty() {
             return Ok(RunOutput::ignored());
@@ -848,43 +1074,20 @@ impl Engine {
     /// Spawn the agent for `prompt` and drain its events into the session.
     /// Returns the assistant's final response text plus the turn's usage.
     async fn start_agent_run(&mut self, prompt: String) -> anyhow::Result<(String, TurnUsage)> {
-        self.ensure_agent().await;
-        let history = runner::convert_history(&self.session);
-        #[cfg(feature = "multimodal")]
-        let history = {
-            let media = self.session.drain_media();
-            if media.is_empty() {
-                history
-            } else {
-                let mut h = history;
-                h.extend(runner::media_to_messages(&media));
-                h
-            }
-        };
-        let agent = self.agent.clone().expect("ensure_agent built one");
-        let runner = agent
-            .spawn_runner(
-                prompt.clone(),
-                history,
-                self.cfg.retry.clone(),
-                #[cfg(feature = "hooks")]
-                None,
-            )
-            .await;
-        self.session.add_message(MessageRole::User, &prompt);
-        #[cfg(feature = "advisor")]
-        crate::extras::advisor::set_session_messages(self.session.messages.clone());
-        if !self.cli.no_session
-            && let Err(e) = crate::session::chat_history::append_entry(
-                &crate::session::chat_history::ChatHistoryEntry {
-                    content: prompt,
-                    timestamp: self.session.updated_at.clone(),
-                },
-            )
-        {
-            tracing::warn!("failed to append chat history entry: {e}");
+        let mut cancelled = self.cancel.0.subscribe();
+        tokio::select! {
+            () = self.ensure_agent() => {},
+            _ = cancelled.changed() => return Err(TurnCancelled.into()),
         }
-        self.drain_runner(runner).await
+        let runner = runtime::begin_turn(
+            &prompt,
+            self.agent.as_ref().expect("agent built"),
+            &mut self.session,
+            &self.cli,
+            &self.cfg,
+        )
+        .await;
+        self.drain_runner(runner, cancelled).await
     }
 
     /// Drive an `AgentRunner` to completion, folding every event into the
@@ -894,9 +1097,10 @@ impl Engine {
     async fn drain_runner(
         &mut self,
         mut runner: AgentRunner,
+        mut cancelled: tokio::sync::watch::Receiver<u64>,
     ) -> anyhow::Result<(String, TurnUsage)> {
         self.response_buf.clear();
-        self.pending_tool_calls.clear();
+        self.turn.pending_tool_calls.clear();
         let mut usage = TurnUsage::default();
         let mut final_response = String::new();
         let mut turn_error: Option<String> = None;
@@ -904,21 +1108,20 @@ impl Engine {
             signals.send_start();
         }
 
-        let cancelled = self.cancel.0.clone();
-        let cancelled = cancelled.notified();
-        tokio::pin!(cancelled);
         loop {
             let event = tokio::select! {
-                event = runner.event_rx.recv() => event,
-                () = &mut cancelled => {
+                biased;
+                _ = cancelled.changed() => {
                     self.cancel_turn(&runner);
                     return Err(TurnCancelled.into());
                 }
+                event = runner.event_rx.recv() => event,
             };
             let Some(event) = event else { break };
             if let Some(tx) = &self.event_tx {
                 let _ = tx.send(event.clone());
             }
+            self.turn.observe(&mut self.session, &self.cfg, &event);
             match event {
                 AgentEvent::Reasoning(text) => {
                     if self.show_reasoning {
@@ -926,33 +1129,29 @@ impl Engine {
                     }
                 }
                 AgentEvent::Token(text) => {
-                    let safe = crate::ui::events::sanitize_output(&text);
+                    let safe = text::sanitize_output(&text);
                     self.response_buf.push_str(safe.as_str());
                 }
                 AgentEvent::ToolCall {
-                    call_id: event_id,
+                    call_id: _,
                     name,
                     args,
                 } => {
                     self.response_buf.clear();
-                    let summary = crate::ui::utils::format_tool_call_summary(&name, &args);
+                    let summary = text::format_tool_call_summary(&name, &args);
                     if self.turn_trace.len() < 64 {
                         self.turn_trace
                             .push(CompactString::from(format!("→ {summary}")));
                     }
-                    let call_id = self.session.add_tool_call(&name, &args);
-                    self.push_pending_tool_call(event_id, call_id);
                     self.save_session_best_effort();
                 }
                 #[cfg(any(feature = "subagents", feature = "acp"))]
-                AgentEvent::SubagentToolCall { name, args } => {
-                    let parent = self.pending_tool_calls.last().map(|&(_, id)| id);
-                    self.session.add_subagent_tool_call(parent, &name, &args);
+                AgentEvent::SubagentToolCall { .. } => {
                     self.save_session_best_effort();
                 }
                 AgentEvent::ToolResult {
-                    call_id: event_id,
-                    name,
+                    call_id: _,
+                    name: _,
                     output,
                     ..
                 } => {
@@ -962,8 +1161,6 @@ impl Engine {
                             crate::extras::truncate_cjk(&output, 500, "…")
                         )));
                     }
-                    let call_id = self.resolve_tool_result_call_id(&event_id, &name);
-                    self.session.add_tool_result(call_id, &name, &output);
                     self.save_session_best_effort();
                 }
                 AgentEvent::CompletionCall {
@@ -1002,14 +1199,14 @@ impl Engine {
                 }
                 AgentEvent::Error(e) => {
                     turn_error = Some(e.to_string());
-                    self.pending_tool_calls.clear();
+                    self.turn.pending_tool_calls.clear();
                     self.save_session_best_effort();
                     break;
                 }
             }
         }
         self.turn_trace.clear();
-        self.pending_tool_calls.clear();
+        self.turn.pending_tool_calls.clear();
         if let Some(signals) = &self.status_signals {
             signals.send_stop();
         }
@@ -1035,7 +1232,7 @@ impl Engine {
         };
         self.session.add_message(MessageRole::Assistant, &reply);
         self.turn_trace.clear();
-        self.pending_tool_calls.clear();
+        self.turn.pending_tool_calls.clear();
         if let Some(signals) = &self.status_signals {
             signals.send_stop();
         }
@@ -1049,44 +1246,7 @@ impl Engine {
     /// totals, cost, calibration anchor, auto-compaction. Mirrors the
     /// non-rendering half of `handle_agent_done`.
     async fn finish_turn(&mut self, response: &str, usage: TurnUsage) {
-        self.session.add_message(MessageRole::Assistant, response);
-        self.session.total_input_tokens = self
-            .session
-            .total_input_tokens
-            .saturating_add(usage.input_tokens);
-        self.session.total_output_tokens = self
-            .session
-            .total_output_tokens
-            .saturating_add(usage.output_tokens);
-        self.session.total_cached_input_tokens = self
-            .session
-            .total_cached_input_tokens
-            .saturating_add(usage.cached_input_tokens);
-        self.session.total_cache_creation_input_tokens = self
-            .session
-            .total_cache_creation_input_tokens
-            .saturating_add(usage.cache_creation_input_tokens);
-        self.session.total_cost += crate::pricing::estimate_cost(
-            crate::pricing::billable_input_tokens(
-                self.cfg
-                    .is_anthropic_native(&self.session.provider, &self.session.model),
-                usage.input_tokens,
-                usage.cached_input_tokens,
-                usage.cache_creation_input_tokens,
-            ),
-            usage.output_tokens,
-            self.session.input_token_cost,
-            self.session.output_token_cost,
-        );
-        let context_input_tokens = Session::real_input_tokens(
-            self.cfg
-                .is_anthropic_native(&self.session.provider, &self.session.model),
-            usage.input_tokens,
-            usage.cached_input_tokens,
-            usage.cache_creation_input_tokens,
-        );
-        self.session
-            .set_calibration(context_input_tokens, usage.output_tokens);
+        turn::finish_response(&mut self.session, &self.cfg, response, usage);
         self.response_buf.clear();
 
         if self.cfg.resolve_compact_enabled() && self.session.needs_compaction(self.reserve()) {
@@ -1113,35 +1273,6 @@ impl Engine {
         cache_creation_input_tokens: u64,
         usage: &mut TurnUsage,
     ) {
-        let real = Session::real_input_tokens(
-            self.cfg
-                .is_anthropic_native(&self.session.provider, &self.session.model),
-            input_tokens,
-            cached_input_tokens,
-            cache_creation_input_tokens,
-        )
-        .saturating_add(output_tokens);
-        if real > self.session.total_estimated_tokens {
-            self.session.total_estimated_tokens = real;
-        }
-        self.session.total_input_tokens =
-            self.session.total_input_tokens.saturating_add(input_tokens);
-        self.session.total_output_tokens = self
-            .session
-            .total_output_tokens
-            .saturating_add(output_tokens);
-        self.session.total_cost += crate::pricing::estimate_cost(
-            crate::pricing::billable_input_tokens(
-                self.cfg
-                    .is_anthropic_native(&self.session.provider, &self.session.model),
-                input_tokens,
-                cached_input_tokens,
-                cache_creation_input_tokens,
-            ),
-            output_tokens,
-            self.session.input_token_cost,
-            self.session.output_token_cost,
-        );
         usage.input_tokens = usage.input_tokens.saturating_add(input_tokens);
         usage.output_tokens = usage.output_tokens.saturating_add(output_tokens);
         usage.cached_input_tokens = usage
@@ -1154,54 +1285,11 @@ impl Engine {
 
     // ── agent construction ────────────────────────────────────────────
 
-    /// Lazily build the main agent (mirrors `ensure_agent`).
     async fn ensure_agent(&mut self) {
-        if self.agent.is_some() {
-            return;
+        if self.agent.is_none() {
+            let model = self.session.model.to_string();
+            self.rebuild_agent(&model).await;
         }
-        let model = self.client.completion_model(self.session.model.to_string());
-        let temperature = config::resolve_temperature(&self.cli, &self.cfg, &self.session.model);
-        let extra_body = config::resolve_extra_body(&self.cfg, &self.session.model);
-        let agent = crate::provider::build_agent(
-            model,
-            AgentBuild {
-                cli: &self.cli,
-                cfg: &self.cfg,
-                context: &self.context,
-                permission: self.permission.clone(),
-                ask_tx: self.ask_tx.clone(),
-                sandbox: self.sandbox.clone(),
-                reasoning_enabled: self.reasoning_enabled,
-                temperature,
-                extra_body,
-                #[cfg(feature = "mcp")]
-                mcp_manager: self.mcp_manager.as_ref(),
-            },
-        )
-        .await;
-        self.session.overhead_tokens =
-            crate::agent::builder::estimate_overhead(&self.context, self.reasoning_enabled);
-        self.agent = Some(agent);
-    }
-
-    fn agent_build_parts(
-        &self,
-    ) -> (
-        &Cli,
-        &Config,
-        &ContextFiles,
-        &AnyClient,
-        &Option<PermCheck>,
-        &Sandbox,
-    ) {
-        (
-            &self.cli,
-            &self.cfg,
-            &self.context,
-            &self.client,
-            &self.permission,
-            &self.sandbox,
-        )
     }
 
     async fn rebuild_agent(&mut self, model_id: &str) {
@@ -1210,28 +1298,23 @@ impl Engine {
             crate::extras::advisor::update_client(self.client.clone());
             crate::extras::advisor::set_session_messages(self.session.messages.clone());
         }
-        let (cli, cfg, context, client, permission, sandbox) = self.agent_build_parts();
-        let model = client.completion_model(model_id.to_string());
-        let temperature = config::resolve_temperature(cli, cfg, model_id);
-        let extra_body = config::resolve_extra_body(cfg, model_id);
-        let agent = crate::provider::build_agent(
-            model,
-            AgentBuild {
-                cli,
-                cfg,
-                context,
-                permission: permission.clone(),
-                ask_tx: self.ask_tx.clone(),
-                sandbox: sandbox.clone(),
-                reasoning_enabled: self.reasoning_enabled,
-                temperature,
-                extra_body,
+        self.agent = Some(
+            runtime::AgentBuildCtx {
+                cli: &self.cli,
+                cfg: &self.cfg,
+                context: &self.context,
+                client: &self.client,
+                permission: &self.permission,
+                ask_tx: &self.ask_tx,
+                sandbox: &self.sandbox,
                 #[cfg(feature = "mcp")]
                 mcp_manager: self.mcp_manager.as_ref(),
-            },
-        )
-        .await;
-        self.agent = Some(agent);
+            }
+            .rebuild_agent(model_id, self.reasoning_enabled)
+            .await,
+        );
+        self.session.overhead_tokens =
+            crate::agent::builder::estimate_overhead(&self.context, self.reasoning_enabled);
     }
 
     async fn rebuild_agent_with_client(&mut self, provider: &str) -> anyhow::Result<()> {
@@ -1326,7 +1409,7 @@ impl Engine {
                 RunOutput::command(sink.transcript())
             }
             Ok(SlashFlow::DeferInit) => {
-                let prompt = crate::ui::slash::init::AGENTS_CREATION_PROMPT.to_string();
+                let prompt = actions::AGENTS_CREATION_PROMPT.to_string();
                 match self.start_agent_run(prompt).await {
                     Ok((response, _)) => {
                         sink.write_ok(&response);
@@ -1370,22 +1453,19 @@ impl Engine {
             return RunOutput::command(sink.transcript());
         }
         self.sink_echo_user(text, &mut sink);
-        let cmd_owned = cmd.to_string();
-        let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&cmd_owned)
-                .output()
-        })
-        .await;
-        let output = match output {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                sink.write_error(format!("command error: {e}"));
-                return RunOutput::command(sink.transcript());
+        let mut cancelled = self.cancel.0.subscribe();
+        let output = tokio::select! {
+            result = shell::run(cmd) => result,
+            _ = cancelled.changed() => {
+                let mut output = RunOutput::command("command cancelled");
+                output.cancelled = true;
+                return output;
             }
-            Err(e) => {
-                sink.write_error(format!("spawn error: {e}"));
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                sink.write_error(format!("command error: {error}"));
                 return RunOutput::command(sink.transcript());
             }
         };
@@ -1492,7 +1572,7 @@ impl Engine {
             let msg = msg.trim();
             if !prompt_name.is_empty() && self.context.prompts.contains_key(prompt_name) {
                 self.dot_prompt_restore = self.context.current_prompt_name.clone();
-                crate::ui::apply_prompt_mode(
+                actions::apply_prompt_mode(
                     prompt_name,
                     &mut self.context,
                     &mut self.session,
@@ -1511,7 +1591,7 @@ impl Engine {
         }
         let prompt_name = after_dot.trim();
         if self.context.prompts.contains_key(prompt_name) {
-            crate::ui::apply_prompt_mode(
+            actions::apply_prompt_mode(
                 prompt_name,
                 &mut self.context,
                 &mut self.session,
@@ -1552,6 +1632,11 @@ impl Engine {
     }
 
     fn save_session_best_effort(&self) {
+        let owner = self.resources.clone();
+        owner.sync(|| self.save_session_scoped());
+    }
+
+    fn save_session_scoped(&self) {
         if !self.cli.no_session
             && let Err(e) = crate::session::storage::save_session(&self.session)
         {
@@ -1560,15 +1645,7 @@ impl Engine {
     }
 
     fn reserve(&self) -> u64 {
-        let qm = config::quick_models_map(&self.cfg);
-        #[cfg(feature = "memory")]
-        let reserve = crate::extras::memory::effective_reserve(
-            self.cfg.resolve_reserve_tokens(&self.session.model, &qm),
-            self.context.memory.as_deref(),
-        );
-        #[cfg(not(feature = "memory"))]
-        let reserve = self.cfg.resolve_reserve_tokens(&self.session.model, &qm);
-        reserve
+        compaction::reserve(&self.session, &self.cfg, &self.context)
     }
 
     /// Summarize `messages[..cut]` via the model and replace them with the
@@ -1579,46 +1656,29 @@ impl Engine {
         auto: bool,
         sink: &mut StringSink,
     ) -> anyhow::Result<()> {
-        let keep_recent = self.cfg.resolve_keep_recent_tokens();
-        let max_tokens = self.session.context_window.saturating_sub(self.reserve());
-        if auto && self.session.effective_context_tokens() <= max_tokens {
-            return Ok(());
-        }
-        let cut_idx = Session::select_compaction_cut(&self.session.messages, keep_recent);
-        if cut_idx == 0 {
-            if !auto {
-                sink.write_ok("not enough conversation history to compact yet");
+        let cut_idx = match compaction::plan(
+            &self.session,
+            self.cfg.resolve_keep_recent_tokens(),
+            self.reserve(),
+            auto,
+        ) {
+            compaction::Plan::BelowBudget => return Ok(()),
+            compaction::Plan::NothingToCompact => {
+                if !auto {
+                    sink.write_ok("not enough conversation history to compact yet");
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
+            compaction::Plan::Summarize { cut } => cut,
+        };
         if auto {
             sink.write_result("auto-compacting...");
         } else {
             sink.write_ok("compressing...");
         }
         sink.write_line("");
-        let messages_to_summarize = &self.session.messages[..cut_idx];
-        let previous_summary = self.session.compactions.last().map(|c| c.summary.as_str());
-        let summary = self
-            .client
-            .compress_messages(
-                &self.session.model,
-                messages_to_summarize,
-                previous_summary,
-                instructions,
-            )
-            .await?;
-        let tokens_before: u64 = messages_to_summarize
-            .iter()
-            .map(|m| m.estimated_tokens)
-            .sum();
-        #[cfg(feature = "memory")]
-        crate::extras::memory::flush_compaction_summary(
-            &crate::extras::memory::Mem::open(),
-            &summary,
-            Some(cut_idx),
-        );
-        self.session.compress(summary, cut_idx, tokens_before);
+        let tokens_before =
+            compaction::apply(&mut self.session, &self.client, cut_idx, instructions).await?;
         let model_id = self.session.model.to_string();
         self.rebuild_agent(&model_id).await;
         sink.write_ok(format!(
@@ -1626,29 +1686,6 @@ impl Engine {
             cut_idx, tokens_before,
         ));
         Ok(())
-    }
-
-    fn push_pending_tool_call(&mut self, id: CompactString, session_call_id: u64) {
-        if let Some(pos) = self.pending_tool_calls.iter().position(|(k, _)| *k == id) {
-            self.pending_tool_calls.remove(pos);
-        }
-        self.pending_tool_calls.push((id, session_call_id));
-    }
-
-    fn take_pending_tool_call(&mut self, id: &str) -> Option<u64> {
-        let pos = self.pending_tool_calls.iter().position(|(k, _)| k == id)?;
-        Some(self.pending_tool_calls.remove(pos).1)
-    }
-
-    /// Pair a `ToolResult` with its call. Synthesizes an orphan call when rig
-    /// streams a result with no matching `ToolCall` (mirrors
-    /// `resolve_tool_result_call_id`).
-    fn resolve_tool_result_call_id(&mut self, id: &str, name: &str) -> u64 {
-        if let Some(call_id) = self.take_pending_tool_call(id) {
-            return call_id;
-        }
-        tracing::warn!("ToolResult for {name} with no matching ToolCall; synthesizing orphan");
-        self.session.add_tool_call(name, &serde_json::Value::Null)
     }
 
     fn restore_prompt(&mut self, restore_name: &str) {
@@ -1677,51 +1714,20 @@ impl Engine {
     /// Switch to the quick-model mapped for `prompt_name` (mirrors
     /// `SlashCtx::switch_to_prompt_model`).
     async fn apply_prompt_model(&mut self, prompt_name: &str, sink: &mut StringSink) -> bool {
-        let qm_name_owned: Option<String> = self
-            .cfg
-            .resolve_prompt_model(prompt_name)
-            .map(|s| s.to_string());
-        let Some(qm_name) = qm_name_owned else {
+        let Some((alias, choice)) = models::prompt_model_choice(&self.cfg, prompt_name) else {
             return false;
         };
-        let qm = config::quick_models_map(&self.cfg);
-        let Some(qmc) = qm.get(qm_name.as_str()) else {
-            return false;
-        };
-        // Clone out of the config map before any `&mut self` call.
-        let qm_provider = qmc.provider.to_string();
-        let qm_model = qmc.model.to_string();
-        let qm_in = qmc.input_token_cost;
-        let qm_out = qmc.output_token_cost;
-        let new_model = CompactString::from(&qm_model);
-        let provider_changed = qm_provider != self.session.provider.as_str();
-        self.session.model = new_model.clone();
-        if provider_changed {
-            match self.rebuild_agent_with_client(&qm_provider).await {
-                Ok(()) => {
-                    self.session.provider = CompactString::from(&qm_provider);
-                }
-                Err(e) => {
-                    sink.write_error(format!(
-                        "failed to switch provider for prompt '{prompt_name}': {e}"
-                    ));
-                    return false;
-                }
-            }
-        } else {
-            self.rebuild_agent(&qm_model).await;
-        }
-        self.session.input_token_cost = qm_in;
-        self.session.output_token_cost = qm_out;
-        let qm2 = config::quick_models_map(&self.cfg);
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                &self.session.provider,
-                &self.session.model,
-                &qm2,
+        if let Err(error) = self
+            .select_model(models::ModelTarget::Conversation, choice)
+            .await
+        {
+            sink.write_error(format!(
+                "failed to switch provider for prompt '{prompt_name}': {error}"
             ));
+            return false;
+        }
         sink.write_ok(format!(
-            "switched to model: {qm_name} (from prompt '{prompt_name}')"
+            "switched to model: {alias} (from prompt '{prompt_name}')"
         ));
         true
     }
@@ -1735,14 +1741,10 @@ impl Engine {
     ) -> anyhow::Result<SlashFlow> {
         match parts[0] {
             "/provider" => self.cmd_provider(parts, sink).await,
-            "/model" => self.cmd_model(parts, sink).await,
-            "/models" => self.cmd_models(parts, sink).await,
+            "/model" | "/models" => self.cmd_models(parts, sink).await,
             "/models-add" => self.cmd_models_add(parts, sink),
             #[cfg(feature = "subagents")]
-            "/model-subagent" | "/models-subagent" => {
-                sink.write_error("subagent model switching needs the TUI runtime");
-                Ok(SlashFlow::Done)
-            }
+            "/model-subagent" | "/models-subagent" => self.cmd_models(parts, sink).await,
             _ => Ok(SlashFlow::Done),
         }
     }
@@ -1766,61 +1768,51 @@ impl Engine {
         Ok(SlashFlow::Done)
     }
 
-    async fn cmd_model(
-        &mut self,
-        parts: &[&str],
-        sink: &mut StringSink,
-    ) -> anyhow::Result<SlashFlow> {
-        if parts.len() < 2 {
-            sink.write_ok(format!("current model: {}", self.session.model));
-            return Ok(SlashFlow::Done);
-        }
-        let new_model = CompactString::new(parts[1].trim());
-        let new_model_str = new_model.to_string();
-        self.rebuild_agent(&new_model_str).await;
-        self.session.model = new_model.clone();
-        self.session.provider = self.cli.resolve_provider(&self.cfg);
-        let qm = config::quick_models_map(&self.cfg);
-        self.session
-            .update_context_window(self.cfg.resolve_context_window(
-                &self.session.provider,
-                &new_model,
-                &qm,
-            ));
-        sink.write_ok(format!("switched to model: {new_model}"));
-        Ok(SlashFlow::Done)
-    }
-
     async fn cmd_models(
         &mut self,
         parts: &[&str],
         sink: &mut StringSink,
     ) -> anyhow::Result<SlashFlow> {
-        let qm = config::quick_models_map(&self.cfg);
-        // `/models <name>`: quick-model switch, else raw model id.
-        if parts.len() >= 2 && parts.get(1).map(|s| s.trim()) != Some("refresh") {
-            match self.set_model_selection(parts[1].trim()).await {
-                Ok(()) => sink.write_ok(format!("switched to model: {}", self.session.model)),
-                Err(error) => sink.write_error(error.to_string()),
+        use models::{ModelTarget, model_choices, resolve_model_choice};
+        #[cfg(not(feature = "subagents"))]
+        if parts
+            .get(1)
+            .is_some_and(|part| matches!(*part, "subagent" | "subagents"))
+        {
+            anyhow::bail!("subagents feature is not enabled");
+        }
+        let text = parts.join(" ");
+        let (target, value) =
+            ModelTarget::parse(&text).ok_or_else(|| anyhow::anyhow!("invalid model command"))?;
+        let target = target.unwrap_or(ModelTarget::Conversation);
+        let (provider, model, client) = match target {
+            ModelTarget::Conversation => (
+                self.session.provider.to_string(),
+                self.session.model.to_string(),
+                self.client.clone(),
+            ),
+            #[cfg(feature = "subagents")]
+            ModelTarget::Subagent => crate::extras::subagents::model_settings()
+                .ok_or_else(|| anyhow::anyhow!("Subagent configuration is not initialized"))?,
+        };
+        if !value.is_empty() && value != "refresh" {
+            let choice = resolve_model_choice(&self.cfg, &provider, &model, value);
+            let label = format!("{} · {}", choice.label, choice.key.provider);
+            self.select_model(target, choice).await?;
+            sink.write_ok(format!("{} model: {label}", target.name()));
+        } else {
+            if value == "refresh" {
+                let custom = self.cfg.custom_providers_map().contains_key(&provider);
+                models::fetch_models_cached(&provider, custom, &client, &self.cli, &self.cfg, true)
+                    .await?;
             }
-            return Ok(SlashFlow::Done);
-        }
-        // List mode.
-        let mut sorted: Vec<&String> = qm.keys().collect();
-        sorted.sort();
-        sink.write_ok(format!(
-            "quick models (current: {} | {}):",
-            self.session.provider, self.session.model
-        ));
-        if sorted.is_empty() {
-            sink.write_result("  (none — add with /models-add)");
-        }
-        for name in &sorted {
-            let q = &qm[name.as_str()];
-            sink.write_result(format!(
-                "  {}  ({} / {})  ${:.4}/M in  ${:.4}/M out",
-                name, q.provider, q.model, q.input_token_cost, q.output_token_cost
+            sink.write_ok(format!(
+                "{} models (current: {model} · {provider}; saved aliases: quick_models)",
+                target.name()
             ));
+            for choice in model_choices(&self.cfg, &provider, &model) {
+                sink.write_result(format!("  {} · {}", choice.label, choice.detail()));
+            }
         }
         Ok(SlashFlow::Done)
     }
@@ -1949,13 +1941,13 @@ impl Engine {
         } else {
             let name = parts[1].trim().to_string();
             if self.context.prompts.contains_key(&name) {
-                match crate::ui::apply_prompt_mode(
+                match actions::apply_prompt_mode(
                     &name,
                     &mut self.context,
                     &mut self.session,
                     &self.permission,
                 ) {
-                    crate::ui::PromptModeOutcome::RestoredUserMode => {
+                    actions::PromptModeOutcome::RestoredUserMode => {
                         if let Some(perm) = &self.permission {
                             let current = perm
                                 .lock()
@@ -1965,10 +1957,10 @@ impl Engine {
                             sink.write_ok(format!("restored user mode: {current}"));
                         }
                     }
-                    crate::ui::PromptModeOutcome::Applied(mode) => {
+                    actions::PromptModeOutcome::Applied(mode) => {
                         sink.write_ok(format!("security mode: {mode} (from prompt)"));
                     }
-                    crate::ui::PromptModeOutcome::None => {}
+                    actions::PromptModeOutcome::None => {}
                 }
                 let model_switched = self.apply_prompt_model(&name, sink).await;
                 if !model_switched {
@@ -2451,7 +2443,7 @@ impl Engine {
         if p.is_absolute() {
             p
         } else {
-            std::env::current_dir()
+            crate::engine::resources::working_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
                 .join(p)
         }
@@ -2463,7 +2455,8 @@ impl Engine {
         sink: &mut StringSink,
     ) -> anyhow::Result<SlashFlow> {
         let force = parts.len() >= 2 && parts[1] == "force";
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let cwd = crate::engine::resources::working_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let agents_path = cwd.join("AGENTS.md");
         let arch_path = cwd.join("ARCHITECTURE.md");
         let agents_exists = agents_path.exists();
@@ -2541,7 +2534,7 @@ impl Engine {
             }
         };
         self.context.one_shot_restore = self.context.current_prompt_name.clone();
-        crate::ui::apply_prompt_mode(
+        actions::apply_prompt_mode(
             "review",
             &mut self.context,
             &mut self.session,
@@ -2748,14 +2741,14 @@ impl Engine {
                 let wt_base_dir = self.cli.resolve_wt_base_dir(&self.cfg);
                 match crate::extras::git_worktree::create(name, wt_base_dir.as_deref()) {
                     Ok((path, _info)) => {
-                        if let Err(e) = std::env::set_current_dir(&path) {
+                        if let Err(e) = crate::engine::resources::change_dir(&path) {
                             sink.write_error(format!("failed to change directory: {e}"));
                             return Ok(SlashFlow::Done);
                         }
                         self.session.working_dir = CompactString::new(path.to_string_lossy());
                         #[cfg(feature = "git-worktree")]
                         self.context.reload();
-                        crate::ui::apply_current_prompt_mode(&mut self.context, &self.permission);
+                        actions::apply_current_prompt_mode(&mut self.context, &self.permission);
                         let model_id = self.session.model.to_string();
                         self.rebuild_agent(&model_id).await;
                         sink.write_ok(format!(

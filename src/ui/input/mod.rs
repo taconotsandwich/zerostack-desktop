@@ -312,6 +312,7 @@ impl InputEditor {
         crate::ui::terminal::suspend_tui(self.mouse_capture, || {
             let (prog, args) = crate::ui::terminal::parse_editor_command(&editor);
             let _ = std::process::Command::new(prog)
+                .current_dir(crate::engine::resources::working_dir().unwrap_or_default())
                 .args(args)
                 .arg(&tmp)
                 .status();

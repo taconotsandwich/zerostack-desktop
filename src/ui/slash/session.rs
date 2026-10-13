@@ -68,7 +68,7 @@ async fn handle_export(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
     } else {
         (crate::extras::export::session_to_html(ctx.session), "HTML")
     };
-    match std::fs::write(path, content) {
+    match std::fs::write(crate::engine::resources::resolve(path), content) {
         Ok(()) => write_ok(ctx.renderer, format!("exported {} to {}", kind, path)),
         Err(e) => write_error(ctx.renderer, format!("export failed: {}", e)),
     }
@@ -81,7 +81,7 @@ async fn handle_import(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result
         write_error(ctx.renderer, "usage: /import <file.jsonl|session.json>");
         return Ok(());
     };
-    let content = match std::fs::read_to_string(path) {
+    let content = match std::fs::read_to_string(crate::engine::resources::resolve(path)) {
         Ok(c) => c,
         Err(e) => {
             write_error(ctx.renderer, format!("failed to read {}: {}", path, e));
@@ -280,7 +280,7 @@ async fn handle_undo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
 
     write_ok(ctx.renderer, "  git stash working changes? [y/N] ");
 
-    let do_stash = tokio::task::spawn_blocking(|| {
+    let do_stash = crate::engine::resources::spawn_blocking(|| {
         let mut buf = [0u8; 1];
         std::io::stdin().read_exact(&mut buf).is_ok() && (buf[0] == b'y' || buf[0] == b'Y')
     })
@@ -288,8 +288,11 @@ async fn handle_undo(ctx: &mut SlashCtx<'_>) -> anyhow::Result<()> {
     .unwrap_or(false);
 
     if do_stash {
-        let out_res = tokio::task::spawn_blocking(|| {
-            std::process::Command::new("git").args(["stash"]).output()
+        let out_res = crate::engine::resources::spawn_blocking(|| {
+            std::process::Command::new("git")
+                .current_dir(crate::engine::resources::working_dir()?)
+                .args(["stash"])
+                .output()
         })
         .await
         .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())));

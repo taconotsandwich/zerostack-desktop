@@ -64,7 +64,7 @@ impl Tool for ReadTool {
     }
 
     async fn call(&self, args: ReadArgs) -> Result<String, ToolError> {
-        let path = crate::fs::expand_tilde(&args.path);
+        let path = crate::fs::resolve_path(&args.path);
         let offset = args.offset.unwrap_or(1).saturating_sub(1);
         let limit = args.limit.unwrap_or(self.max_lines as usize);
         tracing::debug!(

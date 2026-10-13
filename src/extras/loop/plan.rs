@@ -31,7 +31,7 @@ pub async fn handle_startup(plan_file: &Path) -> anyhow::Result<bool> {
     );
     let _ = std::io::stdout().flush();
     let plan_file_owned = plan_file.to_path_buf();
-    let input = tokio::task::spawn_blocking(move || {
+    let input = crate::engine::resources::spawn_blocking(move || {
         let mut input = String::new();
         let _ = std::io::stdin().read_line(&mut input);
         input

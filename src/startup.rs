@@ -17,7 +17,7 @@ use crate::session::{self, MessageRole, PromptRef, Session};
 /// Uses `spawn_blocking` so `stdin.read_line` runs on the blocking pool.
 async fn prompt_yn_async(question: &str) -> anyhow::Result<bool> {
     let q = question.to_string();
-    let input = tokio::task::spawn_blocking(move || {
+    let input = crate::engine::resources::spawn_blocking(move || {
         eprint!("{q}");
         let _ = std::io::Write::flush(&mut std::io::stderr());
         let mut s = String::new();
@@ -370,7 +370,8 @@ impl Startup {
             let qm = config::quick_models_map_ref(&self.cfg);
 
             // Resolve subagent model: subagent_model config > subagent_provider + model > main model
-            let (sub_provider, mut sub_model) = if let Some(sa_model) = &self.cfg.subagent_model {
+            let (mut sub_provider, mut sub_model) = if let Some(sa_model) = &self.cfg.subagent_model
+            {
                 if let Some(q) = qm.get(sa_model.as_str()) {
                     (q.provider.clone(), q.model.clone())
                 } else {
@@ -407,6 +408,7 @@ impl Startup {
                             e,
                             self.provider
                         );
+                        sub_provider = self.provider.clone();
                         sub_model = self.model.clone();
                         self.client.clone()
                     }
@@ -415,6 +417,7 @@ impl Startup {
 
             crate::extras::subagents::init(
                 sub_client,
+                sub_provider.to_string(),
                 sub_model.to_string(),
                 task_max_turns,
                 std::sync::Arc::new(self.cfg.clone()),
@@ -698,7 +701,7 @@ impl Startup {
         // ARCHITECTURE.md prompt (spawn_blocking via async helper)
         #[cfg(feature = "archmd")]
         let arch_created = if !self.cli.resolve_no_context_files(&self.cfg) {
-            let cwd = std::env::current_dir().ok();
+            let cwd = crate::engine::resources::working_dir().ok();
             if let Some(cwd) = cwd {
                 crate::extras::archmd::ask_and_create_async(cwd)
                     .await

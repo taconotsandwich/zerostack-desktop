@@ -94,34 +94,6 @@ impl EventSink for StringSink {
     }
 }
 
-// Adapter so TUI code can target `EventSink` while the slash handlers are
-// migrated off `&mut Renderer` one command at a time. Colors mirror the
-// `C_AGENT` / `C_RESULT` / `C_ERROR` convention in `ui::slash`.
-impl EventSink for crate::ui::renderer::Renderer {
-    fn write_line(&mut self, text: impl AsRef<str>) {
-        let _ = self.write_line(text.as_ref(), crossterm::style::Color::White);
-    }
-
-    fn write_ok(&mut self, text: impl AsRef<str>) {
-        let _ = self.write_line(text.as_ref(), crossterm::style::Color::White);
-    }
-
-    fn write_result(&mut self, text: impl AsRef<str>) {
-        let _ = self.write_line(text.as_ref(), crossterm::style::Color::DarkGrey);
-    }
-
-    fn write_error(&mut self, text: impl AsRef<str>) {
-        let _ = self.write_line(
-            &format!("error: {}", text.as_ref()),
-            crossterm::style::Color::Red,
-        );
-    }
-
-    fn token(&mut self, text: &str) {
-        let _ = self.write(text, crossterm::style::Color::White);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

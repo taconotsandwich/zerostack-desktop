@@ -95,7 +95,7 @@ pub fn render_session(
         feed.push_line(BlockStyle::Plain, "");
     }
     if session.messages.is_empty() {
-        let cwd = std::env::current_dir().ok();
+        let cwd = crate::engine::resources::working_dir().ok();
         let cwd_str = cwd
             .as_ref()
             .and_then(|p| p.file_name())
@@ -251,27 +251,4 @@ pub fn show_welcome(renderer: &mut Renderer, show_lazygit: bool) -> std::io::Res
     Ok(())
 }
 
-pub fn sanitize_output(text: &str) -> CompactString {
-    let mut result = String::with_capacity(text.len());
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            match chars.next() {
-                Some('[') | Some(']') => {
-                    for next in &mut chars {
-                        if next.is_ascii_alphabetic() || next == '~' {
-                            break;
-                        }
-                    }
-                }
-                Some(_) => {}
-                None => break,
-            }
-        } else if c.is_ascii_control() && c != '\n' && c != '\t' && c != '\r' {
-            continue;
-        } else {
-            result.push(c);
-        }
-    }
-    CompactString::from(result)
-}
+pub use crate::engine::text::sanitize_output;

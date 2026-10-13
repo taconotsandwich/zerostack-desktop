@@ -1,7 +1,5 @@
 pub(crate) mod app;
 pub(crate) mod event_handler;
-// `pub`: the headless [`Engine`](crate::engine::Engine) sanitizes streamed
-// tokens the same way the TUI does.
 pub mod events;
 pub(crate) mod feed;
 pub(crate) mod input;
@@ -13,13 +11,9 @@ pub(crate) mod pickers;
 pub mod renderer;
 pub(crate) mod roles;
 pub(crate) mod slash;
-// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
-// reuses prompt-mode switching, `TurnUsage`, and `undo_last`.
 pub mod state;
 pub(crate) mod statusline;
 mod terminal;
-// `pub`: the headless [`Engine`](crate::engine::Engine) formats the same
-// tool-call summaries for its turn trace.
 pub mod utils;
 
 use std::io;
@@ -32,17 +26,10 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use crossterm::style::Color;
 use tokio::sync::mpsc;
 
-#[cfg(feature = "mcp")]
-use crate::config::Config;
-use crate::context::ContextFiles;
 use crate::event::UserEvent;
-#[cfg(feature = "mcp")]
-use crate::extras::mcp::McpClientManager;
 use crate::permission::ask::AskReceiver;
-use crate::permission::checker::PermCheck;
-use crate::permission::{self, SecurityMode};
 use crate::provider::AnyAgent;
-use crate::session::{MessageRole, PromptRef, Session};
+use crate::session::MessageRole;
 use crate::ui::event_handler::ensure_agent;
 #[cfg(feature = "advisor")]
 use crate::ui::events::sanitize_output;
@@ -53,83 +40,9 @@ use crate::ui::slash::handle_compress;
 use crate::ui::state::MergeRequest;
 use crate::ui::state::{AgentRunState, BtwStats, ChainState, SlashState, UiContext};
 
-/// What [`apply_prompt_mode`] did with the prompt's `%%mode=` directive, so
-/// callers can report the change without re-parsing the prompt.
-/// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
-/// reports the same outcomes.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PromptModeOutcome {
-    /// No directive, an unrecognized mode name, or no permission checker.
-    None,
-    /// `%%mode=last_user_mode`: the user-selected mode was restored.
-    RestoredUserMode,
-    /// `%%mode=<mode>`: the given security mode was applied.
-    Applied(SecurityMode),
-}
-
-/// Select prompt `name` as the current prompt and apply its `%%mode=`
-/// directive (if any) to the permission checker. The directive line is
-/// stripped from the stored prompt content. Unknown prompt names are a no-op.
-/// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
-/// switches prompts the same way.
-pub fn apply_prompt_mode(
-    name: &str,
-    context: &mut ContextFiles,
-    session: &mut Session,
-    permission: &Option<PermCheck>,
-) -> PromptModeOutcome {
-    let Some(content) = context.prompts.get(name) else {
-        return PromptModeOutcome::None;
-    };
-    let (mode_directive, clean_content) = permission::parse_prompt_mode(content);
-    context.current_prompt = Some(if mode_directive.is_some() {
-        clean_content.to_string()
-    } else {
-        content.clone()
-    });
-    context.current_prompt_name = Some(name.to_string());
-    let extra = context.extra_prompts_dirs.clone();
-    session.prompt = Some(PromptRef {
-        name: name.into(),
-        source: crate::context::prompts::source_of_with_extra(name, &extra),
-    });
-    apply_mode_directive(mode_directive, permission)
-}
-
-/// Apply an already-parsed `%%mode=` directive to the permission checker.
-fn apply_mode_directive(
-    mode_directive: Option<&str>,
-    permission: &Option<PermCheck>,
-) -> PromptModeOutcome {
-    let (Some(mode_str), Some(perm)) = (mode_directive, permission) else {
-        return PromptModeOutcome::None;
-    };
-    let mut guard = perm.lock().unwrap_or_else(|e| e.into_inner());
-    if mode_str == "last_user_mode" {
-        guard.restore_user_mode();
-        PromptModeOutcome::RestoredUserMode
-    } else if let Some(mode) = SecurityMode::from_str(mode_str) {
-        guard.set_prompt_mode(mode);
-        PromptModeOutcome::Applied(mode)
-    } else {
-        PromptModeOutcome::None
-    }
-}
-
-/// Re-apply the current prompt's `%%mode=` directive after a context reload
-/// (which restores the raw, unstripped prompt content from disk).
-/// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
-/// re-applies it after folder changes, like the TUI.
-pub fn apply_current_prompt_mode(context: &mut ContextFiles, permission: &Option<PermCheck>) {
-    let Some(content) = &context.current_prompt.clone() else {
-        return;
-    };
-    let (mode_directive, clean_content) = permission::parse_prompt_mode(content);
-    if mode_directive.is_some() {
-        context.current_prompt = Some(clean_content.to_string());
-    }
-    apply_mode_directive(mode_directive, permission);
-}
+#[cfg(feature = "git-worktree")]
+pub use crate::engine::actions::apply_current_prompt_mode;
+pub use crate::engine::actions::{PromptModeOutcome, apply_prompt_mode};
 
 /// State held while an agent-driven worktree merge is in flight, until the
 /// run finishes and the merge outcome can be verified. Cleanup (worktree
@@ -387,17 +300,7 @@ pub(crate) fn spawn_event_thread(
 
 /// Lazily initialise the MCP client manager (connects only on first use).
 #[cfg(feature = "mcp")]
-pub(crate) async fn ensure_mcp_manager<'a>(
-    mcp: &'a mut Option<McpClientManager>,
-    cfg: &'a Config,
-) -> Option<&'a McpClientManager> {
-    if mcp.is_none()
-        && let Some(servers) = &cfg.mcp_servers
-    {
-        *mcp = Some(McpClientManager::connect_all(servers).await);
-    }
-    mcp.as_ref()
-}
+pub(crate) use crate::engine::runtime::ensure_mcp_manager;
 
 /// What to do with a submitted line, given whether a main run is already active.
 /// Pure decision so it can be unit-tested without a TUI/agent.
@@ -423,21 +326,7 @@ pub(crate) fn allowed_while_running(text: &str) -> bool {
     t == "/queue" || t.starts_with("/queue ") || t == "/btw" || t.starts_with("/btw ")
 }
 
-/// Build the rewind picker's list of `(message_index, preview)` for every user
-/// turn in the conversation, oldest first. Only user turns are offered: a rewind
-/// lands just before a message you sent, dropping everything after it.
-pub(crate) fn rewind_targets(session: &Session) -> Vec<(usize, String)> {
-    session
-        .messages
-        .iter()
-        .enumerate()
-        .filter(|(_, m)| m.role == MessageRole::User)
-        .map(|(idx, m)| {
-            let preview: String = m.content.chars().take(80).collect();
-            (idx, preview.replace('\n', " "))
-        })
-        .collect()
-}
+pub(crate) use crate::engine::actions::rewind_targets;
 
 pub(crate) fn classify_submission(is_running: bool, text: &str) -> SubmitAction {
     // Idle, or a whitelisted parallel-safe command → let it through to its
@@ -489,9 +378,7 @@ pub(crate) async fn spawn_merge_agent(
             None,
         )
         .await;
-    run.agent_rx = Some(runner.event_rx);
-    run.main_abort = Some(runner.abort_handle);
-    run.is_running = true;
+    run.install(runner);
     if let Some(ss) = ui.status_signals.as_ref() {
         ss.send_start();
     }
@@ -503,51 +390,7 @@ pub(crate) async fn spawn_merge_agent(
         force: req.force,
     });
 }
-/// Result of a background agent prebuild.
-#[cfg(feature = "mcp")]
-pub(crate) type PrebuildPayload = (AnyAgent, Option<McpClientManager>);
-#[cfg(not(feature = "mcp"))]
-pub(crate) type PrebuildPayload = AnyAgent;
-
-/// If the background prebuild hasn't delivered yet, block until it does.
-#[cfg(feature = "mcp")]
-pub(crate) async fn resolve_prebuild<'a>(
-    agent: &'a mut Option<AnyAgent>,
-    mcp_manager: &'a mut Option<McpClientManager>,
-    prebuild_rx: &'a mut Option<mpsc::Receiver<PrebuildPayload>>,
-) {
-    if agent.is_some() {
-        return;
-    }
-    if let Some(rx) = prebuild_rx.as_mut() {
-        if let Some((a, mcp)) = rx.recv().await {
-            *agent = Some(a);
-            *mcp_manager = mcp;
-        }
-        *prebuild_rx = None;
-    }
-}
-
-#[cfg(not(feature = "mcp"))]
-pub(crate) async fn resolve_prebuild<'a>(
-    agent: &'a mut Option<AnyAgent>,
-    prebuild_rx: &'a mut Option<mpsc::Receiver<PrebuildPayload>>,
-) {
-    if agent.is_some() {
-        return;
-    }
-    if let Some(rx) = prebuild_rx.as_mut() {
-        if let Some(a) = rx.recv().await {
-            *agent = Some(a);
-        }
-        *prebuild_rx = None;
-    }
-}
-
-/// Starts a single main agent run for `text` and records its abort handle.
-/// The ONLY place that sets `agent_rx`/`is_running` for user-driven runs, so the
-/// "at most one main run" invariant is enforced in one spot. Callers must ensure
-/// no run is already active (otherwise the previous one would be orphaned).
+pub(crate) use crate::engine::runtime::PrebuildPayload;
 pub(crate) async fn start_main_run(
     text: &str,
     run: &mut AgentRunState,
@@ -555,60 +398,14 @@ pub(crate) async fn start_main_run(
     slash: &SlashState,
     prebuild_rx: &mut Option<mpsc::Receiver<PrebuildPayload>>,
 ) {
-    // Wait for the background prebuild if it hasn't completed yet.
-    #[cfg(feature = "mcp")]
-    resolve_prebuild(&mut run.agent, &mut ui.mcp_manager, prebuild_rx).await;
-    #[cfg(not(feature = "mcp"))]
-    resolve_prebuild(&mut run.agent, prebuild_rx).await;
-
-    ensure_agent(&mut run.agent, ui, slash.reasoning_enabled).await;
-    let history = crate::agent::runner::convert_history(ui.session);
-    #[cfg(feature = "multimodal")]
-    let history = {
-        let media = ui.session.drain_media();
-        if media.is_empty() {
-            history
-        } else {
-            let mut h = history;
-            h.extend(crate::agent::runner::media_to_messages(&media));
-            h
-        }
-    };
-    let runner = run
-        .agent
-        .as_ref()
-        .unwrap()
-        .clone()
-        .spawn_runner(
-            text.to_string(),
-            history,
-            ui.cfg.retry.clone(),
-            #[cfg(feature = "hooks")]
-            None,
-        )
-        .await;
-    run.agent_rx = Some(runner.event_rx);
-    run.main_abort = Some(runner.abort_handle);
-    run.is_running = true;
-    if let Some(ss) = ui.status_signals.as_ref() {
-        ss.send_start();
-    }
-    ui.session.add_message(MessageRole::User, text);
-    // Mark this message as the rollback target if the turn fails (see the
-    // failed-send handling in the main event loop).
-    run.pending_send = Some(text.to_string());
-    #[cfg(feature = "advisor")]
-    crate::extras::advisor::set_session_messages(ui.session.messages.clone());
-    if !ui.cli.no_session
-        && let Err(e) = crate::session::chat_history::append_entry(
-            &crate::session::chat_history::ChatHistoryEntry {
-                content: text.to_string(),
-                timestamp: ui.session.updated_at.clone(),
-            },
-        )
-    {
-        tracing::warn!("failed to append chat history entry: {e}");
-    }
+    crate::engine::runtime::start_main_run(
+        text,
+        &mut run.execution,
+        ui,
+        slash.reasoning_enabled,
+        prebuild_rx,
+    )
+    .await;
 }
 
 /// Continuation prompt injected after a mid-turn compaction. Hardcoded as a
@@ -645,11 +442,7 @@ pub(crate) async fn mid_turn_compact_and_respawn(
     slash: &SlashState,
 ) -> anyhow::Result<()> {
     // 1. Stop the in-flight run. bash children die via kill_on_drop.
-    if let Some(h) = run.main_abort.take() {
-        h.abort();
-    }
-    run.is_running = false;
-    run.agent_rx = None;
+    run.stop();
     run.was_reasoning = false;
     // The aborted run's in-flight calls never get their results; the respawn
     // below reuses this state, so a stranded entry would be paired with the
@@ -723,9 +516,7 @@ pub(crate) async fn mid_turn_compact_and_respawn(
             None,
         )
         .await;
-    run.agent_rx = Some(runner.event_rx);
-    run.main_abort = Some(runner.abort_handle);
-    run.is_running = true;
+    run.install(runner);
     if let Some(ss) = ui.status_signals.as_ref() {
         ss.send_start();
     }
@@ -745,11 +536,7 @@ pub(crate) fn stop_turn_context_exhausted(
     ui: &UiContext,
     run: &mut AgentRunState,
 ) -> anyhow::Result<()> {
-    if let Some(h) = run.main_abort.take() {
-        h.abort();
-    }
-    run.is_running = false;
-    run.agent_rx = None;
+    run.stop();
     run.was_reasoning = false;
     run.agent_line_started = false;
     run.turn_trace.clear();

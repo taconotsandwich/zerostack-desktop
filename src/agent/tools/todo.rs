@@ -16,8 +16,6 @@ pub struct TodoWriteArgs {
     pub todos: Vec<TodoItem>,
 }
 
-pub static TODO_LIST: std::sync::Mutex<Vec<TodoItem>> = std::sync::Mutex::new(Vec::new());
-
 pub struct WriteTodoList {
     pub permission: Option<PermCheck>,
     pub ask_tx: Option<AskSender>,
@@ -63,10 +61,11 @@ impl Tool for WriteTodoList {
     }
 
     async fn call(&self, args: TodoWriteArgs) -> Result<String, ToolError> {
+        let owner = crate::engine::resources::current();
         tracing::debug!("tool todo_write start: items={}", args.todos.len());
         let coaching = check_perm(&self.permission, &self.ask_tx, "todo_write", "").await?;
 
-        let mut list = TODO_LIST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut list = owner.todos.lock().unwrap_or_else(|e| e.into_inner());
         *list = args.todos;
 
         if list.is_empty() {

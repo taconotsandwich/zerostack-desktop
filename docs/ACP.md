@@ -58,12 +58,13 @@ resumed in the TUI and the other way round. With `--no-session`, each
 answers with the session's modes and config options. Loading a session that
 is live in the process replaces it, after cancelling its running prompt.
 
-### One folder per process
+### Workspace per session
 
-The process has one working folder, shared by its sessions. The first session
-moves the process to its `cwd`. A later session must ask for the same folder
-while other sessions are live; a different one is refused with `-32602`. Run
-one zerostack process per folder to work in several. `cwd` must be absolute.
+Each session owns its workspace. Sessions can use different folders in one
+server process; opening a session does not change the process working
+directory. `cwd` must be an absolute path to an existing directory. Tools,
+shell commands and MCP subprocesses use that session's workspace. See
+[Engine boundaries](ENGINE.md) for resource ownership and shutdown.
 
 ### MCP servers
 

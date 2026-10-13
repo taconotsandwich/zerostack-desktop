@@ -86,7 +86,7 @@ pub fn ask_and_create(dir: &Path) -> anyhow::Result<bool> {
 
 pub async fn ask_and_create_async(dir: PathBuf) -> anyhow::Result<bool> {
     // should_ask and file writes are blocking; run on blocking pool
-    let should = tokio::task::spawn_blocking({
+    let should = crate::engine::resources::spawn_blocking({
         let dir = dir.clone();
         move || should_ask(&dir)
     })
@@ -94,7 +94,7 @@ pub async fn ask_and_create_async(dir: PathBuf) -> anyhow::Result<bool> {
     if !should {
         return Ok(false);
     }
-    let input = tokio::task::spawn_blocking({
+    let input = crate::engine::resources::spawn_blocking({
         let dir = dir.clone();
         move || {
             eprint!(
@@ -110,12 +110,15 @@ pub async fn ask_and_create_async(dir: PathBuf) -> anyhow::Result<bool> {
     let input = input.trim().to_lowercase();
     // record_asked_dir is blocking file I/O
     let dir_clone = dir.clone();
-    if let Err(e) = tokio::task::spawn_blocking(move || record_asked_dir(&dir_clone)).await? {
+    if let Err(e) =
+        crate::engine::resources::spawn_blocking(move || record_asked_dir(&dir_clone)).await?
+    {
         tracing::warn!("Failed to record asked directory: {e}");
     }
     if input == "y" || input == "yes" {
         let d = dir.clone();
-        tokio::task::spawn_blocking(move || create_architecture_template(&d)).await??;
+        crate::engine::resources::spawn_blocking(move || create_architecture_template(&d))
+            .await??;
         eprintln!(
             "Created {}/ARCHITECTURE.md — edit it to describe the codebase architecture.",
             dir.display()

@@ -333,10 +333,10 @@ impl Engine {
             ),
             false,
         );
-        let cancelled = self.cancel.0.clone();
+        let mut cancelled = self.cancel.0.subscribe();
         let waited = tokio::select! {
             waited = login.wait_for_callback(std::time::Duration::from_secs(180)) => waited,
-            () = cancelled.notified() => {
+            _ = cancelled.changed() => {
                 self.announce(sink, "login cancelled", true);
                 return;
             }

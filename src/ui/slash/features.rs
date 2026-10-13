@@ -67,7 +67,8 @@ async fn handle_loop(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Result<(
             write_error(ctx.renderer, "usage: /loop <prompt>");
             return Ok(());
         }
-        let plan_file = std::path::PathBuf::from(crate::extras::r#loop::DEFAULT_PLAN_FILENAME);
+        let plan_file =
+            crate::engine::resources::resolve(crate::extras::r#loop::DEFAULT_PLAN_FILENAME);
         let ls = crate::extras::r#loop::LoopState::new(prompt, plan_file, None, None);
         *ctx.loop_state = Some(ls);
         write_ok(
@@ -108,7 +109,7 @@ async fn handle_worktree(parts: &[&str], ctx: &mut SlashCtx<'_>) -> anyhow::Resu
     let wt_base_dir = ctx.cli.resolve_wt_base_dir(ctx.cfg);
     match crate::extras::git_worktree::create(name, wt_base_dir.as_deref()) {
         Ok((path, _info)) => {
-            std::env::set_current_dir(&path)
+            crate::engine::resources::change_dir(&path)
                 .map_err(|e| anyhow::anyhow!("failed to change directory: {}", e))?;
             ctx.session.working_dir = compact_str::CompactString::new(path.to_string_lossy());
             ctx.context.reload();

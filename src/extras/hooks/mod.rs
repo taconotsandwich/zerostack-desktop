@@ -63,39 +63,44 @@ pub struct LoopInfo {
     pub active: bool,
 }
 
-static PROCESS_SESSION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
 /// Best-effort session identity for `HookCtx` until the session-lifecycle
 /// seam supplies zerostack's real session id/path.
 pub(crate) fn session_context() -> (String, String) {
-    let session_id = PROCESS_SESSION_ID
-        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+    let owner = crate::engine::resources::current();
+    let session_id = owner
+        .session_id
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .clone();
     (session_id, String::new())
 }
 
-static DISPATCHER: std::sync::Mutex<Option<std::sync::Arc<dispatcher::HookDispatcher>>> =
-    std::sync::Mutex::new(None);
-
-/// Installs the process-wide `HookDispatcher`, built once from loaded and
+/// Installs the execution-context `HookDispatcher`, built once from loaded and
 /// trust-filtered config. Tool builders (`agent::builder`,
 /// `extras::subagents::builder`) read it via [`get_dispatcher`].
 pub(crate) fn init_dispatcher(dispatcher: dispatcher::HookDispatcher) {
-    *DISPATCHER.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(dispatcher));
+    let owner = crate::engine::resources::current();
+    *owner.hooks.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(dispatcher));
 }
 
 pub(crate) fn get_dispatcher() -> Option<std::sync::Arc<dispatcher::HookDispatcher>> {
-    DISPATCHER.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    let owner = crate::engine::resources::current();
+    owner
+        .hooks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
-/// Test-only: clears the process-global dispatcher so a test that installed one
+/// Test-only: clears the execution-context dispatcher so a test that installed one
 /// via [`init_dispatcher`] can't leak it into other tests sharing the binary.
 #[cfg(test)]
 pub(crate) fn reset_dispatcher() {
-    *DISPATCHER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    let owner = crate::engine::resources::current();
+    *owner.hooks.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
-/// Wraps `tools` with the process-global dispatcher's guard rail, or returns
+/// Wraps `tools` with the execution-context dispatcher's guard rail, or returns
 /// them unchanged when no hooks are configured. The single weave point shared
 /// by the main-agent and subagent builders (design D5).
 pub(crate) fn wrap_from_global(
@@ -148,7 +153,7 @@ pub(crate) async fn gate_user_prompt(
 /// the real mode via `HookedTool` instead).
 pub(crate) fn best_effort_ctx() -> HookCtx {
     let (session_id, session_path) = session_context();
-    let cwd = std::env::current_dir()
+    let cwd = crate::engine::resources::working_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
     HookCtx {
@@ -159,7 +164,7 @@ pub(crate) fn best_effort_ctx() -> HookCtx {
     }
 }
 
-/// Production entry point: reads the process-wide dispatcher and gates
+/// Production entry point: reads the execution-context dispatcher and gates
 /// `prompt` through `UserPromptSubmit` hooks. A prompt passes through
 /// unchanged when no dispatcher is installed.
 pub(crate) async fn dispatch_user_prompt_submit(prompt: String) -> PromptGate {
@@ -202,7 +207,7 @@ pub(crate) async fn gate_stop(
     }
 }
 
-/// Production entry point: reads the process-wide dispatcher and gates
+/// Production entry point: reads the execution-context dispatcher and gates
 /// completion through `Stop` hooks. Releases immediately when no dispatcher
 /// is installed.
 pub(crate) async fn dispatch_stop(
@@ -242,7 +247,7 @@ pub(crate) async fn dispatch_session_start_with(
         .await;
 }
 
-/// Production entry point: reads the process-wide dispatcher and dispatches
+/// Production entry point: reads the execution-context dispatcher and dispatches
 /// `SessionStart` with `source` (one of `startup`, `resume`, `clear`; `compact`
 /// is not emitted here). No-op when no dispatcher is installed.
 pub(crate) async fn dispatch_session_start(source: &str) {
@@ -271,7 +276,7 @@ pub(crate) async fn dispatch_session_end_with(
         .await;
 }
 
-/// Production entry point: reads the process-wide dispatcher and dispatches
+/// Production entry point: reads the execution-context dispatcher and dispatches
 /// `SessionEnd` with `reason`. No-op when no dispatcher is installed.
 pub(crate) async fn dispatch_session_end(reason: &str) {
     let Some(dispatcher) = get_dispatcher() else {
@@ -305,7 +310,7 @@ pub(crate) async fn gate_subagent_start(
     }
 }
 
-/// Production entry point: reads the process-wide dispatcher and gates
+/// Production entry point: reads the execution-context dispatcher and gates
 /// subagent start for `agent_type`. Returns `None` when no dispatcher is
 /// installed.
 pub(crate) async fn dispatch_subagent_start(agent_type: &str) -> Option<String> {
@@ -346,7 +351,7 @@ pub(crate) async fn gate_subagent_stop(
     }
 }
 
-/// Production entry point: reads the process-wide dispatcher and gates
+/// Production entry point: reads the execution-context dispatcher and gates
 /// subagent completion for `agent_type`. Releases immediately when no
 /// dispatcher is installed.
 pub(crate) async fn dispatch_subagent_stop(
@@ -387,7 +392,7 @@ pub(crate) async fn hooks_test_dry_run_with(
     )
 }
 
-/// Production entry point: reads the process-wide dispatcher and dry-runs
+/// Production entry point: reads the execution-context dispatcher and dry-runs
 /// `PreToolUse` for `tool_name`/`tool_input`, for the `hooks test` CLI flag.
 pub(crate) async fn hooks_test_dry_run(tool_name: &str, tool_input: serde_json::Value) -> String {
     let Some(dispatcher) = get_dispatcher() else {

@@ -55,7 +55,7 @@ impl Tool for LspTool {
     async fn call(&self, args: LspArgs) -> Result<String, ToolError> {
         match args.path {
             Some(path) => {
-                let expanded = crate::fs::expand_tilde(&path);
+                let expanded = crate::fs::resolve_path(&path);
                 let path = Path::new(&expanded);
                 if !path.exists() {
                     return Err(ToolError::Msg(format!("File '{expanded}' does not exist.")));

@@ -160,9 +160,8 @@ impl AcpState {
 impl AcpState {
     /// Open a session working in `cwd` with the configured MCP servers plus
     /// `mcp_servers`, and hold it live, in place of the live session
-    /// `replacing` names (whose prompt is cancelled). The process changes
-    /// into `cwd` first, so the session's sandbox and context files are
-    /// those of that folder. Also returns the notices of starting it.
+    /// `replacing` names (whose prompt is cancelled). Each engine owns its
+    /// workspace. Also returns the notices of starting it.
     async fn start_session(
         &self,
         cwd: &std::path::Path,
@@ -173,24 +172,22 @@ impl AcpState {
         let internal =
             |e: anyhow::Error| agent_client_protocol::util::internal_error(e.to_string());
         let mut sessions = self.sessions.lock().await;
-        let replaced = replacing.is_some_and(|id| sessions.contains_key(id));
-        let enter = setup::folder_to_enter(cwd, sessions.len() - usize::from(replaced))?;
-        if let Some(dir) = &enter {
-            std::env::set_current_dir(dir).map_err(|e| internal(e.into()))?;
-        }
+        let workspace = setup::workspace(cwd)?;
         let (id, session) = self
             .open_session(|engine| {
                 prepare(engine)?;
-                match &enter {
-                    Some(dir) => engine.change_dir(dir),
-                    None => Ok(()),
-                }
+                engine.change_dir(&workspace)
             })
             .map_err(internal)?;
         #[cfg(feature = "mcp")]
         let notices = {
-            let (manager, notices) =
-                setup::connect_mcp(setup::mcp_servers(&self.cfg, mcp_servers)).await;
+            let owner = session.live.lock().await.engine.resource_context();
+            let (manager, notices) = owner
+                .scope(setup::connect_mcp(setup::mcp_servers(
+                    &self.cfg,
+                    mcp_servers,
+                )))
+                .await;
             if let Some(manager) = manager {
                 session.live.lock().await.engine.set_mcp(manager);
             }
@@ -201,9 +198,11 @@ impl AcpState {
             let _ = mcp_servers;
             Vec::new()
         };
-        if let Some(replaced) = sessions.insert(id.clone(), session.clone()) {
+        if let Some(replaced) = replacing.and_then(|id| sessions.remove(id)) {
             replaced.cancel.cancel();
+            replaced.live.lock().await.engine.shutdown().await;
         }
+        sessions.insert(id.clone(), session.clone());
         Ok((id, session, notices))
     }
 }
@@ -260,7 +259,7 @@ impl LiveSession {
                     _ = tokio::time::sleep(ASK_ANNOUNCE_WAIT), if !waiting.is_empty() => {
                         for ask in waiting.drain(..) {
                             let tool_call = forwarder.permission_tool_call(&ask);
-                            tokio::spawn(ask_client(cx.clone(), forwarder.session_id.clone(), tool_call, ask, allowed.clone()));
+                            crate::engine::resources::spawn(ask_client(cx.clone(), forwarder.session_id.clone(), tool_call, ask, allowed.clone()));
                         }
                     }
                 }
@@ -269,7 +268,7 @@ impl LiveSession {
                     if forwarder.has_unasked_call(&waiting[i].tool) {
                         let ask = waiting.remove(i);
                         let tool_call = forwarder.permission_tool_call(&ask);
-                        tokio::spawn(ask_client(
+                        crate::engine::resources::spawn(ask_client(
                             cx.clone(),
                             forwarder.session_id.clone(),
                             tool_call,
@@ -415,7 +414,7 @@ pub(crate) async fn serve_on(
     state: Arc<AcpState>,
     transport: impl ConnectTo<Agent> + 'static,
 ) -> Result<(), agent_client_protocol::Error> {
-    Agent
+    let result = Agent
         .builder()
         .name("zerostack")
         .on_receive_request(
@@ -505,7 +504,15 @@ pub(crate) async fn serve_on(
             on_receive_notification!(),
         )
         .connect_to(transport)
-        .await
+        .await;
+    let sessions = std::mem::take(&mut *state.sessions.lock().await);
+    for session in sessions.values() {
+        session.cancel.cancel();
+    }
+    for session in sessions.into_values() {
+        session.live.lock().await.engine.shutdown().await;
+    }
+    result
 }
 
 // --- Request Handlers ---

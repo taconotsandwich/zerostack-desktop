@@ -165,7 +165,7 @@ impl Mem {
             .join("memory");
         // Scope per-project files by the current working directory, matching the
         // cwd zerostack injects into the preamble.
-        let project = std::env::current_dir()
+        let project = crate::engine::resources::working_dir()
             .map(|p| project_slug(&p))
             .unwrap_or_else(|_| "default".to_string());
         let today = Local::now().format("%Y-%m-%d").to_string();

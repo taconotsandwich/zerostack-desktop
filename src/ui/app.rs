@@ -59,7 +59,7 @@ pub(crate) struct App<'a> {
 
     btw_tx: mpsc::Sender<BtwEvent>,
     btw_rx: mpsc::Receiver<BtwEvent>,
-    btw_abort: Vec<(u32, tokio::task::AbortHandle)>,
+    btw_abort: Vec<(u32, crate::agent::runner::RunGuard)>,
     btw_inflight: usize,
     btw_next_id: u32,
     btw_total_cost: f64,
@@ -120,6 +120,28 @@ impl<'a> App<'a> {
     }
 
     async fn create(
+        ui: UiContext<'a>,
+        agent: Option<AnyAgent>,
+        ask_rx: Option<mpsc::Receiver<crate::permission::ask::AskRequest>>,
+        auto_trigger_msg: Option<String>,
+        #[cfg(feature = "advisor")] handoff_rx: Option<crate::extras::advisor::HandoffReceiver>,
+        headless_backend: Option<Box<dyn renderer_mod::RenderBackend>>,
+    ) -> anyhow::Result<Self> {
+        let owner = ui.resources.clone();
+        owner
+            .scope(Self::create_scoped(
+                ui,
+                agent,
+                ask_rx,
+                auto_trigger_msg,
+                #[cfg(feature = "advisor")]
+                handoff_rx,
+                headless_backend,
+            ))
+            .await
+    }
+
+    async fn create_scoped(
         mut ui: UiContext<'a>,
         agent: Option<AnyAgent>,
         ask_rx: Option<mpsc::Receiver<crate::permission::ask::AskRequest>>,
@@ -200,7 +222,10 @@ impl<'a> App<'a> {
         input.load_global_history();
 
         let mut run = AgentRunState {
-            agent,
+            execution: crate::engine::turn::ExecutionState {
+                agent,
+                ..Default::default()
+            },
             ..AgentRunState::default()
         };
         let chain = ChainState::default();
@@ -269,7 +294,7 @@ impl<'a> App<'a> {
                 let cli_c = ui.cli.clone();
                 let cfg_c = ui.cfg.clone();
                 let client_c = ui.client.clone();
-                tokio::spawn(async move {
+                crate::engine::resources::spawn(async move {
                     let _ = crate::ui::slash::warm_model_cache(
                         &p, is_custom, &client_c, &cli_c, &cfg_c,
                     )
@@ -311,7 +336,7 @@ impl<'a> App<'a> {
                     let wt_base_dir = ui.cli.resolve_wt_base_dir(ui.cfg);
                     match crate::extras::git_worktree::create(&name, wt_base_dir.as_deref()) {
                         Ok((path, _info)) => {
-                            if let Err(e) = std::env::set_current_dir(&path) {
+                            if let Err(e) = crate::engine::resources::change_dir(&path) {
                                 let _ = renderer.write_line(
                                     &format!(
                                         "worktree created at {} but cd failed: {}",
@@ -376,9 +401,7 @@ impl<'a> App<'a> {
                     None,
                 )
                 .await;
-            run.agent_rx = Some(runner.event_rx);
-            run.main_abort = Some(runner.abort_handle);
-            run.is_running = true;
+            run.install(runner);
             if let Some(ss) = ui.status_signals.as_ref() {
                 ss.send_start();
             }
@@ -408,7 +431,7 @@ impl<'a> App<'a> {
             let sandbox_clone = ui.sandbox.clone();
             let reasoning_enabled = slash.reasoning_enabled;
             tracing::debug!("startup: spawning background agent prebuild");
-            tokio::spawn(async move {
+            crate::engine::resources::spawn(async move {
                 #[cfg(feature = "mcp")]
                 let mcp = if let Some(ref servers) = cfg_clone.mcp_servers {
                     if !servers.is_empty() {
@@ -472,6 +495,11 @@ impl<'a> App<'a> {
     }
 
     pub(crate) async fn run(&mut self) -> anyhow::Result<()> {
+        let owner = self.ui.resources.clone();
+        owner.scope(self.run_scoped()).await
+    }
+
+    async fn run_scoped(&mut self) -> anyhow::Result<()> {
         loop {
             match self.step().await? {
                 ControlFlow::Break(()) => break,
@@ -488,6 +516,11 @@ impl<'a> App<'a> {
     /// from [`App::run`] so headless integration tests can pump the loop one
     /// step at a time and assert on state in between.
     pub(crate) async fn step(&mut self) -> anyhow::Result<ControlFlow<(), ()>> {
+        let owner = self.ui.resources.clone();
+        owner.scope(self.step_scoped()).await
+    }
+
+    async fn step_scoped(&mut self) -> anyhow::Result<ControlFlow<(), ()>> {
         {
             self.ui.session.reasoning_enabled = self.slash.reasoning_enabled;
 
@@ -613,6 +646,7 @@ impl<'a> App<'a> {
     }
 
     pub(crate) async fn teardown(self) {
+        self.ui.resources.shutdown().await;
         self.running.store(false, Ordering::Relaxed);
         if let Some(h) = self.event_handle {
             let _ = h.join();
@@ -1223,11 +1257,8 @@ impl<'a> App<'a> {
     }
 
     fn abort_main_run(&mut self) -> anyhow::Result<()> {
-        if let Some(h) = self.run.main_abort.take() {
-            h.abort();
-        }
+        self.run.stop();
         self.ui.sandbox.kill_active();
-        self.run.is_running = false;
         if let Some(ss) = self.ui.status_signals.as_ref() {
             ss.send_stop();
         }
@@ -1620,7 +1651,7 @@ impl<'a> App<'a> {
                                 )?;
                                         let tx = self.user_tx.clone();
                                         let sname = compact_str::CompactString::new(&server);
-                                        tokio::spawn(async move {
+                                        crate::engine::resources::spawn(async move {
                                             let error = login
                                                 .wait_for_callback(Duration::from_secs(180))
                                                 .await
@@ -1676,9 +1707,7 @@ impl<'a> App<'a> {
                                 None,
                             )
                             .await;
-                        self.run.agent_rx = Some(runner.event_rx);
-                        self.run.main_abort = Some(runner.abort_handle);
-                        self.run.is_running = true;
+                        self.run.install(runner);
                         if let Some(ss) = self.ui.status_signals.as_ref() {
                             ss.send_start();
                         }
@@ -1703,9 +1732,7 @@ impl<'a> App<'a> {
                                 None,
                             )
                             .await;
-                        self.run.agent_rx = Some(runner.event_rx);
-                        self.run.main_abort = Some(runner.abort_handle);
-                        self.run.is_running = true;
+                        self.run.install(runner);
                         if let Some(ss) = self.ui.status_signals.as_ref() {
                             ss.send_start();
                         }
@@ -1724,6 +1751,9 @@ impl<'a> App<'a> {
                         crate::ui::terminal::suspend_tui(mouse_capture, || {
                             let (prog, args) = crate::ui::terminal::parse_editor_command(&editor);
                             let _ = std::process::Command::new(prog)
+                                .current_dir(
+                                    crate::engine::resources::working_dir().unwrap_or_default(),
+                                )
                                 .args(args)
                                 .arg(&path_str)
                                 .status();
@@ -1771,7 +1801,7 @@ impl<'a> App<'a> {
                         .await;
                     }
                     crate::extras::git_worktree::DeferredWorktreeAction::Exit { main_path } => {
-                        std::env::set_current_dir(main_path)
+                        crate::engine::resources::change_dir(main_path)
                             .map_err(|e| anyhow::anyhow!("failed to change directory: {}", e))?;
                         self.ui.session.working_dir = compact_str::CompactString::new(main_path);
                         self.ui.context.reload();
@@ -1841,9 +1871,7 @@ impl<'a> App<'a> {
                             }),
                         )
                         .await;
-                    self.run.agent_rx = Some(runner.event_rx);
-                    self.run.main_abort = Some(runner.abort_handle);
-                    self.run.is_running = true;
+                    self.run.install(runner);
                     self.chain.loop_label = Some(label);
                 }
             }
@@ -1865,16 +1893,9 @@ impl<'a> App<'a> {
         }
         self.renderer.write_line("", Color::White)?;
 
-        let cmd_owned = cmd.to_string();
-        let output = tokio::task::spawn_blocking(move || {
-            std::process::Command::new("bash")
-                .arg("-c")
-                .arg(&cmd_owned)
-                .output()
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn error: {}", e))?
-        .map_err(|e| anyhow::anyhow!("command error: {}", e))?;
+        let output = crate::engine::shell::run(cmd)
+            .await
+            .map_err(|error| anyhow::anyhow!("command error: {error}"))?;
 
         let mut result = String::new();
         if !output.stdout.is_empty() {
@@ -2085,7 +2106,9 @@ impl<'a> App<'a> {
         }
         let mouse_capture = self.ui.cfg.resolve_mouse_capture();
         crate::ui::terminal::suspend_tui(mouse_capture, || {
-            let _ = std::process::Command::new("lazygit").status();
+            let _ = std::process::Command::new("lazygit")
+                .current_dir(crate::engine::resources::working_dir().unwrap_or_default())
+                .status();
         });
         self.rebind_event_thread();
         Ok(())

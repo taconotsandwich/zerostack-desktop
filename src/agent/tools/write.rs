@@ -63,7 +63,7 @@ impl Tool for WriteTool {
     }
 
     async fn call(&self, args: WriteArgs) -> Result<String, ToolError> {
-        let expanded = crate::fs::expand_tilde(&args.path);
+        let expanded = crate::fs::resolve_path(&args.path);
         tracing::debug!(
             "tool write start: path={}, content_len={}",
             expanded,

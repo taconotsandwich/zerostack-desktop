@@ -143,18 +143,21 @@ fn is_opencode_provider(name: &str) -> bool {
     matches!(name, "opencode-zen" | "opencode-go")
 }
 
-static OPENCODE_SESSION_ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-
 /// Adopt the active zerostack session id as the OpenCode conversation id, so
 /// client rebuilds (e.g. `/provider` switches) and free-tier requests share
-/// one stable id. First call wins; without it a per-process id is generated.
+/// one stable id within this engine.
 pub fn set_opencode_session_id(id: &str) {
-    let _ = OPENCODE_SESSION_ID.set(id.to_string());
+    *crate::engine::resources::current()
+        .session_id
+        .write()
+        .unwrap_or_else(|e| e.into_inner()) = id.to_string();
 }
 
 fn opencode_session_id() -> String {
-    OPENCODE_SESSION_ID
-        .get_or_init(|| uuid::Uuid::new_v4().to_string())
+    crate::engine::resources::current()
+        .session_id
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
         .clone()
 }
 
@@ -804,14 +807,14 @@ pub enum AnyAgent {
 #[cfg(feature = "hooks")]
 fn spawn_blocked_runner(feedback: String) -> AgentRunner {
     let (event_tx, event_rx) = mpsc::channel::<AgentEvent>(1);
-    let join = tokio::spawn(async move {
+    let join = crate::engine::resources::spawn(async move {
         let _ = event_tx
             .send(AgentEvent::Error(CompactString::from(feedback)))
             .await;
     });
     AgentRunner {
         event_rx,
-        abort_handle: join.abort_handle(),
+        abort_handle: join.abort_handle().into(),
     }
 }
 

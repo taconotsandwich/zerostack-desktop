@@ -270,7 +270,7 @@ impl Session {
             context_window,
             model: CompactString::new(model),
             provider: CompactString::new(provider),
-            working_dir: std::env::current_dir()
+            working_dir: crate::engine::resources::working_dir()
                 .map(|p| CompactString::new(p.to_string_lossy()))
                 .unwrap_or_default(),
             permission_allowlist: Vec::new(),
@@ -332,10 +332,11 @@ impl Session {
     /// Async variant that runs the blocking `git status` on the blocking pool.
     pub async fn refresh_git_branch_async(&mut self) {
         let dir = self.working_dir.to_string();
-        let branch = tokio::task::spawn_blocking(move || Self::detect_git_branch(&dir))
-            .await
-            .ok()
-            .flatten();
+        let branch =
+            crate::engine::resources::spawn_blocking(move || Self::detect_git_branch(&dir))
+                .await
+                .ok()
+                .flatten();
         self.git_branch = branch;
     }
 
@@ -350,10 +351,11 @@ impl Session {
     /// Async variant that runs the blocking `git status` on the blocking pool.
     pub async fn refresh_git_status_async(&mut self) {
         let dir = self.working_dir.to_string();
-        let status = tokio::task::spawn_blocking(move || Self::detect_git_status(&dir))
-            .await
-            .ok()
-            .flatten();
+        let status =
+            crate::engine::resources::spawn_blocking(move || Self::detect_git_status(&dir))
+                .await
+                .ok()
+                .flatten();
         self.git_status = status;
     }
 

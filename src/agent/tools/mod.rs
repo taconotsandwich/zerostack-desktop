@@ -15,44 +15,43 @@ pub(crate) mod write;
 
 pub(crate) use normalize::{levenshtein_similarity, normalize_whitespace};
 
-use std::sync::Mutex;
-
 use crate::config::types::EditSystem;
-
-static EDIT_SYSTEM: Mutex<EditSystem> = Mutex::new(EditSystem::Similarity);
 
 /// `pub` (not `pub(crate)`): the headless [`Engine`](crate::engine::Engine)
 /// reads/writes the edit system via `/editsys` without a TUI.
 pub fn set_edit_system(es: EditSystem) {
-    *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner()) = es;
+    let owner = crate::engine::resources::current();
+    *owner.edit_system.lock().unwrap_or_else(|e| e.into_inner()) = es;
 }
 
 /// `pub` (not `pub(crate)`): see [`set_edit_system`].
 pub fn edit_system() -> EditSystem {
-    *EDIT_SYSTEM.lock().unwrap_or_else(|e| e.into_inner())
+    let owner = crate::engine::resources::current();
+    *owner.edit_system.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-static DENY_REPEATED_READS: Mutex<bool> = Mutex::new(true);
-
 pub(crate) fn set_deny_repeated_reads(v: bool) {
-    *DENY_REPEATED_READS
+    let owner = crate::engine::resources::current();
+    *owner
+        .deny_repeated_reads
         .lock()
         .unwrap_or_else(|e| e.into_inner()) = v;
 }
 
 pub(crate) fn deny_repeated_reads() -> bool {
-    *DENY_REPEATED_READS
+    let owner = crate::engine::resources::current();
+    *owner
+        .deny_repeated_reads
         .lock()
         .unwrap_or_else(|e| e.into_inner())
 }
 
-static READ_TRACKER: Mutex<Vec<(String, usize, usize)>> = Mutex::new(Vec::new());
-
 pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<String> {
+    let owner = crate::engine::resources::current();
     if !deny_repeated_reads() {
         return None;
     }
-    let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let mut tracker = owner.reads.lock().unwrap_or_else(|e| e.into_inner());
     let key = (path.to_string(), offset, limit);
     if tracker.contains(&key) {
         let end = (offset + limit).saturating_sub(1);
@@ -68,7 +67,8 @@ pub(crate) fn track_read(path: &str, offset: usize, limit: usize) -> Option<Stri
 }
 
 pub(crate) fn untrack_read_path(path: &str) {
-    let mut tracker = READ_TRACKER.lock().unwrap_or_else(|e| e.into_inner());
+    let owner = crate::engine::resources::current();
+    let mut tracker = owner.reads.lock().unwrap_or_else(|e| e.into_inner());
     tracker.retain(|(p, _, _)| p != path);
 }
 

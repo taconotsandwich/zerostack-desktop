@@ -55,6 +55,9 @@ pub(crate) async fn run_hook(
 ) -> HookOutput {
     let (program, args) = build_shell_invocation(command, args);
     let mut cmd = Command::new(program);
+    if let Ok(cwd) = crate::engine::resources::working_dir() {
+        cmd.current_dir(cwd);
+    }
     cmd.args(args);
     cmd.env("ZEROSTACK_PROJECT_DIR", project_dir);
     cmd.stdin(Stdio::piped());
