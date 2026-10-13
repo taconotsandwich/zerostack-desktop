@@ -1501,8 +1501,9 @@ impl Engine {
             return RunOutput::command(sink.transcript());
         }
         let result = match parts[0] {
-            "/provider" | "/model" | "/models" | "/models-add" | "/model-subagent"
-            | "/models-subagent" => self.slash_providers(&parts, &mut sink).await,
+            "/provider" | "/model" | "/models" | "/model-subagent" | "/models-subagent" => {
+                self.slash_providers(&parts, &mut sink).await
+            }
             "/prompt" | "/theme" | "/regen-prompts" | "/regen-themes" => {
                 self.slash_content(&parts, &mut sink).await
             }
@@ -1895,7 +1896,6 @@ impl Engine {
         match parts[0] {
             "/provider" => self.cmd_provider(parts, sink).await,
             "/model" | "/models" => self.cmd_models(parts, sink).await,
-            "/models-add" => self.cmd_models_add(parts, sink),
             #[cfg(feature = "subagents")]
             "/model-subagent" | "/models-subagent" => self.cmd_models(parts, sink).await,
             _ => Ok(SlashFlow::Done),
@@ -1966,47 +1966,6 @@ impl Engine {
             for choice in model_choices(&self.cfg, &provider, &model) {
                 sink.write_result(format!("  {} · {}", choice.label, choice.detail()));
             }
-        }
-        Ok(SlashFlow::Done)
-    }
-
-    fn cmd_models_add(
-        &mut self,
-        parts: &[&str],
-        sink: &mut StringSink,
-    ) -> anyhow::Result<SlashFlow> {
-        if parts.len() < 3 {
-            sink.write_ok(
-                "usage: /models-add <name> <provider> <model> [input_cost_per_M output_cost_per_M]",
-            );
-            return Ok(SlashFlow::Done);
-        }
-        let name = parts[1].trim().to_string();
-        let rest = parts[2].trim();
-        let (provider, model, input_cost, output_cost) = match rest.split_once(' ') {
-            Some((p, m)) if parts.len() >= 5 => (
-                p.trim().to_string(),
-                m.trim().to_string(),
-                parts[3].trim().parse::<f64>().unwrap_or(0.0),
-                parts[4].trim().parse::<f64>().unwrap_or(0.0),
-            ),
-            Some((p, m)) => (p.trim().to_string(), m.trim().to_string(), 0.0, 0.0),
-            None => {
-                sink.write_ok(
-                    "usage: /models-add <name> <provider> <model> [input_cost_per_M output_cost_per_M]",
-                );
-                return Ok(SlashFlow::Done);
-            }
-        };
-        if name.is_empty() || provider.is_empty() || model.is_empty() {
-            sink.write_ok(
-                "usage: /models-add <name> <provider> <model> [input_cost_per_M output_cost_per_M]",
-            );
-            return Ok(SlashFlow::Done);
-        }
-        match config::save_quick_model(&name, &provider, &model, input_cost, output_cost) {
-            Ok(()) => sink.write_ok(format!("saved quick model: {name} ({provider} / {model})")),
-            Err(e) => sink.write_error(format!("failed to save quick model: {e}")),
         }
         Ok(SlashFlow::Done)
     }

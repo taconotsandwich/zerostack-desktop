@@ -39,6 +39,8 @@ mod checker_tests;
 #[cfg(test)]
 mod cli_custom_flags_tests;
 #[cfg(test)]
+mod command_palette_tests;
+#[cfg(test)]
 mod config_tests;
 #[cfg(test)]
 mod context_tests;

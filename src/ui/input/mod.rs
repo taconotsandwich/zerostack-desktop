@@ -1,4 +1,5 @@
 pub(crate) mod cursor;
+mod menu;
 mod pickers;
 
 pub use cursor::cursor_to_line_col;
@@ -12,7 +13,6 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::ui::pickers::file::FilePicker;
 use crate::ui::pickers::list::ListPicker;
-use crate::ui::pickers::models::ModelsPicker;
 use crate::ui::pickers::rewind::{RewindOutcome, RewindPicker};
 
 const MAX_KILL_RING: usize = 30;
@@ -27,9 +27,23 @@ pub struct InputEditor {
     monochrome: bool,
     prompt_names: Vec<String>,
     theme_names: Vec<String>,
-    quick_model_names: Vec<String>,
-    live_model_names: Vec<String>,
-    provider_names: Vec<String>,
+    model_choices: Vec<crate::ui::pickers::models::ModelChoice>,
+    saved_models: Vec<crate::ui::pickers::models::ModelChoice>,
+    model_save: Option<(String, crate::ui::pickers::models::ModelChoice)>,
+    current_model: Option<crate::ui::pickers::models::ModelKey>,
+    recent_models: Vec<crate::ui::pickers::models::ModelKey>,
+    #[cfg(feature = "subagents")]
+    subagent_model_choices: Vec<crate::ui::pickers::models::ModelChoice>,
+    #[cfg(feature = "subagents")]
+    current_subagent_model: Option<crate::ui::pickers::models::ModelKey>,
+    #[cfg(feature = "subagents")]
+    recent_subagent_models: Vec<crate::ui::pickers::models::ModelKey>,
+    menu_parents: Vec<Picker>,
+    menu_submission: Option<CompactString>,
+    model_selection: Option<(
+        crate::ui::pickers::models::ModelTarget,
+        crate::ui::pickers::models::ModelChoice,
+    )>,
     editor: Option<String>,
     kill_ring: Vec<CompactString>,
     yank_pos: Option<usize>,
@@ -49,9 +63,20 @@ impl InputEditor {
             monochrome: false,
             prompt_names: Vec::new(),
             theme_names: Vec::new(),
-            quick_model_names: Vec::new(),
-            live_model_names: Vec::new(),
-            provider_names: Vec::new(),
+            model_choices: Vec::new(),
+            saved_models: Vec::new(),
+            model_save: None,
+            current_model: None,
+            recent_models: Vec::new(),
+            #[cfg(feature = "subagents")]
+            subagent_model_choices: Vec::new(),
+            #[cfg(feature = "subagents")]
+            current_subagent_model: None,
+            #[cfg(feature = "subagents")]
+            recent_subagent_models: Vec::new(),
+            menu_parents: Vec::new(),
+            menu_submission: None,
+            model_selection: None,
             editor: None,
             kill_ring: Vec::with_capacity(MAX_KILL_RING),
             yank_pos: None,
@@ -63,6 +88,8 @@ impl InputEditor {
     /// Move the cursor to `pos` (a byte offset), clamped to a char boundary
     /// within the buffer. Used when a mouse click places the cursor.
     pub fn set_cursor(&mut self, pos: usize) {
+        self.picker = None;
+        self.menu_parents.clear();
         let pos = pos.min(self.buffer.len());
         self.cursor = if self.buffer.is_char_boundary(pos) {
             pos
@@ -73,6 +100,8 @@ impl InputEditor {
     }
 
     pub fn clear_buffer(&mut self) {
+        self.picker = None;
+        self.menu_parents.clear();
         self.buffer.clear();
         self.cursor = 0;
         self.history_pos = None;
@@ -83,6 +112,8 @@ impl InputEditor {
     /// Replace the input buffer with `text`, cursor at the end. Used by the
     /// rewind flow to drop the chosen user turn back into the box for editing.
     pub fn load_text(&mut self, text: &str) {
+        self.picker = None;
+        self.menu_parents.clear();
         self.buffer = CompactString::new(text);
         // `cursor` is a byte offset into `buffer` (sliced as `buffer[..cursor]`
         // and advanced by `len_utf8()` elsewhere), so end-of-buffer is the byte
@@ -91,18 +122,6 @@ impl InputEditor {
         self.history_pos = None;
         self.draft = None;
         self.yank_pos = None;
-    }
-
-    pub fn set_quick_model_names(&mut self, names: Vec<String>) {
-        self.quick_model_names = names;
-    }
-
-    pub fn set_live_model_names(&mut self, names: Vec<String>) {
-        self.live_model_names = names;
-    }
-
-    pub fn set_provider_names(&mut self, names: Vec<String>) {
-        self.provider_names = names;
     }
 
     pub fn set_editor(&mut self, editor: String) {
@@ -146,31 +165,11 @@ impl InputEditor {
     }
 
     pub fn start_command_picker(&mut self) {
+        self.menu_parents.clear();
         let mut picker = ListPicker::with_static_commands();
         picker.set_monochrome(self.monochrome);
         picker.activate();
         self.picker = Some(Picker::Command(picker));
-    }
-
-    pub fn start_models_picker(&mut self) {
-        let mut picker = ModelsPicker::new();
-        picker.set_monochrome(self.monochrome);
-        picker.set_groups(
-            self.quick_model_names.clone(),
-            self.live_model_names.clone(),
-        );
-        picker.activate();
-        self.picker = Some(Picker::Models(picker));
-    }
-
-    pub fn start_provider_picker(&mut self) {
-        let mut picker = ListPicker::new();
-        picker.set_monochrome(self.monochrome);
-        if !self.provider_names.is_empty() {
-            picker.set_items(self.provider_names.clone());
-        }
-        picker.activate();
-        self.picker = Some(Picker::Prefixed(picker, "/provider "));
     }
 
     /// Open the double-Esc rewind picker over the given `(message_index,
@@ -194,27 +193,9 @@ impl InputEditor {
         };
         if outcome.is_some() {
             self.picker = None;
+            self.menu_parents.clear();
         }
         outcome
-    }
-
-    /// Open the immediate-apply Quick-Model switcher (`Alt+M`). Modal: typing
-    /// filters, Enter applies via `/models <name>`, Esc cancels.
-    pub fn start_model_switcher(
-        &mut self,
-        quick: Vec<String>,
-        live: Vec<String>,
-        details: std::collections::HashMap<String, String>,
-        current_quick: Option<String>,
-        current_model: String,
-    ) {
-        let mut picker = crate::ui::pickers::switcher::ModelSwitcher::new();
-        picker.set_monochrome(self.monochrome);
-        picker.set_groups(quick, live);
-        picker.set_details(details);
-        picker.set_current(current_quick, current_model);
-        picker.activate();
-        self.picker = Some(Picker::ModelSwitcher(picker));
     }
 
     /// Open the immediate-apply Prompt switcher (`Alt+P`). Modal: typing
@@ -241,11 +222,6 @@ impl InputEditor {
     ) -> Option<crate::ui::pickers::switcher::SwitcherResult> {
         use crate::ui::pickers::switcher::{SwitcherOutcome, SwitcherResult};
         let result = match self.picker.as_mut() {
-            Some(Picker::ModelSwitcher(p)) => match p.take_outcome() {
-                Some(SwitcherOutcome::Confirmed(name)) => Some(SwitcherResult::Model(name)),
-                Some(SwitcherOutcome::Cancelled) => Some(SwitcherResult::Cancelled),
-                None => None,
-            },
             Some(Picker::PromptSwitcher(p)) => match p.take_outcome() {
                 Some(SwitcherOutcome::Confirmed(name)) => Some(SwitcherResult::Prompt(name)),
                 Some(SwitcherOutcome::Cancelled) => Some(SwitcherResult::Cancelled),
@@ -255,27 +231,25 @@ impl InputEditor {
         };
         if result.is_some() {
             self.picker = None;
+            self.menu_parents.clear();
         }
         result
     }
 
     #[cfg(test)]
     pub fn switcher_kind(&self) -> Option<&'static str> {
-        match self.picker {
-            Some(Picker::ModelSwitcher(_)) => Some("model"),
+        match &self.picker {
+            #[cfg(feature = "subagents")]
+            Some(Picker::Models(p))
+                if p.target == crate::ui::pickers::models::ModelTarget::Subagent =>
+            {
+                Some("subagent")
+            }
+            Some(Picker::Models(_)) => Some("model"),
+            Some(Picker::ModelTarget(_)) => Some("model-target"),
             Some(Picker::PromptSwitcher(_)) => Some("prompt"),
             _ => None,
         }
-    }
-
-    pub fn start_prompt_picker(&mut self) {
-        let mut picker = ListPicker::new();
-        picker.set_monochrome(self.monochrome);
-        if !self.prompt_names.is_empty() {
-            picker.set_items(self.prompt_names.clone());
-        }
-        picker.activate();
-        self.picker = Some(Picker::Prefixed(picker, "/prompt "));
     }
 
     pub fn start_dot_picker(&mut self) {
@@ -286,16 +260,6 @@ impl InputEditor {
         }
         picker.activate();
         self.picker = Some(Picker::Prefixed(picker, "."));
-    }
-
-    pub fn start_theme_picker(&mut self) {
-        let mut picker = ListPicker::new();
-        picker.set_monochrome(self.monochrome);
-        if !self.theme_names.is_empty() {
-            picker.set_items(self.theme_names.clone());
-        }
-        picker.activate();
-        self.picker = Some(Picker::Prefixed(picker, "/theme "));
     }
 
     pub fn open_in_editor(&mut self) {
@@ -327,6 +291,11 @@ impl InputEditor {
     }
 
     pub fn handle_paste(&mut self, data: String) {
+        if self.paste_into_menu(&data) {
+            return;
+        }
+        self.picker = None;
+        self.menu_parents.clear();
         self.buffer.insert_str(self.cursor, &data);
         self.cursor += data.len();
         self.history_pos = None;
@@ -335,6 +304,9 @@ impl InputEditor {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<CompactString> {
+        if let Some(command) = self.menu_submission.take() {
+            return Some(command);
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
@@ -549,10 +521,11 @@ impl InputEditor {
                         self.start_file_picker();
                     }
                 }
-                if c == '/' && self.cursor == 0 {
+                if c == '/' && self.buffer.is_empty() {
                     self.start_command_picker();
+                    return None;
                 }
-                if c == '.' && self.cursor == 0 {
+                if c == '.' && self.buffer.is_empty() {
                     self.buffer.insert(self.cursor, c);
                     self.cursor += c.len_utf8();
                     self.start_dot_picker();
@@ -564,64 +537,6 @@ impl InputEditor {
                 self.history_pos = None;
                 self.draft = None;
                 self.yank_pos = None;
-
-                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
-                    && self.buffer.starts_with("/prompt ")
-                {
-                    let after_prefix: String = self.buffer.chars().skip("/prompt ".len()).collect();
-                    if !after_prefix.is_empty() && c != ' ' {
-                        let query_len = after_prefix.len();
-                        if query_len == 1 {
-                            self.start_prompt_picker();
-                            if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
-                                pp.char_input(c);
-                            }
-                        }
-                    }
-                }
-                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
-                    && self.buffer.starts_with("/models ")
-                {
-                    let after_prefix: String = self.buffer.chars().skip("/models ".len()).collect();
-                    if !after_prefix.is_empty() && c != ' ' {
-                        let query_len = after_prefix.len();
-                        if query_len == 1 {
-                            self.start_models_picker();
-                            if let Some(Picker::Models(ref mut mp)) = self.picker {
-                                mp.char_input(c);
-                            }
-                        }
-                    }
-                }
-                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
-                    && self.buffer.starts_with("/theme ")
-                {
-                    let after_prefix: String = self.buffer.chars().skip("/theme ".len()).collect();
-                    if !after_prefix.is_empty() && c != ' ' {
-                        let query_len = after_prefix.len();
-                        if query_len == 1 {
-                            self.start_theme_picker();
-                            if let Some(Picker::Prefixed(ref mut tp, _)) = self.picker {
-                                tp.char_input(c);
-                            }
-                        }
-                    }
-                }
-                if (self.picker.is_none() || !self.picker.as_ref().is_some_and(|p| p.active()))
-                    && self.buffer.starts_with("/provider ")
-                {
-                    let after_prefix: String =
-                        self.buffer.chars().skip("/provider ".len()).collect();
-                    if !after_prefix.is_empty() && c != ' ' {
-                        let query_len = after_prefix.len();
-                        if query_len == 1 {
-                            self.start_provider_picker();
-                            if let Some(Picker::Prefixed(ref mut pp, _)) = self.picker {
-                                pp.char_input(c);
-                            }
-                        }
-                    }
-                }
 
                 None
             }

@@ -118,22 +118,37 @@ Example `opencode.json`:
 }
 ```
 
-## Slash Commands
+## Choosing a subagent model
 
-| Command                            | Description                                |
-|------------------------------------|--------------------------------------------|
-| `/model-subagent [name]`           | Show or switch the subagent's model        |
-| `/models-subagent [name]`          | List quick models or switch subagent to one|
+Press **Alt+M** or choose **`/model`** in the command palette, then select
+**Subagents**. The same command also configures the main agent. Search saved model aliases, model
+IDs, or provider names together; the preview shows context and pricing when
+available. Current and recent subagent choices are tracked separately from
+the main conversation's model.
 
-- **`/model-subagent`** with no arguments shows the current subagent provider
-  and model. With a model name, it switches the subagent to that model (using
-  the same provider).
-- **`/models-subagent`** with no arguments lists quick models. With a quick
-  model name, it switches the subagent to that quick model's provider + model.
-  If the quick model uses a different provider, a new API client is created.
+- **Up/Down** highlights a choice; **Enter** applies it.
+- **Tab** completes the query without applying it.
+- **Ctrl+S** opens **Save as…** for the highlighted model. Enter a name to save
+  an alias shared by both agents and future sessions, without switching models.
+- **Escape** returns to the target list, then command results or your draft.
+- **`refresh`** reloads the current subagent provider's catalog.
+- A model ID missing from the catalog appears as an explicit **Use model ID**
+  choice. Use `provider::model-id` to specify a different provider.
 
-These commands update the global `SubagentConfig` at runtime. The next call
-to the `task` tool picks up the new settings automatically.
+Your message draft and cursor remain intact. The main model stays unchanged.
+Selections apply to newly started subagents, including later task calls in a
+running main response. Existing tasks keep their original client/model snapshot.
+
+Complete commands remain supported:
+
+| Command | Description |
+| ------- | ----------- |
+| `/model subagents <name>` | Choose a saved alias, or a raw ID on the current subagent provider. |
+| `/model subagents <provider>::<model-id>` | Change the subagent provider and model together. |
+| `/model subagents refresh` | Refresh the subagent provider's model catalog and reopen the selector. |
+
+These changes last for the running TUI session. Set `subagent_model` and
+`subagent_provider` in configuration to choose startup defaults.
 
 ## Architecture
 
@@ -164,7 +179,7 @@ Key files:
 | `src/agent/runner.rs` (`run_subagent`)       | Silent agent execution; reports each subagent tool call as an event |
 | `src/agent/builder.rs`                       | Wires `TaskTool` into main agent      |
 | `src/provider.rs` (`AnyAgent::run_subagent`) | Type-erased dispatch                  |
-| `src/main.rs`                                | Initializes `SubagentConfig`          |
+| `src/startup.rs`                             | Initializes `SubagentConfig`          |
 
 ## Subagent System Prompt
 

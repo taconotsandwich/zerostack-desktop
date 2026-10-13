@@ -1,4 +1,5 @@
 pub(crate) mod app;
+pub(crate) mod commands;
 pub(crate) mod event_handler;
 pub mod events;
 pub(crate) mod feed;
@@ -88,45 +89,47 @@ pub(crate) fn refresh_display(
     chain: &ChainState,
     btw: BtwStats,
 ) -> io::Result<()> {
-    // Reconcile the input height first so the chat viewport is drawn against
-    // the size the input is about to occupy (avoids a stale separator when the
-    // input shrinks, or chat text hidden under it when the input grows).
-    renderer.sync_input_height(&input.buffer)?;
-    renderer.render_viewport()?;
-    let perm_mode = ui.permission.as_ref().map(|p| {
-        p.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .mode()
-            .to_string()
-    });
-    let statusline_ctx = crate::ui::statusline::StatusContext {
-        loop_label: chain.loop_label.as_deref(),
-        prompt_name: ui.context.current_prompt_name.as_deref(),
-        perm_mode: perm_mode.as_deref(),
-        chain_label: chain.label_msg.as_deref(),
-        btw_cost: btw.cost,
-        btw_in: btw.input,
-        btw_out: btw.output,
-    };
-    let statusline = crate::ui::statusline::build(ui.session, &statusline_ctx);
-    renderer.draw_bottom(&input.buffer, input.cursor, &statusline, run.is_running)?;
-    if let Some(ref mut picker) = input.picker {
-        let was_active = picker.active();
-        // Pickers paint straight onto real stdout, bypassing the render
-        // backend; in headless test runs there is no usable terminal (and on
-        // CI stdout is a non-blocking pipe, so the burst of escape sequences
-        // fails with EAGAIN). Key handling is unaffected — only painting.
-        if !renderer.is_headless() {
-            picker.draw()?;
-        }
-        if was_active {
-            // The picker painted over the chat and bottom regions, which the
-            // dirty-region tracking cannot see; force a full repaint next
-            // frame so a closing picker never leaves remnants behind.
+    renderer.synchronized_frame(|renderer| {
+        // Reconcile the input height first so the chat viewport is drawn against
+        // the size the input is about to occupy (avoids a stale separator when the
+        // input shrinks, or chat text hidden under it when the input grows).
+        renderer.sync_input_height(&input.buffer)?;
+        let (cols, _) = renderer.terminal_size();
+        let palette = input
+            .picker
+            .as_ref()
+            .and_then(|picker| pickers::palette::Palette::from_picker(picker, cols as usize));
+        renderer.prepare_palette(palette.as_ref());
+        renderer.render_viewport()?;
+        let perm_mode = ui.permission.as_ref().map(|p| {
+            p.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .mode()
+                .to_string()
+        });
+        let statusline_ctx = crate::ui::statusline::StatusContext {
+            loop_label: chain.loop_label.as_deref(),
+            prompt_name: ui.context.current_prompt_name.as_deref(),
+            perm_mode: perm_mode.as_deref(),
+            chain_label: chain.label_msg.as_deref(),
+            btw_cost: btw.cost,
+            btw_in: btw.input,
+            btw_out: btw.output,
+        };
+        let statusline = crate::ui::statusline::build(ui.session, &statusline_ctx);
+        renderer.draw_bottom(&input.buffer, input.cursor, &statusline, run.is_running)?;
+        if let Some(palette) = &palette {
+            renderer.draw_palette(palette)?;
+        } else if let Some(picker) = input.picker.as_mut().filter(|picker| picker.active()) {
+            // Legacy pickers write to stdout. Synchronized updates encompass their
+            // paint too; invalidate so their footprint is restored on dismissal.
+            if !renderer.is_headless() {
+                picker.draw()?;
+            }
             renderer.invalidate();
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Idle cadence of the event thread's poll loop.

@@ -1,4 +1,5 @@
 pub mod load;
+pub(crate) mod model_alias;
 pub mod setup;
 pub mod types;
 

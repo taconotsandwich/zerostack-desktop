@@ -70,20 +70,36 @@ See [Providers](PROVIDERS.md) for custom endpoints, header configuration, and pr
 
 OpenRouter models use the format `provider/model-name`: [here](https://openrouter.ai/models?order=top-weekly) you can find the currently most used models, and [here](https://openrouter.ai/models?order=top-weekly&max_price=0) you can list only free models sorted by usage.
 
-Models can be changed using the provider's model name via the `/model` command.
+Press **Alt+M** or choose `/model`, then select **Main agent** or **Subagents**
+to search models across your configured providers. Each target shows its current
+model and keeps separate recent choices. Model rows name their provider; the
+preview shows context and pricing when known. **Enter** applies, **Tab** completes
+the query, and **Escape** returns one screen. Your message draft stays intact.
+Main model changes during a response apply to the next request; subagent changes
+apply to newly started tasks. Builds without subagents open the main model list
+directly.
 
 ## 4. How to use Quick Models
 
-Using model strings is kinda annoying, as it requires for you both to insert long model names and to be using the correct provider: that's why zerostack implements Quick Models, an alias that sets both the model and the provider that the agent must used.
+Quick Models are named aliases that pair a model ID with its provider.
 
-A quick model can be added in the configuration by doing something like:
-```
+To add one, open **`/model`** (or **Alt+M**), choose an agent, and highlight a
+model. Press **Ctrl+S** to open **Save as…**, type a name such as `fast`, then
+press **Enter**. Saving keeps your current model and draft unchanged. The alias
+is available immediately for the main agent and subagents, and persists after
+restart. **Escape** returns to the model list without saving.
+
+For a model absent from the catalog, type its ID or `provider::model-id` in the
+search field, highlight **Use model ID**, then save it the same way.
+
+You can also add an alias directly to your configuration:
+```toml
 [quick_models.fast]
 provider = "openrouter"
 model = "deepseek/deepseek-v4-flash"
 ```
 
-From there, you can use the `model` field in the configuration file to set the default model, or use `/models` to use an interactive picker directly in the agent.
+From there, you can use the `model` field in the configuration file to set the default model, or choose `/model` in the TUI. Saved aliases appear in the same selector as provider models; `/models` remains an alias.
 
 ## 5. Start a Session
 
@@ -97,13 +113,21 @@ Now that you are in, you might want to be able to control the agent, and here's 
 
 ## 1. Essential commands
 
-By pressing `/` on an empty message, you can select any command to send the agent; here are the most useful commands:
+Type `/` on an empty message to search commands by name or description. The
+palette explains each command and shows its argument syntax. **Alt+/** opens it
+while you have a draft. Up/Down selects, Tab completes the menu query, and Enter
+runs the command or opens argument choices. Escape goes back one screen, then
+closes the menu. Your message and cursor stay intact. You can also type a complete
+command directly, such as `/rename Fix login`, and press Enter once.
+
+Use `/help <topic>` for focused help, such as `/help mode`. Here are the most
+useful commands:
 
 | Command | What it does |
 | ------- | ------------ |
 | `/help` | List all commands |
-| `/models <name>` | Switch model mid-session using Quick Models |
-| `/clear` | Start with a fresh context |
+| `/model` / `Alt+M` | Choose Main agent or Subagents, then search and select a model |
+| `/new` | Clear this conversation and start over (`/clear` also works) |
 | `/mode readonly` | Lock down to read-only |
 | `/undo` | Undo the last exchange |
 | `/redo` | Redo the last undo action |
@@ -145,7 +169,7 @@ Here is some keybindings to speed up your coding experience:
 | `Ctrl+R` | Toggle reasoning/thinking |
 | `Ctrl+G` | Open input in `$EDITOR` |
 | `Ctrl+H` | Launches `lazygit` (disable with `--disable-lazygit`)
-| `Ctrl+S` | Force-save session |
+| `Ctrl+S` | Save the highlighted model as an alias in the model picker; force-save the session from the composer |
 | `Ctrl+C` | Interrupt the agent |
 | `PgUp` / `PgDn` | Scroll chat |
 | `Home` / `End` | Jump to top/bottom |

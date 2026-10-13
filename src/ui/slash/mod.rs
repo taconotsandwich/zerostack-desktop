@@ -18,7 +18,7 @@ pub(crate) mod settings;
 
 pub use outcome::SlashOutcome;
 
-pub(crate) use crate::engine::models::{cached_model_ids, warm_model_cache};
+pub(crate) use crate::engine::models::{cached_model_ids, model_choices, warm_model_cache};
 
 use smallvec::SmallVec;
 
@@ -296,8 +296,9 @@ pub async fn handle_slash(
     };
 
     match parts[0] {
-        "/provider" | "/model" | "/models" | "/models-add" | "/model-subagent"
-        | "/models-subagent" => providers::handle(&parts, &mut ctx).await,
+        "/provider" | "/model" | "/models" | "/model-subagent" | "/models-subagent" => {
+            providers::handle(&parts, &mut ctx).await
+        }
         "/prompt" | "/theme" | "/regen-prompts" | "/regen-themes" => {
             content::handle(&parts, &mut ctx).await
         }
@@ -332,7 +333,10 @@ pub async fn handle_slash(
         _ => {
             write_error(
                 ctx.renderer,
-                format!("unknown command: {} (try /help)", parts[0]),
+                format!(
+                    "unknown command: {}. Type / to search, or /help <topic> for usage.",
+                    parts[0]
+                ),
             );
             Ok(())
         }

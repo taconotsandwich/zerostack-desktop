@@ -198,7 +198,7 @@ Zero and negative values are invalid. This setting does not require the
 | `show_cost_always`        | boolean | Show the session cost in the status bar even when it is `$0.0000` (for example when the model has no per-token pricing configured). Default: `false`, which hides the cost until it is above zero. |
 | `compact_enabled`         | boolean | Master switch for all automatic conversation compaction (both between-turn and mid-turn). Default: `false`. When `false`, nothing is ever compacted automatically.            |
 | `mid_turn_compact_threshold` | number | Opt-in mid-turn compaction. Fraction of the context window (`0.0`–`1.0`) of real provider prompt pressure at which to compact *during* a turn, not just between turns. Unset by default, meaning no mid-turn compaction. Honored only when `compact_enabled` is `true`. Recommended starting value: `0.80`. See Mid-turn compaction below.            |
-| `always_show_welcome`     | boolean | Always show the welcome banner on startup, bypassing the one-shot marker file. Default: `false`.                                                                               |
+| `always_show_welcome`     | boolean | Show the full quick start tour on every startup. Default: `false` (compact start screen; use `/welcome` for the tour).                                                                               |
 | `auto-update-prompts`     | boolean | When `true`, update prompt files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed prompts already match the embedded defaults. |
 | `auto-update-themes`      | boolean | When `true`, update theme files that changed in the new version without asking. When `false`, never update. When unset, asks interactively. Nothing happens when the installed themes already match the embedded defaults. |
 | `edit_system`             | string  | Edit system mode: `"similarity"` (SEARCH/REPLACE with fuzzy matching, default) or `"hashedit"` (CRC-32 tag-based CAS edits). See Edit System Modes below.                     |
@@ -226,7 +226,7 @@ Zero and negative values are invalid. This setting does not require the
 | `default_prompt`          | string  | Prompt name to activate on startup. Default: `code`. If the prompt file has a `%%mode=<mode>` first-line directive, the security mode is set automatically (see Prompt directives below). |
 | `editor`                  | string  | Editor command for `Ctrl+G` (default: `$EDITOR` env var, then `editor`, then `nano`).                                                                                        |
 | `api_keys`                | object  | Map of provider names to API keys (e.g. `"openai": "sk-..."`). Used as fallback when the corresponding env var is not set.                                                   |
-| `quick_models`            | object  | Map of quick-model names to `{ "provider", "model", "reserve_tokens"?, "input_token_cost"?, "output_token_cost"?, "temperature"?, "extra_body"? }`. Can be switched with `/models <name>` or `--quick-model=<name>`. See Provider-specific request body parameters below for `extra_body`. |
+| `quick_models`            | object  | Map of quick-model names to `{ "provider", "model", "context_window"?, "reserve_tokens"?, "input_token_cost"?, "output_token_cost"?, "temperature"?, "extra_body"? }`. Appear in the unified `/model` / `Alt+M` selector; highlight a model and press **Ctrl+S** to save a new alias. `/models <name>` and `--quick-model=<name>` remain supported. See Provider-specific request body parameters below for `extra_body`. |
 | `prompt_to_model`         | object  | Map of prompt names to quick-model names (e.g. `plan = "glm-52"`). When switching to a prompt, zerostack automatically switches to the corresponding quick model. Empty-string values are treated as "no change". See Prompt-to-model switching below. |
 | `mcp_servers`             | object  | MCP server map when compiled with the `mcp` feature. When omitted, recommended MCPs are auto-configured (see below).                                                   |
 | `enable-exa-mcp`          | boolean | Auto-configure the Exa Web Search MCP server. Default: `true`.                                                                                                         |
@@ -1225,6 +1225,10 @@ chain:
 
 ## Advisor
 
+Requires the optional `advisor` Cargo feature. For a local development build
+with ACP, install with `cargo install --path . --debug --features acp,advisor`.
+A build without this feature reports `[advisor]` as an unknown config key.
+
 The advisor tool lets the agent consult a stronger reviewer model (or the
 user, in human-handoff mode) for strategic guidance before making important
 decisions. This follows the [advisor strategy](https://claude.com/blog/the-advisor-strategy):
@@ -1392,6 +1396,11 @@ zerostack uses the `tracing` framework for structured logging. By default, only
 warnings and errors are printed to stderr at the `warn` level (with the `rig`
 crate silenced). Full debug and trace output is available via CLI flags.
 
+On exit, zerostack explicitly closes shared MCP connections and waits for their
+cleanup while the async runtime is still alive, even when agent tools retain
+references. Shutdown is bounded so an unresponsive server cannot hang exit.
+MCP warnings and errors are also retained in `-v` / `--log-file` logs.
+
 ### Verbose mode (`-v` / `--verbose`)
 
 ```bash
@@ -1405,7 +1414,7 @@ instance — previous runs are never overwritten.
 
 With `-v`, stderr output stays at the default `warn` level so the TUI remains
 clean. The log file captures everything at `trace` level for all zerostack
-modules.
+modules, plus MCP warnings and errors (including session cleanup diagnostics).
 
 ### Custom log file (`--log-file`)
 

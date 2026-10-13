@@ -6,6 +6,45 @@ description: "Complete reference of zerostack slash commands, keyboard shortcuts
 
 All slash commands are available from the TUI input prompt.
 
+## Finding and running commands
+
+Type `/` on an empty message or **Alt+/** from any draft to open the command
+palette. Search by name, alias, description, or category: `context files`
+finds file-context commands and `permissions` finds `/mode`. Only commands
+enabled in this build appear. Menu queries are separate from your message:
+searching, applying a setting, and cancelling preserve the draft and its cursor.
+
+- **Up/Down** moves through results; **Shift+Tab** moves up.
+- **Tab** completes the query without running or applying anything.
+- **Enter** runs an action or opens a focused selection screen. Required
+  arguments, such as a conversation name for `/rename`, get their own input.
+  Empty required arguments cannot be submitted.
+- **Space** after an exact command starts its arguments. You can still type
+  `/rename Fix login` or `/help permissions` and press Enter once.
+- In a selection screen, **Enter** applies the highlighted value. If no
+  suggestion matches, it uses your typed value. Pasting fills the focused
+  search/value field without submitting it.
+- **Escape** goes back one screen with your search and selection intact.
+  At the root it closes the menu. Alt+M opens the model menu directly; choose
+  a target, then a model. Escape returns through those screens to your draft.
+- **Left/Right**, **Home/End**, **Backspace/Delete** edit the menu query;
+  **Ctrl+U** clears it. Backspace on an empty field goes back.
+
+Aliases share one palette entry with their main command: `/clear` → `/new`,
+`/compact` → `/compress`, `/thinking` → `/reasoning`, `/models` and `/provider`
+→ the model selector, `/exit` → `/quit`, and `/tutorial` → `/welcome`.
+
+Use `/help <command or search>` for focused help, for example `/help mode` or
+`/help context files`. `/help` lists commands by task with keyboard shortcuts.
+The command palette and help share the same catalog.
+
+The composer shows the current action and relevant shortcuts. While the agent
+is working, it explains that Enter queues your follow-up request and Ctrl+C
+interrupts. Command input shows its usage beneath the draft. Suggestions fit
+above multiline input and custom status bars, and shrink on short terminals.
+Menus stay in place while you navigate or receive streaming output. Filtering
+or dismissing them restores the conversation underneath.
+
 Most also run without the TUI, sent as a prompt to an ACP session (see
 [ACP.md](ACP.md)). There, commands that would open a picker or run on the
 TUI's loop run inline instead: `/rewind` lists the messages and
@@ -46,13 +85,60 @@ iterations, over `--loop-max`. Commands about the terminal itself (`/quit`,
 
 | Command | Description |
 | ------- | ----------- |
-| `/provider` | Show the current provider. |
-| `/provider <name>` | Switch to a different provider. |
-| `/model` | Show the current model. |
-| `/model <name>` | Switch to a different model. |
-| `/models` | List all quick models defined in config. |
-| `/models <name>` | Switch to a named quick model. |
-| `/models-add <name> <provider> <model>` | Save a new quick model to the config file. |
+| `/model` | Open the unified model menu (also **Alt+M**). Choose **Main agent** or **Subagents**, then search and select a model. |
+| `/model main [name]` | Open the main agent's selector, or choose a saved alias or raw model ID. |
+| `/model subagents [name]` | Open the subagent selector, or choose a saved alias or raw model ID (`subagents` feature). |
+| `/model [main\|subagents] <provider>::<model-id>` | Choose an exact provider and model for that target. |
+| `/model [main\|subagents] refresh` | Refresh that target's provider catalog and reopen its selector. |
+| `/model <name>` | Choose a main-agent model directly; omitting the target defaults to main. |
+
+The first screen shows each target's current model and provider. Select a target
+with **Up/Down** and **Enter**, or type `main` / `subagents`. Builds without the
+`subagents` feature go straight to the main model list. **Escape** goes back to
+the target list, then command results or your draft. The slash picker and help
+show one `/model` entry for both targets.
+
+To save an alias, highlight a model and press **Ctrl+S** (**Save as…**). Enter a
+short name, then press **Enter** to save it in `quick_models` in your config file.
+The form shows the provider, model ID, and destination before saving. Names may
+contain letters, numbers, dots, dashes, and underscores; existing names cannot
+be replaced. Errors stay in the form so you can correct the name and retry.
+**Escape** cancels and returns to the same selection and search.
+
+Saving returns to the model list without switching models or changing startup
+defaults. The alias is immediately available to both targets, direct commands
+such as `/model main fast`, and future sessions. You can also edit
+[`quick_models` manually](GET_STARTED.md#4-how-to-use-quick-models). TOML comments
+and unrelated settings are preserved; YAML and JSON settings are preserved,
+but their formatting is rewritten.
+
+Each target tracks its own current model and recent choices. The selector puts
+the current model first, followed by recent choices from this TUI session, saved models, and other available models. Rows show the provider
+and whether a model is current, recent, or saved. The selected model's detail
+line shows its ID, context window, and input/output prices per million tokens
+when known. Saved aliases pointing to the same provider and ID share one row;
+models with the same ID on different providers stay separate.
+
+Models come from configured quick models, configured providers, and the current
+provider's cached or embedded catalog. Opening and searching the menu does not
+wait on a network request. A model ID absent from the catalog appears as an
+explicit **Use model ID** choice; `provider::model-id` also works for custom
+gateways. `refresh` fetches the current provider's latest catalog.
+
+**Enter applies** and returns to your draft. For the main agent, while a response
+is running, the selector says **Applies to the next request**. The choice takes
+effect after that turn finishes (or is interrupted), before queued requests start; the
+running response keeps its existing model and usage accounting. Choosing again
+replaces the pending choice. Escape leaves it unchanged. Subagent choices apply
+to newly started tasks; existing tasks retain their original settings.
+
+Complete commands pasted into the composer remain supported: `/model <name>`
+and `/models <name>` resolve saved aliases first, then raw IDs on the current
+provider. `/provider <name>` remains available as a direct compatibility command
+for switching to that provider's default model. Use the model selector to preview
+and choose a specific model across providers. `/model-subagent` and
+`/models-subagent` remain accepted as compatibility aliases for
+`/model subagents`; they have no separate picker or help entries.
 
 ## Context Files
 
@@ -203,12 +289,17 @@ older daily logs are accessible via `/memory read` and `memory_search`.
 
 Requires the `subagents` feature (default-on; see [SUBAGENTS.md](SUBAGENTS.md)).
 
-| Command | Description |
-| ------- | ----------- |
-| `/model-subagent` | Show the model currently used for subagents. |
-| `/model-subagent <name>` | Switch the subagent model. |
-| `/models-subagent` | List quick models available for subagents. |
-| `/models-subagent <name>` | Switch subagents to a named quick model. |
+Use **`/model` → Subagents** (or **Alt+M → Subagents**). The same menu configures
+both the main agent and subagents; `/model subagents` skips the target screen.
+Search, previews, Enter/Tab, and Escape work the same for either target, with
+separate current models and recent choices. Your message draft and cursor stay
+intact. Changing the subagent model leaves the main conversation's model unchanged.
+
+Selections apply to **newly started subagents**, including tasks started later
+in the current response. Running subagents keep the client and model they
+started with. `/model subagents <name>` resolves a saved alias or a raw ID on
+the subagent's current provider. `/model subagents <provider>::<model-id>`
+changes both together; `/model subagents refresh` reloads that provider's catalog.
 
 ## Worktree (feature-gated)
 
@@ -262,7 +353,7 @@ message, and after the response restores the previous prompt and
 
 | Command | Description |
 | ------- | ----------- |
-| `/help` | Show the full help message listing all commands and keybindings. |
+| `/help [command or search]` | Browse commands by task or search for focused usage help, with aliases and keybindings. |
 
 ## Keybindings
 
@@ -282,11 +373,13 @@ message, and after the response restores the previous prompt and
 | `Alt+D` / `Alt+Y` | Delete next word / cycle the kill ring. |
 | `Ctrl+G` | Open the current input in the system editor (`$EDITOR`). |
 | `Ctrl+H` | Launch `lazygit` (git TUI) in the project directory. Disable with `--disable-lazygit`. |
-| `Alt+M` | Open the quick-model switcher (fuzzy filter, `Tab` toggles Quick/Provider, `Enter` applies immediately via `/models <name>`). |
+| `Alt+M` | Open the model menu; choose Main agent or Subagents, search providers and models, Enter applies. |
+| `Alt+/` | Open the command palette while preserving the draft and cursor. |
 | `Alt+P` | Open the prompt switcher (fuzzy filter, `Enter` applies immediately via `/prompt <name>`, including `%%mode=` and `[prompt_to_model]`). |
 | `Tab` | Insert two spaces. |
+| `/` at input start | Open the searchable command palette. Inside it: Up/Down navigate, Tab completes, Enter selects/runs. |
 | `@` at word start | Open the file picker. |
 | `Up / Down` | Navigate command history. |
 | `PageUp / PageDown` | Scroll viewport. |
 | `Home / End` | Scroll to top / bottom. |
-| `Escape` | Close active picker / cancel. |
+| `Escape` | Go back one menu level; close at the root. |

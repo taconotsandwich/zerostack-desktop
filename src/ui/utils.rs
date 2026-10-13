@@ -14,6 +14,19 @@ pub(crate) fn char_display_width(c: char) -> usize {
     unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
 }
 
+/// Clip by terminal cells, not bytes or character count. Strip controls so
+/// labels cannot move the caret or escape their row.
+pub(crate) fn clip_columns(text: &str, columns: usize) -> String {
+    let mut width = 0;
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take_while(|&c| {
+            width += char_display_width(c);
+            width <= columns
+        })
+        .collect()
+}
+
 /// Resolves a color based on monochrome mode.
 #[inline]
 pub(crate) fn resolve_color(color: Color, monochrome: bool) -> Color {

@@ -19,6 +19,7 @@ use crate::ui::event_handler;
 use crate::ui::events::{render_session, sanitize_output};
 use crate::ui::input::InputEditor;
 use crate::ui::permission_handler::handle_permission_request;
+use crate::ui::pickers::models::{ModelChoice, ModelKey, ModelTarget};
 use crate::ui::pickers::rewind::RewindOutcome;
 use crate::ui::pickers::switcher::SwitcherResult;
 use crate::ui::renderer::{self as renderer_mod, ChainPrompt, Renderer, copy_to_clipboard};
@@ -73,6 +74,7 @@ pub(crate) struct App<'a> {
     prebuild_rx: Option<mpsc::Receiver<PrebuildPayload>>,
     _terminal_guard: Option<TerminalGuard>,
     last_git_refresh: Option<std::time::Instant>,
+    pending_model: Option<ModelChoice>,
 }
 
 impl<'a> App<'a> {
@@ -202,23 +204,6 @@ impl<'a> App<'a> {
         if let Some(editor) = &ui.cfg.editor {
             input.set_editor(editor.clone());
         }
-        input.set_quick_model_names(config::quick_models_map(ui.cfg).into_keys().collect());
-        {
-            let mut providers: Vec<String> = [
-                "anthropic",
-                "openai",
-                "gemini",
-                "openrouter",
-                "ollama",
-                "opencode-zen",
-                "opencode-go",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-            providers.extend(ui.cfg.custom_providers_map().keys().cloned());
-            input.set_provider_names(providers);
-        }
         input.load_global_history();
 
         let mut run = AgentRunState {
@@ -240,19 +225,10 @@ impl<'a> App<'a> {
 
         let tui_start = std::time::Instant::now();
         render_session(&mut renderer, ui.session, ui.cli, ui.cfg, ui.context)?;
-        let marker_path = crate::session::storage::data_dir().join("shown_welcome_msg");
-        if ui.cfg.resolve_always_show_welcome() || !marker_path.exists() {
+        // The compact empty-session view is the default onboarding. Keep the
+        // longer tour available through /welcome and the explicit preference.
+        if ui.cfg.resolve_always_show_welcome() {
             crate::ui::events::show_welcome(&mut renderer, !ui.cli.disable_lazygit)?;
-            if !ui.cfg.resolve_always_show_welcome() {
-                if let Some(dir) = marker_path.parent()
-                    && let Err(e) = std::fs::create_dir_all(dir)
-                {
-                    tracing::warn!("failed to create data dir for welcome marker: {e}");
-                }
-                if let Err(e) = std::fs::write(&marker_path, "") {
-                    tracing::warn!("failed to write welcome marker (welcome will show again): {e}");
-                }
-            }
         }
         refresh_display(
             &mut renderer,
@@ -273,7 +249,7 @@ impl<'a> App<'a> {
             // fetch is instant (no network). For custom/ollama where a network
             // GET is required, run it in the background so startup remains
             // interactive — the picker will populate from cache on next open.
-            let ids = if headless {
+            let _ids = if headless {
                 Vec::new()
             } else if !is_custom && crate::models_catalog::catalog_entries(&provider).is_some() {
                 let warm_start = std::time::Instant::now();
@@ -302,7 +278,13 @@ impl<'a> App<'a> {
                 });
                 crate::ui::slash::cached_model_ids(&provider)
             };
-            input.set_live_model_names(ids);
+            input.set_model_choices(
+                crate::ui::slash::model_choices(ui.cfg, &provider, &ui.session.model),
+                ModelKey {
+                    provider,
+                    id: ui.session.model.to_string(),
+                },
+            );
         }
 
         #[cfg(feature = "git-worktree")]
@@ -491,6 +473,7 @@ impl<'a> App<'a> {
             prebuild_rx,
             _terminal_guard,
             last_git_refresh: Some(std::time::Instant::now()),
+            pending_model: None,
         })
     }
 
@@ -640,6 +623,11 @@ impl<'a> App<'a> {
         self.ui.session
     }
 
+    #[cfg(all(test, feature = "subagents"))]
+    pub(crate) fn resources(&self) -> Arc<crate::engine::resources::Resources> {
+        self.ui.resources.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn switcher_kind(&self) -> Option<&'static str> {
         self.input.switcher_kind()
@@ -658,6 +646,9 @@ impl<'a> App<'a> {
     }
 
     fn refresh(&mut self) -> io::Result<()> {
+        if let Some(crate::ui::input::Picker::Models(p)) = self.input.picker.as_mut() {
+            p.busy = self.run.is_running;
+        }
         refresh_display(
             &mut self.renderer,
             &mut self.input,
@@ -778,6 +769,7 @@ impl<'a> App<'a> {
                         self.renderer.write_line("btw cancelled", C_ERROR)?;
                     } else if self.run.is_running {
                         self.abort_main_run()?;
+                        self.apply_pending_model().await?;
                     } else {
                         return Ok(ControlFlow::Break(()));
                     }
@@ -859,11 +851,11 @@ impl<'a> App<'a> {
                 self.renderer.scroll_page_down();
                 return Ok(());
             }
-            KeyCode::Home => {
+            KeyCode::Home if !self.input.picker.as_ref().is_some_and(|p| p.active()) => {
                 self.renderer.scroll_to_top();
                 return Ok(());
             }
-            KeyCode::End => {
+            KeyCode::End if !self.input.picker.as_ref().is_some_and(|p| p.active()) => {
                 self.renderer.scroll_to_bottom()?;
                 return Ok(());
             }
@@ -872,8 +864,20 @@ impl<'a> App<'a> {
 
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if alt && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')) {
-            self.open_model_switcher()?;
+            self.sync_model_choices();
+            self.input.start_model_picker();
             return Ok(());
+        }
+        if alt && key.code == KeyCode::Char('/') {
+            self.sync_model_choices();
+            self.input.start_command_picker();
+            return Ok(());
+        }
+        if key.code == KeyCode::Char('/')
+            && self.input.buffer.is_empty()
+            && !self.input.picker.as_ref().is_some_and(|p| p.active())
+        {
+            self.sync_model_choices();
         }
         if alt && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
             self.open_prompt_switcher()?;
@@ -913,11 +917,60 @@ impl<'a> App<'a> {
                         .write_line("rewound; /redo to restore", Color::Green)?;
                 }
             }
+            if let Some((name, choice)) = self.input.take_model_save() {
+                if crate::provider::parse_provider(&choice.key.provider).is_none()
+                    && !self
+                        .ui
+                        .cfg
+                        .custom_providers_map()
+                        .contains_key(&choice.key.provider)
+                {
+                    self.input.finish_model_save(Err(format!(
+                        "Unknown provider '{}'. Configure it before saving.",
+                        choice.key.provider
+                    )));
+                    return Ok(());
+                }
+                let model = crate::config::QuickModelConfig {
+                    provider: choice.key.provider.into(),
+                    model: choice.key.id.into(),
+                    input_token_cost: choice.input_price.unwrap_or(0.0),
+                    output_token_cost: choice.output_price.unwrap_or(0.0),
+                    context_window: choice.context,
+                    reserve_tokens: None,
+                    temperature: None,
+                    extra_body: None,
+                };
+                let result = crate::config::model_alias::save(
+                    &crate::config::config_file_path(),
+                    &name,
+                    &model,
+                )
+                .map_err(|error| error.to_string());
+                self.input.finish_model_save(result);
+            }
+            if let Some((target, choice)) = self.input.take_model_selection() {
+                if target == ModelTarget::Conversation && self.run.is_running {
+                    self.renderer.write_line(
+                        &format!(
+                            "Next request: {} · {} (current response unchanged)",
+                            choice.label, choice.key.provider
+                        ),
+                        C_AGENT,
+                    )?;
+                    self.pending_model = Some(choice);
+                } else {
+                    self.run_slash_command(&format!(
+                        "{} {}::{}",
+                        target.command(),
+                        choice.key.provider,
+                        choice.key.id
+                    ))
+                    .await?;
+                }
+            }
             if let Some(switcher) = self.input.take_switcher_outcome() {
                 match switcher {
-                    SwitcherResult::Model(name) => {
-                        self.run_slash_command(&format!("/models {name}")).await?;
-                    }
                     SwitcherResult::Prompt(name) => {
                         self.run_slash_command(&format!("/prompt {name}")).await?;
                     }
@@ -1005,6 +1058,7 @@ impl<'a> App<'a> {
 
             // Chain-of-prompts: handle text submission after B (but) mode
             if !self.run.is_running
+                && !text.starts_with('/')
                 && let Some(phase) = self.chain.pending.take()
             {
                 self.chain.label_msg = None;
@@ -1020,6 +1074,26 @@ impl<'a> App<'a> {
                 }
                 self.run_chain_transition(phase, Some(&trimmed)).await?;
                 return Ok(());
+            }
+
+            if let Some((target, value)) = ModelTarget::parse(&text) {
+                if value.is_empty() {
+                    self.sync_model_choices();
+                    if let Some(target) = target {
+                        self.input.start_model_picker_for(target);
+                    } else {
+                        self.input.start_model_picker();
+                    }
+                    return Ok(());
+                }
+                #[cfg(feature = "subagents")]
+                if self.run.is_running
+                    && target == Some(ModelTarget::Subagent)
+                    && value != "refresh"
+                {
+                    self.run_slash_command(&text).await?;
+                    return Ok(());
+                }
             }
 
             match classify_submission(self.run.is_running, &text) {
@@ -1238,6 +1312,7 @@ impl<'a> App<'a> {
         }
 
         if !self.run.is_running {
+            self.apply_pending_model().await?;
             self.run.main_abort = None;
             if let Some(next) = self.run.pending_inputs.pop_front() {
                 self.renderer.chain_prompt = None;
@@ -1536,6 +1611,7 @@ impl<'a> App<'a> {
     }
 
     async fn run_slash_command(&mut self, text: &str) -> anyhow::Result<()> {
+        let previous_provider = self.ui.session.provider.clone();
         for line in text.lines() {
             let safe_line = sanitize_output(line);
             self.renderer
@@ -1554,18 +1630,18 @@ impl<'a> App<'a> {
         )
         .await;
 
-        {
+        self.sync_model_choices();
+        if previous_provider != self.ui.session.provider {
             let provider = self.ui.session.provider.to_string();
             let is_custom = self.ui.cfg.custom_providers_map().contains_key(&provider);
-            let ids = crate::ui::slash::warm_model_cache(
-                &provider,
-                is_custom,
-                &self.ui.client,
-                self.ui.cli,
-                self.ui.cfg,
-            )
-            .await;
-            self.input.set_live_model_names(ids);
+            let cli = self.ui.cli.clone();
+            let cfg = self.ui.cfg.clone();
+            let client = self.ui.client.clone();
+            crate::engine::resources::spawn(async move {
+                let _ =
+                    crate::ui::slash::warm_model_cache(&provider, is_custom, &client, &cli, &cfg)
+                        .await;
+            });
         }
 
         self.handle_slash_result(result).await?;
@@ -2124,57 +2200,42 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    /// Open the Quick-Model switcher (`Alt+M`). Reuses the `/models` slash
-    /// path on confirm, so pricing, provider switching, and context-window
-    /// updates stay identical.
-    fn open_model_switcher(&mut self) -> anyhow::Result<()> {
-        if self.run.is_running {
-            self.renderer.write_line(
-                "agent is running — wait for it to finish or press Ctrl-C before switching models",
-                C_ERROR,
-            )?;
-            return Ok(());
-        }
-        let qm = config::quick_models_map(self.ui.cfg);
-        let mut quick: Vec<String> = qm.keys().cloned().collect();
-        quick.sort();
-        let provider = self.ui.session.provider.to_string();
-        let live = crate::ui::slash::cached_model_ids(&provider);
-        // Keep the input editor's copies fresh for the `/models` insertion
-        // picker as well.
-        self.input.set_quick_model_names(quick.clone());
-        self.input.set_live_model_names(live.clone());
-
-        let mut details = std::collections::HashMap::new();
-        for name in &quick {
-            if let Some(q) = qm.get(name) {
-                details.insert(
-                    name.clone(),
-                    format!(
-                        "({} / {})  ${:.4}/M in  ${:.4}/M out",
-                        q.provider, q.model, q.input_token_cost, q.output_token_cost
-                    ),
-                );
-            }
-        }
-        let current_quick = quick.iter().find_map(|name| {
-            qm.get(name).and_then(|q| {
-                if q.provider.as_str() == self.ui.session.provider.as_str()
-                    && q.model.as_str() == self.ui.session.model.as_str()
-                {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            })
-        });
-        self.input.start_model_switcher(
-            quick,
-            live,
-            details,
-            current_quick,
-            self.ui.session.model.to_string(),
+    fn sync_model_choices(&mut self) {
+        self.input.set_model_choices(
+            crate::ui::slash::model_choices(
+                self.ui.cfg,
+                &self.ui.session.provider,
+                &self.ui.session.model,
+            ),
+            ModelKey {
+                provider: self.ui.session.provider.to_string(),
+                id: self.ui.session.model.to_string(),
+            },
         );
+        #[cfg(feature = "subagents")]
+        if let Some((provider, model, _)) = crate::extras::subagents::model_settings() {
+            self.input.set_subagent_model_choices(
+                crate::ui::slash::model_choices(self.ui.cfg, &provider, &model),
+                ModelKey {
+                    provider,
+                    id: model,
+                },
+            );
+        }
+    }
+
+    async fn apply_model_selection(&mut self, choice: ModelChoice) -> anyhow::Result<()> {
+        self.run_slash_command(&format!(
+            "/model {}::{}",
+            choice.key.provider, choice.key.id
+        ))
+        .await
+    }
+
+    async fn apply_pending_model(&mut self) -> anyhow::Result<()> {
+        if let Some(choice) = self.pending_model.take() {
+            self.apply_model_selection(choice).await?;
+        }
         Ok(())
     }
 
