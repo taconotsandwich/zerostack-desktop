@@ -154,31 +154,29 @@ impl McpClientManager {
 
     pub async fn shutdown(self) {
         tracing::debug!("MCP shutting down {} connections", self.handles.len());
-        for shared in self.handles {
-            // `cancel` consumes the service, so it is only possible when no
-            // tool still holds a reference to the handle. Otherwise the
-            // connection is left to Drop at process exit.
-            match Arc::try_unwrap(shared) {
-                Ok(lock) => {
-                    let handle = lock.into_inner();
-                    let name = handle.server_name.clone();
-                    // Explicitly shut down the running service so child
-                    // processes and HTTP connections are cleaned up properly,
-                    // rather than relying on Drop which may not await
-                    // teardown. Bounded so a wedged service cannot hang
-                    // application exit.
-                    let _ = tokio::time::timeout(SHUTDOWN_TIMEOUT, handle.running_service.cancel())
-                        .await;
-                    tracing::debug!("Disconnected from MCP server '{}'", name);
+        // Tools retain shared handles while the app exits. close() borrows the
+        // service mutably, so we can await teardown without unique Arc ownership.
+        // Stop every server concurrently and bound lock acquisition as well as
+        // cleanup, so an in-flight tool cannot hang process exit.
+        futures::future::join_all(self.handles.into_iter().map(|shared| async move {
+            let result = tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+                let mut handle = shared.write().await;
+                let name = handle.server_name.clone();
+                let result = handle.running_service.close().await;
+                (name, result)
+            })
+            .await;
+            match result {
+                Ok((name, Ok(_))) => tracing::debug!("Disconnected from MCP server '{name}'"),
+                Ok((name, Err(error))) => {
+                    tracing::warn!("MCP server '{name}' shutdown failed: {error}")
                 }
-                Err(shared) => {
-                    let name = shared.read().await.server_name.clone();
-                    tracing::debug!(
-                        "MCP server '{}' still referenced at shutdown, skipping cancel",
-                        name
-                    );
-                }
+                Err(_) => tracing::warn!(
+                    "MCP shutdown timed out after {}s",
+                    SHUTDOWN_TIMEOUT.as_secs()
+                ),
             }
-        }
+        }))
+        .await;
     }
 }
