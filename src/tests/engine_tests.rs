@@ -71,6 +71,43 @@ pub(super) fn engine_with_turns(turns: Vec<Vec<&str>>) -> (Engine, FakeModel) {
     (engine, model)
 }
 
+#[cfg(feature = "export")]
+#[tokio::test]
+async fn export_and_import_use_the_engine_workspace() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let cwd = std::env::current_dir().unwrap();
+    let workspace = std::env::temp_dir().join(format!("zs-export-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&workspace).unwrap();
+    let (mut engine, model) = engine_with_turns(vec![vec!["saved answer"]]);
+    engine.change_dir(&workspace).unwrap();
+    // Changing workspaces invalidates the old agent; inject the test model
+    // again so the export fixture never contacts a real provider.
+    engine = engine.with_agent(AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build()));
+    let output = engine.run_prompt("saved question".into()).await;
+    assert!(output.error.is_none(), "{output:?}");
+    let original = engine.session().clone();
+
+    engine
+        .export_conversation(Some("conversation.jsonl".into()))
+        .unwrap();
+    assert!(workspace.join("conversation.jsonl").is_file());
+    engine.export_conversation(None).unwrap();
+    assert!(
+        workspace
+            .join(format!("zerostack-session-{}.html", &original.id[..8]))
+            .is_file()
+    );
+    engine
+        .import_conversation("conversation.jsonl".into())
+        .unwrap();
+    assert_eq!(engine.session().messages.len(), original.messages.len());
+    assert_eq!(engine.session().messages[0].content, "saved question");
+    assert_eq!(engine.session().messages[1].content, "saved answer");
+    assert_eq!(std::env::current_dir().unwrap(), cwd);
+    engine.shutdown().await;
+    std::fs::remove_dir_all(workspace).unwrap();
+}
+
 #[tokio::test]
 async fn run_string_empty_is_ignored() {
     let _guard = crate::tests::fake_model::run_print_guard::acquire();

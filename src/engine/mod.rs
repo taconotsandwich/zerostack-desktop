@@ -1009,7 +1009,8 @@ impl Engine {
     #[cfg(feature = "export")]
     pub async fn share_conversation(&self) -> anyhow::Result<RunOutput> {
         let owner = self.resources.clone();
-        owner.scope(crate::extras::export::share_session(&self.session))
+        owner
+            .scope(crate::extras::export::share_session(&self.session))
             .await
             .map(RunOutput::command)
     }

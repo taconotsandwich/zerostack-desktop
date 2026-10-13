@@ -218,7 +218,9 @@ pub fn export_session(
 ) -> Result<String> {
     let path = crate::engine::resources::resolve(
         destination.unwrap_or_else(|| default_file_name(session).into()),
-    ).to_string_lossy().into_owned();
+    )
+    .to_string_lossy()
+    .into_owned();
     let (content, kind) = if path.ends_with(".jsonl") {
         (session_to_jsonl(session), "JSONL")
     } else {
@@ -238,7 +240,9 @@ pub fn import_session(path: &std::path::Path, current: &Session) -> Result<(Sess
         !path.trim().is_empty(),
         "usage: /import <file.jsonl|session.json>"
     );
-    let path = crate::engine::resources::resolve(path).to_string_lossy().into_owned();
+    let path = crate::engine::resources::resolve(path)
+        .to_string_lossy()
+        .into_owned();
     let content = std::fs::read_to_string(&path)
         .map_err(|error| anyhow::anyhow!("failed to read {path}: {error}"))?;
     // JSONL lines start with `{` too, so pick the format by extension.
