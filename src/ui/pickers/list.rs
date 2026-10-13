@@ -1,101 +1,6 @@
 use super::draw_picker_list;
 
-/// Slash commands that are always available, regardless of which optional
-/// features were compiled in. Feature-gated commands are appended by
-/// [`available_commands`].
-///
-/// Kept in alphabetical order for ease of maintenance.
-const BASE_COMMANDS: &[&str] = &[
-    "/add",
-    "/btw",
-    "/clear",
-    "/compact",
-    "/compress",
-    "/drop",
-    "/drop-all",
-    "/editsys",
-    "/exit",
-    "/help",
-    "/history",
-    "/init",
-    "/mode",
-    "/model",
-    "/models",
-    "/models-add",
-    "/new",
-    "/prompt",
-    "/provider",
-    "/queue",
-    "/quit",
-    "/reasoning",
-    "/redo",
-    "/rename",
-    "/regen-prompts",
-    "/regen-themes",
-    "/retry",
-    "/review",
-    "/rewind",
-    "/sessions",
-    "/theme",
-    "/thinking",
-    "/toggle",
-    "/tutor",
-    "/tutorial",
-    "/undo",
-    "/welcome",
-];
-
-/// Build the autocomplete command list, including only the commands whose
-/// backing feature was actually compiled in.
-///
-/// `#[cfg]` cannot be attached to elements of an array literal on stable Rust
-/// (that requires the unstable `stmt_expr_attributes` feature), so the
-/// feature-gated commands are appended via conditionally-compiled statements
-/// instead. Feature blocks are ordered alphabetically by feature name, and the
-/// commands within each block are likewise alphabetical. Keep this in sync with
-/// the dispatcher in `crate::ui::slash`.
-fn available_commands() -> Vec<&'static str> {
-    #[allow(unused_mut)]
-    let mut cmds: Vec<&'static str> = BASE_COMMANDS.to_vec();
-
-    #[cfg(feature = "advisor")]
-    cmds.push("/advisor");
-
-    #[cfg(feature = "export")]
-    {
-        cmds.push("/export");
-        cmds.push("/import");
-        cmds.push("/share");
-    }
-
-    #[cfg(feature = "git-worktree")]
-    {
-        cmds.push("/worktree");
-        cmds.push("/wt-exit");
-        cmds.push("/wt-merge");
-    }
-
-    #[cfg(feature = "hooks")]
-    cmds.push("/hooks");
-
-    #[cfg(feature = "loop")]
-    cmds.push("/loop");
-
-    #[cfg(feature = "mcp")]
-    cmds.push("/mcp");
-
-    #[cfg(feature = "memory")]
-    cmds.push("/memory");
-
-    #[cfg(feature = "subagents")]
-    {
-        cmds.push("/model-subagent");
-        cmds.push("/models-subagent");
-    }
-
-    cmds
-}
-
+#[derive(Clone)]
 pub struct ListPicker {
     pub active: bool,
     pub query: String,
@@ -103,6 +8,7 @@ pub struct ListPicker {
     pub matches: Vec<String>,
     pub selected: usize,
     items: Vec<String>,
+    commands: bool,
     monochrome: bool,
 }
 
@@ -115,13 +21,14 @@ impl ListPicker {
             matches: Vec::new(),
             selected: 0,
             items: Vec::new(),
+            commands: false,
             monochrome: false,
         }
     }
 
     pub fn with_static_commands() -> Self {
         let mut picker = ListPicker::new();
-        picker.items = available_commands().iter().map(|s| s.to_string()).collect();
+        picker.commands = true;
         picker
     }
 
@@ -139,6 +46,12 @@ impl ListPicker {
         self.cursor = 0;
         self.matches.clear();
         self.selected = 0;
+        self.filter();
+    }
+
+    pub fn set_query(&mut self, query: String) {
+        self.cursor = query.chars().count();
+        self.query = query;
         self.filter();
     }
 
@@ -173,6 +86,14 @@ impl ListPicker {
     }
 
     fn filter(&mut self) {
+        if self.commands {
+            self.matches = crate::ui::commands::search(&self.query)
+                .into_iter()
+                .map(|cmd| cmd.name.to_string())
+                .collect();
+            self.selected = 0;
+            return;
+        }
         let query_lower = self.query.to_lowercase();
         self.matches = self
             .items

@@ -28,7 +28,7 @@ pub fn format_time(rfc3339: &str) -> CompactString {
 pub fn render_session(
     renderer: &mut Renderer,
     session: &Session,
-    cli: &Cli,
+    _cli: &Cli,
     cfg: &Config,
     context: &ContextFiles,
 ) -> anyhow::Result<()> {
@@ -101,25 +101,36 @@ pub fn render_session(
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
             .unwrap_or(".");
-        feed.push_line(
-            BlockStyle::Welcome,
-            format!(
-                "[>] zerostack {} | {} | {}",
-                env!("CARGO_PKG_VERSION"),
-                cli.resolve_model(cfg),
-                cwd_str,
-            ),
-        );
-        feed.push_line(
-            BlockStyle::Welcome,
-            "──────────────────────────────────────────────────",
-        );
-        feed.push_line(
-            BlockStyle::Welcome,
-            "Ready to code; type a request or '/' for commands",
-        );
-        feed.push_line(BlockStyle::Welcome, "Run /welcome or /tutor to get started");
         feed.push_line(BlockStyle::Plain, "");
+        feed.push_line(BlockStyle::Welcome, format!("  zerostack  ·  {}", cwd_str));
+        feed.push_line(
+            BlockStyle::System,
+            format!("  {} / {}", session.provider, session.model),
+        );
+        feed.push_line(BlockStyle::Plain, "");
+        feed.push_line(BlockStyle::Welcome, "  What would you like to work on?");
+        feed.push_line(
+            BlockStyle::Plain,
+            "  Ask about the code, plan a change, or describe a task.",
+        );
+        feed.push_line(BlockStyle::Plain, "");
+        feed.push_line(
+            BlockStyle::Welcome,
+            "  /          Find a command by name or description",
+        );
+        feed.push_line(
+            BlockStyle::Welcome,
+            "  @          Find a file to include in your request",
+        );
+        feed.push_line(
+            BlockStyle::Welcome,
+            "  Alt+M      Choose a model     Alt+/  Commands from your draft",
+        );
+        feed.push_line(BlockStyle::Plain, "");
+        feed.push_line(
+            BlockStyle::System,
+            "  Try /help mode for permissions or /welcome for a quick tour.",
+        );
         feed.push_line(BlockStyle::Plain, "");
     }
     Ok(())
@@ -183,70 +194,53 @@ fn render_tool_result_to_feed(
 
 pub fn show_welcome(renderer: &mut Renderer, show_lazygit: bool) -> std::io::Result<()> {
     let feed = renderer.feed_mut();
-    feed.push_line(
-        BlockStyle::Welcome,
-        "──────────────────────────────────────────",
-    );
-    feed.push_line(BlockStyle::Welcome, "  zerostack Quickstart");
-    feed.push_line(
-        BlockStyle::Welcome,
-        "──────────────────────────────────────────",
-    );
     feed.push_line(BlockStyle::Plain, "");
-    feed.push_line(BlockStyle::Tool, "  Pickers:");
-    feed.push_line(
-        BlockStyle::Plain,
-        "    @<path>     File picker / auto-complete paths",
-    );
-    feed.push_line(
-        BlockStyle::Plain,
-        "    !<command>  Run a shell command (output stored as assistant)",
-    );
-    feed.push_line(
-        BlockStyle::Plain,
-        "    .<prompt>   Switch prompt or one-shot .<prompt> <message>",
-    );
+    feed.push_line(BlockStyle::Welcome, "  Get started with zerostack");
     feed.push_line(BlockStyle::Plain, "");
-    feed.push_line(BlockStyle::Tool, "  Slash Commands:");
-    feed.push_line(BlockStyle::Plain, "    /model        Switch model");
-    feed.push_line(
-        BlockStyle::Plain,
-        "    /prompt       List / activate prompts",
-    );
-    feed.push_line(
-        BlockStyle::Plain,
-        "    .autoconfig        Switches to auto-configurator",
-    );
-    feed.push_line(BlockStyle::Plain, "    /mode         Change security mode");
-    feed.push_line(BlockStyle::Plain, "    /clear        Clear session");
-    feed.push_line(BlockStyle::Plain, "    /undo         Undo last exchange");
-    feed.push_line(
-        BlockStyle::Plain,
-        "    /compress     Free context window space",
-    );
-    feed.push_line(BlockStyle::Plain, "    /help         Show all commands");
-    feed.push_line(BlockStyle::Plain, "");
-    feed.push_line(BlockStyle::Tool, "  Keybindings:");
-    feed.push_line(BlockStyle::Plain, "    Ctrl+G     Open input in $EDITOR");
-    if show_lazygit {
-        feed.push_line(BlockStyle::Plain, "    Ctrl+H     Launch lazygit");
+    for (title, detail) in [
+        (
+            "  1  Describe your task",
+            "     Enter sends. Alt/Shift+Enter adds a line. Ctrl+G opens your editor.",
+        ),
+        (
+            "  2  Add context",
+            "     Type @ to find a file, or /add <path> to attach it to the conversation.",
+        ),
+        (
+            "  3  Choose how to work",
+            "     Alt+M switches model. Alt+P switches prompt. /mode sets permissions.",
+        ),
+        (
+            "  4  Stay in control",
+            "     Ctrl+C interrupts. Follow-up requests are queued while the agent works.",
+        ),
+        (
+            "  5  Pick up where you left off",
+            "     /sessions finds saved conversations. /rewind returns to an earlier turn.",
+        ),
+    ] {
+        feed.push_line(BlockStyle::Welcome, title);
+        feed.push_line(BlockStyle::Plain, detail);
+        feed.push_line(BlockStyle::Plain, "");
     }
-    feed.push_line(BlockStyle::Plain, "    Ctrl+S     Save session");
-    feed.push_line(BlockStyle::Plain, "    Alt+M      Quick-model switcher");
-    feed.push_line(BlockStyle::Plain, "    Alt+P      Prompt switcher");
-    feed.push_line(
-        BlockStyle::Plain,
-        "    Tab        File picker / auto-complete",
-    );
-    feed.push_line(
-        BlockStyle::Plain,
-        "  Website: https://gi-dellav.github.io/zerostack/",
-    );
-    feed.push_line(BlockStyle::Plain, "");
     feed.push_line(
         BlockStyle::Welcome,
-        "──────────────────────────────────────────",
+        "  Commands are searchable: type / and a name or description.",
     );
+    feed.push_line(
+        BlockStyle::Plain,
+        "  Up/Down navigate · Tab completes · Enter selects/runs · Esc keeps your draft.",
+    );
+    feed.push_line(
+        BlockStyle::Plain,
+        "  /help <topic> shows usage. /tutor opens the full guide.",
+    );
+    if show_lazygit {
+        feed.push_line(
+            BlockStyle::Plain,
+            "  Ctrl+H opens lazygit for this project.",
+        );
+    }
     feed.push_line(BlockStyle::Plain, "");
     Ok(())
 }

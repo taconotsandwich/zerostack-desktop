@@ -1,52 +1,78 @@
 use crate::ui::pickers::file::{FilePicker, walk_files, walk_files_streaming};
 use crate::ui::pickers::list::ListPicker;
-use crate::ui::pickers::models::ModelsPicker;
+use crate::ui::pickers::models::{ModelChoice, ModelsPicker};
 use std::path::PathBuf;
 
 #[test]
-fn test_models_picker_starts_on_quick_group() {
-    let mut picker = ModelsPicker::new();
-    picker.set_groups(
-        vec!["fast".to_string()],
-        vec!["claude-opus-4-7".to_string()],
-    );
-    picker.activate();
-    assert_eq!(picker.matches, vec!["fast".to_string()]);
+fn model_search_spans_providers_and_aliases_and_keeps_distinct_identities() {
+    let mut fast = ModelChoice::new("gateway-a", "shared-id");
+    fast.label = "Fast".into();
+    fast.aliases = vec!["fast".into(), "work".into()];
+    let other = ModelChoice::new("gateway-b", "shared-id");
+    let mut picker = ModelsPicker::new(vec![fast.clone(), other], fast.key.clone(), vec![]);
+    assert_eq!(picker.matches.len(), 2);
+    picker.set_query("gateway-b shared".into());
+    assert_eq!(picker.selected_model().unwrap().key.provider, "gateway-b");
+    picker.set_query("work".into());
+    assert_eq!(picker.selected_model().unwrap().key, fast.key);
 }
 
 #[test]
-fn test_models_picker_tab_toggles_to_provider_group() {
-    let mut picker = ModelsPicker::new();
-    picker.set_groups(
-        vec!["fast".to_string()],
-        vec!["claude-opus-4-7".to_string()],
+fn model_order_is_current_recent_saved_then_available() {
+    let current = ModelChoice::new("p", "current");
+    let recent = ModelChoice::new("p", "recent");
+    let mut saved = ModelChoice::new("p", "saved");
+    saved.aliases = vec!["alias".into()];
+    let available = ModelChoice::new("p", "aaa");
+    let picker = ModelsPicker::new(
+        vec![available, saved, recent.clone(), current.clone()],
+        current.key.clone(),
+        vec![recent.key],
     );
-    picker.activate();
-    picker.toggle_group();
-    assert_eq!(picker.matches, vec!["claude-opus-4-7".to_string()]);
+    assert_eq!(
+        picker
+            .matches
+            .iter()
+            .map(|c| c.key.id.as_str())
+            .collect::<Vec<_>>(),
+        ["current", "recent", "saved", "aaa"]
+    );
+    assert!(picker.row(&current).contains("✓"));
+    assert!(picker.row(&picker.matches[1]).contains("Recent"));
 }
 
 #[test]
-fn test_models_picker_starts_on_provider_when_quick_empty() {
-    let mut picker = ModelsPicker::new();
-    picker.set_groups(Vec::new(), vec!["claude-opus-4-7".to_string()]);
-    picker.activate();
-    assert_eq!(picker.matches, vec!["claude-opus-4-7".to_string()]);
+fn model_search_does_not_truncate_large_catalogs_and_supports_unknown_ids() {
+    let choices: Vec<_> = (0..120)
+        .map(|i| ModelChoice::new("p", &format!("model-{i}")))
+        .collect();
+    let mut picker = ModelsPicker::new(choices.clone(), choices[0].key.clone(), vec![]);
+    assert_eq!(picker.matches.len(), 120);
+    picker.set_query("gateway::brand-new".into());
+    assert_eq!(picker.selected_model().unwrap().key.provider, "gateway");
+    assert_eq!(picker.selected_model().unwrap().key.id, "brand-new");
+    assert!(
+        picker
+            .selected_model()
+            .unwrap()
+            .label
+            .contains("Use model ID")
+    );
+    picker.set_query("not a model".into());
+    assert!(picker.matches.is_empty());
 }
 
 #[test]
-fn test_models_picker_fuzzy_subsequence_match() {
-    let mut picker = ModelsPicker::new();
-    picker.set_groups(
-        Vec::new(),
-        vec!["claude-opus-4-7".to_string(), "gpt-4o-mini".to_string()],
-    );
-    picker.activate();
-    for c in "o47".chars() {
-        picker.char_input(c);
-    }
-    assert_eq!(picker.selected_name(), Some("claude-opus-4-7"));
-    assert!(!picker.matches.iter().any(|m| m == "gpt-4o-mini"));
+fn model_picker_fuzzy_search_and_unicode_backspace() {
+    let choice = ModelChoice::new("anthropic", "claude-opus-4-7");
+    let mut picker = ModelsPicker::new(vec![choice.clone()], choice.key.clone(), vec![]);
+    picker.set_query("o47".into());
+    assert_eq!(picker.selected_model().unwrap().key, choice.key);
+    picker.set_query("中文".into());
+    picker.backspace();
+    assert_eq!(picker.query, "中");
+    picker.backspace();
+    assert_eq!(picker.matches.len(), 1);
 }
 
 #[test]

@@ -421,13 +421,13 @@ fn show_welcome_toggles_lazygit_shortcut() {
 
     let enabled = welcome_text(true);
     assert!(
-        enabled.contains("Ctrl+H     Launch lazygit"),
+        enabled.contains("Ctrl+H opens lazygit"),
         "welcome should advertise Ctrl+H when enabled: {enabled}"
     );
 
     let disabled = welcome_text(false);
     assert!(
-        !disabled.contains("Launch lazygit"),
+        !disabled.contains("Ctrl+H"),
         "welcome should hide Ctrl+H when --disable-lazygit is set: {disabled}"
     );
 }

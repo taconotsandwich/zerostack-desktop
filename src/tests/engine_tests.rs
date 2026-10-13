@@ -691,6 +691,28 @@ async fn resume_session_continues_the_stored_conversation() {
 }
 
 #[tokio::test]
+async fn removed_model_add_command_cannot_write_configuration() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    let (mut engine, _) = engine_with_turns(vec![]);
+    let path = crate::config::config_file_path();
+    let original = "# preserve my configuration\nprovider = \"anthropic\"\n";
+    std::fs::write(&path, original).unwrap();
+    for command in [
+        "/models-add fast openai test-model",
+        "/model-add fast openai test-model",
+    ] {
+        let out = engine.run_string(command).await.unwrap();
+        assert_eq!(out.kind, RunKind::Command);
+        assert!(out.text.contains("unknown command"), "{}", out.text);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+    let out = engine.run_string("/models").await.unwrap();
+    assert!(out.text.contains("quick_models"));
+    assert!(!out.text.contains("/models-add"));
+    assert!(engine.session().messages.is_empty());
+}
+
+#[tokio::test]
 async fn model_commands_share_target_and_provider_qualified_selection() {
     let _guard = crate::tests::fake_model::run_print_guard::acquire();
     let (mut engine, _) = engine_with_turns(vec![]);

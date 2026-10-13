@@ -125,58 +125,6 @@ pub fn quick_models_map_ref(cfg: &Config) -> &HashMap<String, QuickModelConfig> 
     cfg.quick_models.as_ref().unwrap_or(&EMPTY)
 }
 
-pub fn save_quick_model(
-    name: &str,
-    provider: &str,
-    model: &str,
-    input_token_cost: f64,
-    output_token_cost: f64,
-) -> std::io::Result<()> {
-    let path = resolve_config_path();
-    let mut cfg: Config = if path.exists() {
-        let content = std::fs::read_to_string(&path)?;
-        match path.extension().and_then(|e| e.to_str()) {
-            Some("toml") => toml::from_str(&content).map_err(std::io::Error::other)?,
-            // YAML is a superset of JSON, so this also accepts legacy
-            // `config.json` files transparently.
-            _ => serde_yaml_ng::from_str::<Config>(&content).map_err(std::io::Error::other)?,
-        }
-    } else {
-        Config::default()
-    };
-
-    let quick_models = cfg.quick_models.get_or_insert_with(HashMap::new);
-    quick_models.insert(
-        name.to_string(),
-        QuickModelConfig {
-            provider: CompactString::new(provider),
-            model: CompactString::new(model),
-            input_token_cost,
-            output_token_cost,
-            reserve_tokens: None,
-            temperature: None,
-            extra_body: None,
-            context_window: None,
-        },
-    );
-
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid config path")
-    })?;
-    std::fs::create_dir_all(parent)?;
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("toml") => {
-            let content = toml::to_string(&cfg).map_err(std::io::Error::other)?;
-            atomic_config_write(&path, &content)?;
-        }
-        _ => {
-            let content = serde_yaml_ng::to_string(&cfg).map_err(std::io::Error::other)?;
-            atomic_config_write(&path, &content)?;
-        }
-    }
-    Ok(())
-}
-
 fn rich_default_config() -> Config {
     Config {
         quick_models: Some(default_quick_models()),

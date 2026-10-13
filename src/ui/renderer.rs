@@ -7,14 +7,14 @@ use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::style::{
     Attribute, Color, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
 };
-use crossterm::terminal::{Clear, ClearType};
+use crossterm::terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate};
 use regex::Regex;
 use smallvec::SmallVec;
 
 use super::feed::{BlockStyle, Feed, style_from_color};
 use super::markdown::word_wrap;
 use super::statusline::StatusSpan;
-use super::utils::{char_display_width, display_width, resolve_color};
+use super::utils::{char_display_width, clip_columns, display_width, resolve_color};
 
 /// Terminal output sink for [`Renderer`]: every ANSI write and terminal-size
 /// read goes through this trait. Production uses [`CrosstermBackend`] (stdout
@@ -202,6 +202,13 @@ pub(crate) enum BottomRedrawPlan {
     Full,
 }
 
+struct PaletteSnapshot {
+    cols: u16,
+    top: usize,
+    monochrome: bool,
+    rows: Vec<(String, bool)>,
+}
+
 pub struct Renderer {
     backend: Box<dyn RenderBackend>,
     spinner_frame: u8,
@@ -246,6 +253,10 @@ pub struct Renderer {
     /// Screen position of the input caret after the last full bottom draw;
     /// `None` when the caret is hidden (permission/chain prompts).
     bottom_cursor: Option<(u16, u16)>,
+    /// Chat cells covered by a retained palette, excluded from chat painting.
+    palette_region: Option<(usize, usize)>,
+    palette_focus: bool,
+    last_palette_snapshot: Option<PaletteSnapshot>,
 }
 
 impl Renderer {
@@ -291,6 +302,9 @@ impl Renderer {
             bottom_dirty: true,
             last_bottom_snapshot: None,
             bottom_cursor: None,
+            palette_region: None,
+            palette_focus: false,
+            last_palette_snapshot: None,
         }
     }
 
@@ -299,6 +313,22 @@ impl Renderer {
     fn exec(&mut self, command: impl crossterm::Command) -> io::Result<()> {
         self.backend.queue(command)?;
         self.backend.flush()
+    }
+
+    /// Present chat, composer, and overlays as one terminal update. Always
+    /// end synchronization on an I/O error, including errors from legacy
+    /// pickers that still write directly to stdout.
+    pub(crate) fn synchronized_frame(
+        &mut self,
+        draw: impl FnOnce(&mut Self) -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.exec(BeginSynchronizedUpdate)?;
+        let result = draw(self);
+        let end = self.exec(EndSynchronizedUpdate);
+        if result.is_err() || end.is_err() {
+            self.invalidate();
+        }
+        result.and(end)
     }
 
     /// Set the number of statusline rows (1-3). Call once at startup.
@@ -347,7 +377,7 @@ impl Renderer {
         resolve_color(color, self.monochrome)
     }
 
-    fn terminal_size(&self) -> (u16, u16) {
+    pub(crate) fn terminal_size(&self) -> (u16, u16) {
         self.backend.size().unwrap_or((80, 24))
     }
 
@@ -480,6 +510,24 @@ impl Renderer {
     pub fn invalidate(&mut self) {
         self.chat_dirty = true;
         self.bottom_dirty = true;
+        self.last_palette_snapshot = None;
+    }
+
+    /// Reconcile overlay coverage before painting chat. Navigation within a
+    /// stationary palette leaves chat untouched; shrinking or closing it
+    /// restores the newly exposed conversation rows.
+    pub(crate) fn prepare_palette(&mut self, palette: Option<&super::pickers::palette::Palette>) {
+        self.palette_focus = palette.is_some_and(|p| p.query.is_some());
+        let (cols, _) = self.terminal_size();
+        let visible = self.visible_lines();
+        let region = palette
+            .filter(|_| cols >= 2 && visible > 0)
+            .map(|palette| (visible.saturating_sub(palette.rows(visible).len()), visible));
+        if region != self.palette_region {
+            self.palette_region = region;
+            self.chat_dirty = true;
+            self.last_palette_snapshot = None;
+        }
     }
 
     pub fn visible_lines(&self) -> usize {
@@ -731,6 +779,9 @@ impl Renderer {
         let (cols, _rows) = self.terminal_size();
         let max_width = cols.saturating_sub(1 + self.chat_margin) as usize;
         let visible = self.visible_lines();
+        let painted_rows = self
+            .palette_region
+            .map_or(visible, |(top, _)| top.min(visible));
         // Use shared feed lines + partial without allocating a combined Vec.
         let base = self.feed.lines_shared(max_width);
         let partial_entries: SmallVec<[LineEntry; 4]> = if self.partial.is_empty() {
@@ -760,7 +811,7 @@ impl Renderer {
         // render empty rows first so content hugs the input area.
         if auto_scroll && total < visible {
             let pad = visible - total;
-            for _ in 0..pad {
+            for _ in 0..pad.min(painted_rows) {
                 self.exec(MoveTo(0, visual_row))?;
                 if let Some(bg) = self.chat_bg {
                     let bg = self.color(bg);
@@ -772,7 +823,7 @@ impl Renderer {
             }
         }
 
-        while (visual_row as usize) < visible && buf_idx < total {
+        while (visual_row as usize) < painted_rows && buf_idx < total {
             let (chunk, color) = if buf_idx < base.len() {
                 let e = &base[buf_idx];
                 (&e.text, e.color)
@@ -781,7 +832,7 @@ impl Renderer {
                 (&e.text, e.color)
             };
 
-            if (visual_row as usize) >= visible {
+            if (visual_row as usize) >= painted_rows {
                 break;
             }
 
@@ -817,7 +868,7 @@ impl Renderer {
             buf_idx += 1;
         }
 
-        while (visual_row as usize) < visible {
+        while (visual_row as usize) < painted_rows {
             self.exec(MoveTo(0, visual_row))?;
             if let Some(bg) = self.chat_bg {
                 let bg = self.color(bg);
@@ -828,7 +879,7 @@ impl Renderer {
             visual_row += 1;
         }
 
-        if self.scroll_offset > 0 {
+        if self.scroll_offset > 0 && painted_rows > 0 {
             let pct = if total > visible {
                 ((total - self.scroll_offset - visible) * 100 / (total - visible)).min(100)
             } else {
@@ -847,7 +898,7 @@ impl Renderer {
             write!(self.backend, "{}", ResetColor)?;
         }
 
-        self.backend.flush()?;
+        self.restore_bottom_cursor()?;
         self.record_chat_drawn();
         Ok(())
     }
@@ -891,7 +942,7 @@ impl Renderer {
     }
 
     pub fn clear_content(&mut self) -> io::Result<()> {
-        self.chat_dirty = true;
+        self.invalidate();
         self.feed.clear();
         self.partial.clear();
         self.scroll_offset = 0;
@@ -908,7 +959,7 @@ impl Renderer {
     }
 
     pub fn resize(&mut self) {
-        self.chat_dirty = true;
+        self.invalidate();
         let visible = self.visible_lines();
         let max_offset = self.buffer_len().saturating_sub(visible);
         if self.scroll_offset > max_offset {
@@ -948,6 +999,98 @@ impl Renderer {
         let sep: String = "─".repeat(cols as usize);
         write!(self.backend, "{}", sep)?;
         write!(self.backend, "{}", ResetColor)?;
+        Ok(())
+    }
+
+    fn draw_composer_label(&mut self, row: u16, cols: u16, label: &str) -> io::Result<()> {
+        self.draw_separator(row, cols)?;
+        if cols > 4 {
+            self.exec(MoveTo(2, row))?;
+            if let Some(bg) = self.input_bg {
+                write!(self.backend, "{}", SetBackgroundColor(self.color(bg)))?;
+            }
+            write!(
+                self.backend,
+                "{}{}{}",
+                SetForegroundColor(self.color(Color::DarkGrey)),
+                clip_columns(&format!(" {label} "), cols.saturating_sub(4) as usize),
+                ResetColor
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Draw suggestions above the input using its actual geometry, including
+    /// multiline drafts and custom multi-row statuslines. Restore the caret
+    /// after painting for inline completion; modal menus show their own caret.
+    pub(crate) fn draw_palette(
+        &mut self,
+        palette: &super::pickers::palette::Palette,
+    ) -> io::Result<()> {
+        self.prepare_palette(Some(palette));
+        let (cols, _) = self.terminal_size();
+        let Some((top, visible)) = self.palette_region else {
+            return Ok(());
+        };
+        let rows = palette.rows(visible);
+        let previous = self.last_palette_snapshot.as_ref().filter(|previous| {
+            previous.cols == cols
+                && previous.top == top
+                && previous.monochrome == self.monochrome
+                && previous.rows.len() == rows.len()
+        });
+        let width = cols.saturating_sub(2) as usize;
+        // Assemble changed rows into one write. Even terminals without support
+        // for synchronized updates never receive a separate clear-only write.
+        let mut output = Vec::new();
+        for (i, (text, selected)) in rows.iter().enumerate() {
+            if previous.is_some_and(|previous| previous.rows[i] == rows[i]) {
+                continue;
+            }
+            output.queue(MoveTo(0, (top + i) as u16))?;
+            write!(output, "{}{}", ResetColor, Clear(ClearType::CurrentLine))?;
+            if *selected {
+                write!(output, "{}", SetAttribute(Attribute::Reverse))?;
+            }
+            let fg = self.color(if *selected || (i == 0 && rows.len() >= 3) {
+                Color::Cyan
+            } else if i + 2 < rows.len() || rows.len() < 3 {
+                Color::Reset
+            } else {
+                Color::DarkGrey
+            });
+            let text = clip_columns(text, width);
+            let padding = width.saturating_sub(display_width(&text));
+            write!(
+                output,
+                "{} {}{}{}{}",
+                SetForegroundColor(fg),
+                text,
+                " ".repeat(padding),
+                SetAttribute(Attribute::Reset),
+                ResetColor
+            )?;
+        }
+        if output.is_empty() {
+            return Ok(());
+        }
+        match self.bottom_cursor.filter(|_| !self.palette_focus) {
+            Some((x, row)) => {
+                output.queue(MoveTo(x, row))?;
+                output.queue(Show)?;
+            }
+            None => {
+                output.queue(Hide)?;
+            }
+        }
+        self.backend.write_all(&output)?;
+        self.backend.flush()?;
+        self.last_palette_snapshot = Some(PaletteSnapshot {
+            cols,
+            top,
+            monochrome: self.monochrome,
+            rows,
+        });
         Ok(())
     }
 
@@ -1162,7 +1305,7 @@ impl Renderer {
     /// Re-place the terminal caret where the last full bottom draw left it.
     /// Needed after a statusline-only redraw, which moves the cursor.
     fn restore_bottom_cursor(&mut self) -> io::Result<()> {
-        match self.bottom_cursor {
+        match self.bottom_cursor.filter(|_| !self.palette_focus) {
             Some((x, row)) => {
                 self.exec(MoveTo(x, row))?;
                 write!(self.backend, "{}", Show)?;
@@ -1383,14 +1526,22 @@ impl Renderer {
         self.clear_shrunk_rows(self.prev_input_height, visible_line_count)?;
         self.prev_input_height = visible_line_count;
 
-        // Thin separator line above input
         let input_top = rows
             .saturating_sub(reserve)
             .saturating_sub(visible_line_count as u16)
             .saturating_add(1);
         let sep_above = input_top.saturating_sub(1);
         if sep_above < input_top {
-            self.draw_separator(sep_above, cols)?;
+            let label = if is_running {
+                "Working · next request will be queued"
+            } else if input_line.starts_with('/') {
+                "Command"
+            } else if input_line.starts_with('!') {
+                "Shell command"
+            } else {
+                "Message"
+            };
+            self.draw_composer_label(sep_above, cols, label)?;
         }
 
         // Remember the input layout so a mouse click can be mapped back to a
@@ -1448,15 +1599,44 @@ impl Renderer {
                 .skip(skip_chars)
                 .take(visible_width)
                 .collect();
-            write!(self.backend, "{}", display)?;
+            if input_line.is_empty() {
+                let placeholder = if is_running {
+                    "Write a follow-up request…"
+                } else {
+                    "Ask a question or describe a task…"
+                };
+                let fg = self.color(Color::DarkGrey);
+                write!(
+                    self.backend,
+                    "{}{}",
+                    SetForegroundColor(fg),
+                    clip_columns(placeholder, visible_width.saturating_sub(1))
+                )?;
+            } else {
+                write!(self.backend, "{}", clip_columns(&display, visible_width))?;
+            }
             write!(self.backend, "{}", Clear(ClearType::UntilNewLine))?;
             write!(self.backend, "{}", ResetColor)?;
         }
 
-        // Thin separator line below input
         let sep_below = rows.saturating_sub(reserve - 1);
         if sep_below < rows.saturating_sub(1) {
-            self.draw_separator(sep_below, cols)?;
+            let command = input_line
+                .split_whitespace()
+                .next()
+                .and_then(super::commands::find);
+            let hint = if let Some(command) = command {
+                format!("{} · {}", command.usage(), command.description)
+            } else if input_line.starts_with('/') {
+                "Search commands · /help for usage".into()
+            } else if is_running {
+                "Enter queue request · Ctrl+C interrupt · /queue view queue".into()
+            } else if input_line.starts_with('!') {
+                "Enter run shell command · output stays in this conversation".into()
+            } else {
+                "Enter send · Alt+Enter new line · / commands · @ files · Alt+M model".into()
+            };
+            self.draw_composer_label(sep_below, cols, &hint)?;
         }
 
         // Status line
@@ -1472,7 +1652,11 @@ impl Renderer {
             + cursor_render_idx as u16;
         let cursor_x = (prompt_width + cursor_display_col.saturating_sub(h_scroll)) as u16;
         self.exec(MoveTo(cursor_x, cursor_row))?;
-        write!(self.backend, "{}", Show)?;
+        if self.palette_focus {
+            write!(self.backend, "{}", Hide)?;
+        } else {
+            write!(self.backend, "{}", Show)?;
+        }
         self.backend.flush()?;
         self.bottom_cursor = Some((cursor_x, cursor_row));
         // The draw itself settles `input_vscroll_offset` (cursor follow /

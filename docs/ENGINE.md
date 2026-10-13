@@ -47,11 +47,10 @@ execution context. `ui/event_handler.rs` renders events after the shared turn
 reducer records tool activity. Terminal input, picker navigation, repainting,
 chain prompts and interactive scheduling remain in `ui/`.
 
-The existing TUI model commands and headless `/model main …` /
-`/model subagents …` resolve the same typed model choices. The TUI defers
-model commands requested while it streams until the next request. Updating
-subagent configuration affects future tasks. Provider-client validation
-happens before committing a model selection.
+Model pickers and headless `/model main …` / `/model subagents …` resolve the
+same typed model choices. Main-model changes requested while the TUI streams
+remain deferred until the next request. Subagent changes apply to new tasks.
+Provider-client validation happens before committing a model selection.
 
 ## Resource ownership
 
