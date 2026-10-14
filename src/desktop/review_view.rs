@@ -108,6 +108,9 @@ impl App {
             Event::Mutate(mutation) => return self.mutate_repository(mutation),
             Event::Mutated(generation, result) if generation == self.review.generation => {
                 self.review.mutating = false;
+                if let Some(window) = self.closing.take() {
+                    return iced::window::close(window);
+                }
                 match result {
                     Ok(outcome) => {
                         if self.review.writes.committing {

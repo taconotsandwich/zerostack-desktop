@@ -69,6 +69,9 @@ impl App {
     /// Open conversation `id`, or a new one in the current project, leaving
     /// the running turn of the shown one to finish on its own.
     pub(super) fn switch_to(&mut self, target: Option<String>) -> Task<Message> {
+        if !self.can_switch() {
+            return Task::none();
+        }
         self.menu = None;
         self.panel = None;
         if let (Some(id), Some(snapshot)) = (&target, &self.snapshot)
