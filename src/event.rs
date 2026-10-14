@@ -1,7 +1,28 @@
 use compact_str::CompactString;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentState {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SubagentProgress {
+    pub id: String,
+    pub batch_id: String,
+    pub title: String,
+    pub state: SubagentState,
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    SubagentProgress(SubagentProgress),
     Token(CompactString),
     Reasoning(CompactString),
     ToolCall {
