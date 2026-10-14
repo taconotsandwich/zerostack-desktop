@@ -3,7 +3,9 @@ use super::components::{self, icon_button};
 use super::review::{self, Preview};
 use super::style::Icon;
 use super::{layout, style};
-use crate::engine::repository::{Change, DiffScope, FileDiff, Repository, Snapshot};
+use crate::engine::repository::{
+    Change, DiffScope, FileDiff, Mutation, MutationOutcome, Repository, Snapshot,
+};
 use iced::widget::{column, container, row, scrollable, space, text, text_editor};
 use iced::{Center, Element, Fill, Font, Task};
 use std::path::PathBuf;
@@ -11,15 +13,17 @@ use std::path::PathBuf;
 #[derive(Default)]
 pub(super) struct Review {
     pub open: bool,
-    generation: u64,
-    loading: bool,
-    repository: Option<Snapshot>,
+    pub(super) generation: u64,
+    pub(super) loading: bool,
+    pub(super) mutating: bool,
+    pub(super) workspace: super::git_workspace::Workspace,
+    pub(super) repository: Option<Snapshot>,
     preview: Option<Preview>,
     diff: Option<FileDiff>,
     selected: Option<Change>,
     scope: DiffScope,
     content: text_editor::Content,
-    error: String,
+    pub(super) error: String,
     comment: String,
     anchor: Option<(Option<u64>, Option<u64>)>,
 }
@@ -33,6 +37,12 @@ impl Review {
 }
 #[derive(Debug, Clone)]
 pub(super) enum Event {
+    Workspace,
+    BranchName(String),
+    WorktreePath(String),
+    CreateWorktree,
+    Mutate(Mutation),
+    Mutated(u64, Result<MutationOutcome, String>),
     Toggle,
     Refresh,
     Loaded(u64, Result<Snapshot, String>),
@@ -67,7 +77,28 @@ fn feedback(diff: &FileDiff, anchor: (Option<u64>, Option<u64>), comment: &str) 
 }
 impl App {
     pub(super) fn update_review(&mut self, event: Event) -> Task<Message> {
+        if self.review.mutating && !matches!(event, Event::Mutated(..)) {
+            return Task::none();
+        }
         match event {
+            Event::Workspace => self.review.workspace.open = !self.review.workspace.open,
+            Event::BranchName(value) => self.review.workspace.branch = value,
+            Event::WorktreePath(value) => self.review.workspace.path = value,
+            Event::CreateWorktree => return self.create_worktree(),
+            Event::Mutate(mutation) => return self.mutate_repository(mutation),
+            Event::Mutated(generation, result) if generation == self.review.generation => {
+                self.review.mutating = false;
+                match result {
+                    Ok(outcome) => {
+                        self.status = outcome.message;
+                        if let Some(path) = outcome.workspace {
+                            return self.open_project(path, None);
+                        }
+                        return self.update_review(Event::Refresh);
+                    }
+                    Err(error) => self.review.error = error,
+                }
+            }
             Event::Toggle => {
                 self.review.open = !self.review.open;
                 self.review.generation += 1;
@@ -260,9 +291,7 @@ impl App {
         .height(layout::HEADER_HEIGHT);
         let mut pane = column![header].spacing(layout::SM);
         if let Some(snapshot) = &self.review.repository {
-            pane = pane.push(
-                text(snapshot.branch.as_deref().unwrap_or("Detached HEAD")).size(style::CAPTION),
-            );
+            pane = pane.push(self.workspace_controls(snapshot));
             pane = pane.push(
                 row![
                     components::action(
@@ -315,6 +344,9 @@ impl App {
                 files = files.push(text("No local changes").size(style::LABEL));
             }
             pane = pane.push(container(scrollable(files)).max_height(160));
+        }
+        if self.review.mutating {
+            pane = pane.push(text("Applying Git operation…").size(style::CAPTION));
         }
         if self.review.loading {
             pane = pane.push(text("Loading…").size(style::CAPTION));
