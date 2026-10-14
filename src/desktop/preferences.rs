@@ -10,6 +10,7 @@ pub(super) struct Preferences {
     pub drafts: HashMap<String, String>,
     pub pinned: HashSet<String>,
     pub archived: HashSet<String>,
+    pub queues: HashMap<String, super::queue_store::SavedQueue>,
 }
 
 impl Preferences {
@@ -37,10 +38,14 @@ impl Preferences {
                 .any(|message| message.content.to_lowercase().contains(&query))
     }
     pub fn load() -> Self {
-        std::fs::read(Self::path())
+        let mut state: Self = std::fs::read(Self::path())
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        for queue in state.queues.values_mut() {
+            queue.recover();
+        }
+        state
     }
 
     pub fn save(&self) -> Result<(), String> {

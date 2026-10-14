@@ -68,3 +68,12 @@ sides of a rename. Discard unstaged requires an explicit confirmation and
 restores the file from the index, preserving staged edits. Enter a commit message
 then Commit staged; only staged changes are committed. Conflicts block commits.
 Errors preserve the message for correction. Git hooks and signing remain active.
+
+## Persistent queues
+
+Waiting prompts and the active prompt are saved together before dispatch.
+Queues continue in order when their conversation runs in the background. Errors
+and Stop pause the queue. After restart, interrupted input returns to the front
+of a paused queue; inspect or edit it, then Resume explicitly. No prompt is
+automatically replayed on launch. Repeating an interrupted prompt may repeat
+its earlier file or tool effects, so review those effects before resuming.
