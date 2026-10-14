@@ -28,6 +28,7 @@ mod scroll;
 mod setup;
 mod sidebar;
 mod style;
+mod tasks;
 mod transcript;
 mod view;
 mod worker;

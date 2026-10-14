@@ -25,6 +25,7 @@ pub(super) struct Running {
     pub turn_id: u64,
     pub live: LiveTurn,
     pub permission: Option<PermissionRequest>,
+    pub waiting_permissions: VecDeque<PermissionRequest>,
     pub events: Option<UiSender>,
     pub pending: Option<Operation>,
     pub queued: VecDeque<String>,
@@ -121,6 +122,7 @@ impl App {
             turn_id: self.turn_id,
             live: std::mem::take(&mut self.live),
             permission: self.permission.take(),
+            waiting_permissions: std::mem::take(&mut self.waiting_permissions),
             events: self.events.take(),
             pending,
             queued: std::mem::take(&mut self.queued),
@@ -150,6 +152,7 @@ impl App {
         self.turn_id = running.turn_id;
         self.live = running.live;
         self.permission = running.permission;
+        self.waiting_permissions = running.waiting_permissions;
         self.events = running.events;
         self.pending = running.pending;
         self.queued = running.queued;
@@ -190,7 +193,16 @@ impl App {
                     .live
                     .push(event, show, std::path::Path::new(&running.project));
             }
-            UiEvent::Permission(request) => running.permission = Some(request),
+            UiEvent::Permission(request) => {
+                super::tasks::enqueue_permission(
+                    &mut running.permission,
+                    &mut running.waiting_permissions,
+                    request,
+                );
+                let id = running.session.id.to_string();
+                let title = super::worker::title(&running.session);
+                return self.task_notice(id, format!("{title} needs approval"));
+            }
             UiEvent::OpenUrl(url) => return super::app::open_url_task(url),
         }
         Task::none()
@@ -251,6 +263,7 @@ impl App {
             running.pending = Some(Operation::Prompt(next.clone()));
             running.live = LiveTurn::default();
             running.permission = None;
+            running.waiting_permissions.clear();
             let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
             running.events = Some(events.clone());
             let worker = running.worker.clone();
@@ -272,7 +285,19 @@ impl App {
             ]);
         }
         self.refresh_sessions();
-        Task::future(running.worker.stop()).discard()
+        let title = super::worker::title(&running.session);
+        let attention = self.task_notice(
+            id,
+            format!(
+                "{title}: {}",
+                if completed {
+                    "completed"
+                } else {
+                    "stopped or failed"
+                }
+            ),
+        );
+        Task::batch([Task::future(running.worker.stop()).discard(), attention])
     }
 
     /// Re-read the sidebar's conversations, which a turn that ended aside

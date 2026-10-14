@@ -11,6 +11,7 @@ pub(super) struct Preferences {
     pub pinned: HashSet<String>,
     pub archived: HashSet<String>,
     pub queues: HashMap<String, super::queue_store::SavedQueue>,
+    pub task_attention: bool,
 }
 
 impl Preferences {

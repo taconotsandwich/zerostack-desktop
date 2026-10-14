@@ -8,6 +8,7 @@ use crate::event::AgentEvent;
 #[derive(Default)]
 pub(super) struct LiveTurn {
     pub blocks: Vec<Block>,
+    pub subagents: Vec<crate::event::SubagentProgress>,
     pub reasoning: String,
     pub notice: String,
     /// Tool groups stay open while the turn runs unless folded here.
@@ -28,6 +29,13 @@ pub(super) enum Block {
 impl LiveTurn {
     pub fn push(&mut self, event: AgentEvent, show_reasoning: bool, root: &Path) {
         match event {
+            AgentEvent::SubagentProgress(progress) => {
+                if let Some(existing) = self.subagents.iter_mut().find(|p| p.id == progress.id) {
+                    *existing = progress;
+                } else {
+                    self.subagents.push(progress);
+                }
+            }
             AgentEvent::Token(token) => {
                 let token = crate::ui::events::sanitize_output(&token);
                 if !matches!(self.blocks.last(), Some(Block::Response { .. })) {
@@ -136,5 +144,35 @@ mod tests {
         };
         assert_eq!(text, "The answer is `42`.");
         assert!(!markdown.items().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+    use crate::event::{SubagentProgress, SubagentState};
+    #[test]
+    fn concurrent_subagents_retain_identity_on_out_of_order_completion() {
+        let mut live = LiveTurn::default();
+        let progress = |id: &str, state| {
+            AgentEvent::SubagentProgress(SubagentProgress {
+                id: id.into(),
+                batch_id: "batch".into(),
+                title: id.into(),
+                state,
+                detail: None,
+            })
+        };
+        for (id, state) in [
+            ("a", SubagentState::Running),
+            ("b", SubagentState::Running),
+            ("b", SubagentState::Completed),
+        ] {
+            live.push(progress(id, state), false, Path::new("/"));
+        }
+        assert_eq!(live.subagents.len(), 2);
+        assert_eq!(live.subagents[0].state, SubagentState::Running);
+        assert_eq!(live.subagents[1].state, SubagentState::Completed);
+        assert!(live.blocks.is_empty());
     }
 }

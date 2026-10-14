@@ -16,6 +16,8 @@ use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
     pub thumbnails: std::collections::HashMap<PathBuf, iced::widget::image::Handle>,
+    pub tasks: super::tasks::Tasks,
+    pub waiting_permissions: VecDeque<worker::PermissionRequest>,
     pub models: super::models::Models,
     pub setup: super::setup::Setup,
     pub worker: Option<Worker>,
@@ -83,6 +85,7 @@ pub(super) struct App {
 
 #[derive(Debug, Clone)]
 pub(super) enum Panel {
+    Tasks,
     Attachment(PathBuf),
     Models,
     ProviderSetup,
@@ -97,6 +100,7 @@ pub(super) enum Panel {
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
+    Tasks(super::tasks::Event),
     Attachment(super::attachments::Event),
     Models(super::models::Event),
     Setup(super::setup::Event),
@@ -193,6 +197,8 @@ impl App {
         (
             Self {
                 thumbnails: std::collections::HashMap::new(),
+                tasks: super::tasks::Tasks::default(),
+                waiting_permissions: VecDeque::new(),
                 models: super::models::Models::default(),
                 setup,
                 worker,
@@ -326,6 +332,7 @@ impl App {
                 let _ = reply.send(decision);
             }
         }
+        self.permission = self.waiting_permissions.pop_front();
         Task::none()
     }
 
@@ -366,11 +373,31 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Tasks(event) => return self.update_tasks(event),
             Message::Attachment(event) => return self.update_attachment(event),
             Message::Models(event) => return self.update_models(event),
             Message::Setup(event) => return self.update_setup(event),
             Message::Completed(id, reply) if id == self.turn_id => {
-                return self.update(Message::Ready(reply));
+                let attention = if self.pending.as_ref().is_some_and(Operation::is_textual) {
+                    let id = self
+                        .snapshot
+                        .as_ref()
+                        .map(|s| s.session.id.to_string())
+                        .unwrap_or_default();
+                    self.task_notice(
+                        id,
+                        if super::queue_store::successful(&reply) {
+                            "Task completed"
+                        } else {
+                            "Task stopped or failed"
+                        }
+                        .into(),
+                    )
+                } else {
+                    Task::none()
+                };
+                let ready = self.update(Message::Ready(reply));
+                return Task::batch([ready, attention]);
             }
             Message::Completed(id, reply) => return self.running_done(id, reply),
             Message::Engine(id, event) if id != self.turn_id => {
@@ -389,6 +416,7 @@ impl App {
                 self.status.clear();
                 self.events = None;
                 self.permission = None;
+                self.waiting_permissions.clear();
                 let pending = self.pending.take();
                 if matches!(pending, Some(Operation::Prompt(_))) {
                     self.queue_paused |= !super::queue_store::successful(&result);
@@ -706,11 +734,19 @@ impl App {
             Message::Engine(id, UiEvent::Permission(request))
                 if self.busy && id == self.turn_id =>
             {
-                self.permission = Some(request);
+                let title = format!("Approval needed: {}", request.tool);
+                super::tasks::enqueue_permission(
+                    &mut self.permission,
+                    &mut self.waiting_permissions,
+                    request,
+                );
                 self.permission_scope_open = false;
-                if self.follow_output {
-                    return operation::snap_to_end(super::scroll::CONVERSATION);
-                }
+                let session = self
+                    .snapshot
+                    .as_ref()
+                    .map(|s| s.session.id.to_string())
+                    .unwrap_or_default();
+                return self.task_notice(session, title);
             }
             Message::Engine(id, UiEvent::OpenUrl(url)) if self.busy && id == self.turn_id => {
                 return open_url_task(url);
@@ -1118,6 +1154,12 @@ impl App {
                 _ => None,
             }),
             window::close_requests().map(Message::Close),
+            if matches!(self.panel, Some(Panel::Tasks)) {
+                iced::time::every(std::time::Duration::from_secs(3))
+                    .map(|_| Message::Tasks(super::tasks::Event::Refresh))
+            } else {
+                Subscription::none()
+            },
         ])
     }
 }
