@@ -618,6 +618,55 @@ impl Engine {
         Ok(())
     }
 
+    /// Select a model for one role without changing another role's state.
+    pub async fn set_role_model(
+        &mut self,
+        role: models::AgentRole,
+        selection: &str,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !selection.trim().is_empty() && !selection.contains(char::is_whitespace),
+            "Enter a model ID or saved alias without spaces"
+        );
+        if role == models::AgentRole::Main {
+            return self.set_model_selection(selection).await;
+        }
+        let owner = self.resources.clone();
+        owner
+            .scope(async {
+                let choice = models::resolve_model_choice(
+                    &self.cfg,
+                    &self.session.provider,
+                    &self.session.model,
+                    selection,
+                );
+                match role {
+                    #[cfg(feature = "subagents")]
+                    models::AgentRole::Subagent => {
+                        models::select_subagent(&self.cli, &self.cfg, &choice)?;
+                        self.cfg.subagent_model = Some(selection.into());
+                    }
+                    #[cfg(feature = "advisor")]
+                    models::AgentRole::Advisor => {
+                        let client = crate::provider::create_client(
+                            &choice.key.provider,
+                            self.cli.api_key.as_deref(),
+                            &self.cfg.custom_providers_map(),
+                            self.cfg.api_keys.as_ref(),
+                        )?;
+                        let mut settings = crate::extras::advisor::with_config(Clone::clone);
+                        settings.client = Some(client);
+                        settings.advisor_model = choice.key.id;
+                        crate::extras::advisor::init_config(settings);
+                        self.cfg.advisor.get_or_insert_default().model = Some(selection.into());
+                    }
+                    _ => anyhow::bail!("This agent role is unavailable in this build"),
+                }
+                Ok(())
+            })
+            .await
+    }
+
     /// Select a quick model by name or switch to a raw model ID.
     pub async fn set_model_selection(&mut self, selection: &str) -> anyhow::Result<()> {
         let owner = self.resources.clone();
