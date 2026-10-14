@@ -235,6 +235,7 @@ pub(super) fn summary(rows: &[Activity]) -> String {
 
 /// Activities of every saved tool group, aligned with `messages`: the entry
 /// at a group's first index holds its rows, every other entry is empty.
+#[cfg(test)]
 pub(super) fn history(messages: &[SessionMessage], root: &Path) -> Vec<Vec<Activity>> {
     (0..messages.len())
         .map(|index| {
@@ -245,7 +246,7 @@ pub(super) fn history(messages: &[SessionMessage], root: &Path) -> Vec<Vec<Activ
         .collect()
 }
 
-fn group_rows(group: &[SessionMessage], root: &Path) -> Vec<Activity> {
+pub(super) fn group_rows(group: &[SessionMessage], root: &Path) -> Vec<Activity> {
     let mut rows: Vec<Activity> = Vec::new();
     for message in group {
         match &message.tool {

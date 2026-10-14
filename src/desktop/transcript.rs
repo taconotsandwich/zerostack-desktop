@@ -25,11 +25,37 @@ impl App {
                 .messages
                 .iter()
                 .rposition(|message| message.role == MessageRole::Assistant);
-            for (index, message) in snapshot.session.messages.iter().enumerate() {
+            messages = messages.push(
+                row![
+                    components::action(
+                        "Older",
+                        (self.history_range.start > 0)
+                            .then_some(Message::HistoryPage(self.history_page + 1))
+                    ),
+                    text(format!(
+                        "{}–{} of {}",
+                        self.history_range
+                            .start
+                            .saturating_add(1)
+                            .min(snapshot.session.messages.len()),
+                        self.history_range.end,
+                        snapshot.session.messages.len()
+                    ))
+                    .size(style::CAPTION),
+                    components::action(
+                        "Newer",
+                        (self.history_page > 0)
+                            .then_some(Message::HistoryPage(self.history_page.saturating_sub(1)))
+                    ),
+                ]
+                .spacing(layout::MD),
+            );
+            for index in self.history_range.clone() {
+                let message = &snapshot.session.messages[index];
                 if let Some(group) = super::history::tool_group(&snapshot.session.messages, index) {
                     if !group.is_empty() {
                         messages = messages.push(super::activity_view::group(
-                            &self.activity[index],
+                            &self.activity[&index],
                             false,
                             self.expanded.contains(&index),
                             Message::ToggleTool(index),
@@ -65,7 +91,7 @@ impl App {
                     }
                     MessageRole::Assistant => {
                         let body = markdown::view(
-                            self.markdown[index].items(),
+                            self.markdown[&index].items(),
                             markdown::Settings::with_text_size(style::BODY, style::theme()),
                         )
                         .map(Message::Link);
@@ -136,10 +162,12 @@ impl App {
                     }
                 }
             }
-            if let Some(worker::Operation::Prompt(prompt)) = &self.pending {
+            if self.history_page == 0
+                && let Some(worker::Operation::Prompt(prompt)) = &self.pending
+            {
                 messages = messages.push(super::bubble::user(prompt));
             }
-            if self.busy || !self.live.blocks.is_empty() {
+            if self.history_page == 0 && (self.busy || !self.live.blocks.is_empty()) {
                 messages = messages.push(self.live_turn());
             }
             if !self.command_output.is_empty() {

@@ -44,3 +44,11 @@ Unstaged, choose a file, and inspect colored hunks with old and new line numbers
 Click a line number to compose feedback, then Add to message to place it in the
 draft for review before sending. Deleted lines retain their old-line location.
 Binary files have an explicit notice; previews show at most 400 lines.
+
+## Long conversations
+
+The transcript renders pages of 80 logical entries. Older and Newer navigate
+without splitting tool groups; Latest returns to the live turn. Markdown and
+tool details are prepared only for the visible page. Session history remains
+complete for the engine and export. The `transcript_parse_work` test compares
+full-history and visible-page preparation on a 10,000-message fixture.

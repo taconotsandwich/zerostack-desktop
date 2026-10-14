@@ -9,6 +9,7 @@ mod bubble;
 mod commands;
 mod components;
 mod history;
+mod history_window;
 mod layout;
 mod live;
 mod models;
