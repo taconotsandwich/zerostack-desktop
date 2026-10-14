@@ -116,6 +116,7 @@ pub(super) enum UiEvent {
     Permission(PermissionRequest),
     /// The conversation wants a URL opened in the default browser (MCP
     /// OAuth).
+    #[cfg_attr(not(feature = "mcp"), allow(dead_code))]
     OpenUrl(String),
 }
 

@@ -130,25 +130,20 @@ impl App {
         Task::none()
     }
     pub(super) fn models_view(&self) -> Element<'_, Message> {
-        let mut roles = row![components::action(
-            "Main",
-            Some(Message::Models(Event::Role(AgentRole::Main)))
-        )]
-        .spacing(layout::SM);
-        #[cfg(feature = "subagents")]
-        {
-            roles = roles.push(components::action(
-                "Subagents",
-                Some(Message::Models(Event::Role(AgentRole::Subagent))),
-            ));
-        }
-        #[cfg(feature = "advisor")]
-        {
-            roles = roles.push(components::action(
-                "Advisor",
-                Some(Message::Models(Event::Role(AgentRole::Advisor))),
-            ));
-        }
+        let roles = [
+            ("Main", AgentRole::Main),
+            #[cfg(feature = "subagents")]
+            ("Subagents", AgentRole::Subagent),
+            #[cfg(feature = "advisor")]
+            ("Advisor", AgentRole::Advisor),
+        ]
+        .into_iter()
+        .fold(row![].spacing(layout::SM), |row, (label, role)| {
+            row.push(components::action(
+                label,
+                Some(Message::Models(Event::Role(role))),
+            ))
+        });
         let mut choices = column![].spacing(layout::XS);
         let filtered: Vec<_> = self
             .models
