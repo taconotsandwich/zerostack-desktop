@@ -68,6 +68,7 @@ pub struct Worktree {
 #[derive(Debug, Clone)]
 pub struct Repository {
     pub root: PathBuf,
+    mutations: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +79,35 @@ pub struct Snapshot {
     pub branches: Vec<String>,
     pub worktrees: Vec<Worktree>,
     pub changes: Vec<Change>,
+    /// Raw staged object IDs and paths, used to reject stale mutations.
+    pub index: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Mutation {
+    Stage(Vec<PathBuf>),
+    Unstage(Vec<PathBuf>),
+    Restore(Vec<PathBuf>),
+    Commit {
+        message: String,
+    },
+    Switch {
+        branch: String,
+    },
+    CreateBranch {
+        name: String,
+    },
+    CreateWorktree {
+        path: PathBuf,
+        branch: String,
+        base: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct MutationOutcome {
+    pub message: String,
+    pub workspace: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -124,7 +154,10 @@ impl Repository {
     pub async fn open(project: &Path) -> Result<Self, GitError> {
         let bytes = command(project, &["rev-parse".into(), "--show-toplevel".into()]).await?;
         let root = path_from_bytes(bytes.strip_suffix(b"\n").unwrap_or(&bytes))?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            mutations: Default::default(),
+        })
     }
 
     pub async fn snapshot(&self) -> Result<Snapshot, GitError> {
@@ -149,6 +182,7 @@ impl Repository {
                 .collect(),
             worktrees: parse_worktrees(&worktrees)?,
             changes: parse_status(&status)?,
+            index: self.index_state().await?,
         })
     }
 
@@ -260,6 +294,148 @@ impl Repository {
             binary,
             truncated,
         })
+    }
+
+    async fn index_state(&self) -> Result<Vec<u8>, GitError> {
+        self.run(&[
+            "diff",
+            "--cached",
+            "--raw",
+            "--no-abbrev",
+            "--no-ext-diff",
+            "--no-textconv",
+            "-z",
+        ])
+        .await
+    }
+
+    /// Apply an explicit user action to the inspected checkout. Git still
+    /// owns cross-process locking; this gate rejects stale UI context and
+    /// serializes mutations made through clones of this repository handle.
+    pub async fn apply(
+        &self,
+        expected: &Snapshot,
+        mutation: Mutation,
+    ) -> Result<MutationOutcome, GitError> {
+        let _guard = self.mutations.lock().await;
+        if self.root != expected.repository.root {
+            return Err(GitError::Invalid(
+                "The selected repository changed. Refresh before continuing.".into(),
+            ));
+        }
+        let current = self.snapshot().await?;
+        if current.head != expected.head
+            || current.branch != expected.branch
+            || current.index != expected.index
+        {
+            return Err(GitError::Invalid(
+                "The branch or staged changes changed since refresh. Review them again.".into(),
+            ));
+        }
+        let mut outcome = MutationOutcome {
+            message: String::new(),
+            workspace: None,
+        };
+        match &mutation {
+            Mutation::Stage(paths) | Mutation::Unstage(paths) | Mutation::Restore(paths) => {
+                if paths.is_empty() {
+                    return Err(GitError::Invalid("Select at least one file.".into()));
+                }
+                let mut args: Vec<OsString> = match &mutation {
+                    Mutation::Stage(_) => vec!["add".into()],
+                    Mutation::Unstage(_) if current.head.is_none() => {
+                        vec!["rm".into(), "--cached".into()]
+                    }
+                    Mutation::Unstage(_) => vec!["restore".into(), "--staged".into()],
+                    _ => vec!["restore".into(), "--worktree".into()],
+                };
+                args.push("--".into());
+                for path in paths {
+                    validate_path(path)?;
+                    args.push(path.as_os_str().into());
+                }
+                command(&self.root, &args).await?;
+                outcome.message = match mutation {
+                    Mutation::Stage(_) => "Selected files staged.",
+                    Mutation::Unstage(_) => "Selected files unstaged.",
+                    _ => "Selected files restored from the index.",
+                }
+                .into();
+            }
+            Mutation::Commit { message } => {
+                if message.trim().is_empty() || message.contains('\0') {
+                    return Err(GitError::Invalid("Enter a commit message.".into()));
+                }
+                if current.index.is_empty() {
+                    return Err(GitError::Invalid("Stage changes before committing.".into()));
+                }
+                if current.changes.iter().any(Change::conflicted) {
+                    return Err(GitError::Invalid(
+                        "Resolve conflicts before committing.".into(),
+                    ));
+                }
+                let output = self.run(&["commit", "-m", message.trim()]).await?;
+                outcome.message = String::from_utf8_lossy(&output).trim().into();
+            }
+            Mutation::Switch { branch } | Mutation::CreateBranch { name: branch } => {
+                self.validate_branch(branch).await?;
+                if !current.changes.is_empty() {
+                    return Err(GitError::Invalid(
+                        "Commit or stash local changes before switching branches.".into(),
+                    ));
+                }
+                let mut args = vec!["switch".into()];
+                if matches!(mutation, Mutation::CreateBranch { .. }) {
+                    args.push("-c".into());
+                }
+                args.push(branch.into());
+                command(&self.root, &args).await?;
+                outcome.message = format!("Switched to {branch}.");
+                outcome.workspace = Some(self.root.clone());
+            }
+            Mutation::CreateWorktree { path, branch, base } => {
+                self.validate_branch(branch).await?;
+                if !path.is_absolute() || path.exists() {
+                    return Err(GitError::Invalid(
+                        "Choose a new absolute directory for the worktree.".into(),
+                    ));
+                }
+                if base.is_empty() || base.starts_with('-') {
+                    return Err(GitError::Invalid("Choose a starting branch.".into()));
+                }
+                self.run(&[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{base}^{{commit}}"),
+                ])
+                .await?;
+                command(
+                    &self.root,
+                    &[
+                        "worktree".into(),
+                        "add".into(),
+                        "-b".into(),
+                        branch.into(),
+                        "--".into(),
+                        path.as_os_str().into(),
+                        base.into(),
+                    ],
+                )
+                .await?;
+                outcome.message = "Worktree created.".into();
+                outcome.workspace = Some(path.clone());
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn validate_branch(&self, name: &str) -> Result<(), GitError> {
+        if name.is_empty() || name.starts_with('-') {
+            return Err(GitError::Invalid("Enter a valid branch name.".into()));
+        }
+        self.run(&["check-ref-format", "--branch", name]).await?;
+        Ok(())
     }
 
     async fn run(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
@@ -565,6 +741,118 @@ mod tests {
             .unwrap();
         assert!(linked.branch.is_none());
         assert_eq!(linked.worktrees.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mutations_preserve_working_files_and_reject_stale_reviews() {
+        let f = Fixture::new().await;
+        let repo = Repository::open(&f.0).await.unwrap();
+        let path = PathBuf::from(":(glob)*.txt");
+        tokio::fs::write(f.0.join(&path), "first\n").await.unwrap();
+        let snapshot = repo.snapshot().await.unwrap();
+        repo.apply(&snapshot, Mutation::Stage(vec![path.clone()]))
+            .await
+            .unwrap();
+        assert!(
+            repo.apply(
+                &snapshot,
+                Mutation::Commit {
+                    message: "stale".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        repo.apply(
+            &repo.snapshot().await.unwrap(),
+            Mutation::Unstage(vec![path.clone()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(f.0.join(&path)).await.unwrap(),
+            "first\n"
+        );
+        repo.apply(
+            &repo.snapshot().await.unwrap(),
+            Mutation::Stage(vec![path.clone()]),
+        )
+        .await
+        .unwrap();
+        repo.apply(
+            &repo.snapshot().await.unwrap(),
+            Mutation::Commit {
+                message: "initial\n\nbody".into(),
+            },
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(f.0.join(&path), "second\n").await.unwrap();
+        repo.apply(
+            &repo.snapshot().await.unwrap(),
+            Mutation::Restore(vec![path.clone()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read_to_string(f.0.join(&path)).await.unwrap(),
+            "first\n"
+        );
+        repo.apply(
+            &repo.snapshot().await.unwrap(),
+            Mutation::CreateBranch {
+                name: "topic".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            repo.snapshot().await.unwrap().branch.as_deref(),
+            Some("topic")
+        );
+        tokio::fs::write(f.0.join("new"), "keep").await.unwrap();
+        assert!(
+            repo.apply(
+                &repo.snapshot().await.unwrap(),
+                Mutation::CreateBranch {
+                    name: "unsafe".into()
+                }
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            repo.apply(
+                &repo.snapshot().await.unwrap(),
+                Mutation::Stage(vec![PathBuf::from("../outside")])
+            )
+            .await
+            .is_err()
+        );
+        let path = f.0.join("isolated tree");
+        let result = repo
+            .apply(
+                &repo.snapshot().await.unwrap(),
+                Mutation::CreateWorktree {
+                    path: path.clone(),
+                    branch: "other".into(),
+                    base: "topic".into(),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.workspace, Some(path.clone()));
+        assert_eq!(
+            Repository::open(&path)
+                .await
+                .unwrap()
+                .snapshot()
+                .await
+                .unwrap()
+                .branch
+                .as_deref(),
+            Some("other")
+        );
     }
 
     #[test]
