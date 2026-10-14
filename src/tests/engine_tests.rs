@@ -887,3 +887,35 @@ async fn role_models_change_independently_and_reject_empty_selection() {
     );
     engine.shutdown().await;
 }
+
+#[cfg(not(all(feature = "subagents", feature = "advisor")))]
+#[tokio::test]
+async fn unavailable_role_selection_preserves_the_main_model() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let mut engine = Engine::new(
+        test_cli(),
+        Config::default(),
+        test_session(),
+        test_context(),
+        test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    );
+    let original = engine.session().model.clone();
+    use crate::engine::models::AgentRole;
+    for (role, enabled) in [
+        (AgentRole::Subagent, cfg!(feature = "subagents")),
+        (AgentRole::Advisor, cfg!(feature = "advisor")),
+    ] {
+        if !enabled {
+            assert!(
+                engine
+                    .set_role_model(role, "unavailable-model")
+                    .await
+                    .is_err()
+            );
+            assert_eq!(engine.session().model, original);
+        }
+    }
+    engine.shutdown().await;
+}
