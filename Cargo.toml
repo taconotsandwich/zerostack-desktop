@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-desktop = ["dep:iced", "dep:rfd", "multimodal", "acp"]
+desktop = ["dep:iced", "dep:rfd", "dep:arboard", "dep:image", "multimodal", "acp"]
 default = ['git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'logging']
 status-signals = []
 loop = []
@@ -39,7 +39,7 @@ lsp = ["dep:lsp-types"]
 rtk = []
 
 [dependencies]
-iced = { version = "0.14", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "tokio", "svg", "markdown", "advanced", "x11", "wayland"] }
+iced = { version = "0.14", optional = true, default-features = false, features = ["wgpu", "tiny-skia", "tokio", "svg", "image", "markdown", "advanced", "x11", "wayland"] }
 rfd = { version = "0.17", optional = true, default-features = false, features = ["xdg-portal"] }
 rig = { version = "0.43" }
 rmcp = { version = "3.5", optional = true, default-features = false, features = [
@@ -86,6 +86,8 @@ blocking = { version = "1", optional = true }
 base64 = { version = "0.22", optional = true }
 lsp-types = { version = "0.97", optional = true }
 mimalloc = { version = "0.1", default-features = false }
+arboard = { version = "3.6", features = ["wayland-data-control"], optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"], optional = true }
 
 [dev-dependencies]
 # Adds rig-core's `test_utils` module (scripted `CompletionModel` test

@@ -366,6 +366,11 @@ impl App {
                     (!self.busy).then_some(Message::Show(Panel::Projects)),
                 ));
             }
+            tools = tools.push(components::action(
+                "Paste image",
+                (!self.busy)
+                    .then_some(Message::Attachment(super::attachments::Event::Paste(false))),
+            ));
             tools = tools.push(space::horizontal());
             tools = tools.push(components::action(
                 snapshot.session.model.to_string(),

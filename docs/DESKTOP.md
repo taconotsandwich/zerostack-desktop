@@ -26,3 +26,13 @@ the context and pricing details, then Use model. A custom model ID can be entere
 in the same panel. Save favorite names that selection for later use, replacing
 the `/models-add` form. Advisor availability still follows its enabled setting.
 Role changes affect subsequent calls in the current session.
+
+## Attachments
+
+Drop or choose files to see image thumbnails beside the composer. Click a
+thumbnail for a larger preview or a filename for a text preview. Paste image
+(or Cmd/Ctrl+V over the conversation) imports clipboard images; normal text
+pasting continues to work. Clipboard images are stored as private PNGs under
+`<data>/attachments` so saved session references survive restart. Images are
+limited to 16 megapixels on paste; previews decode at most 128 MiB and resize to
+1024 pixels. Attachment imports finish only in the conversation that started them.
