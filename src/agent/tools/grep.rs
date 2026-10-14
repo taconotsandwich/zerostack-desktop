@@ -96,172 +96,186 @@ impl Tool for GrepTool {
             Regex::new(&pattern).unwrap_or_else(|_| Regex::new(".*").unwrap())
         });
 
-        let walker = WalkBuilder::new(&search_path)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .require_git(false)
-            .hidden(false)
-            .filter_entry(|entry| {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
-                } else {
-                    true
+        let max_results = self.max_results;
+        crate::engine::blocking::run_cancellable(move |cancel| {
+            let scan_cancel = cancel.clone();
+            let walker = WalkBuilder::new(&search_path)
+                .git_ignore(true)
+                .git_global(true)
+                .git_exclude(true)
+                .require_git(false)
+                .hidden(false)
+                .filter_entry(move |entry| {
+                    if scan_cancel.is_cancelled() {
+                        return false;
+                    }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
+                    } else {
+                        true
+                    }
+                })
+                .build();
+
+            let max_results = max_results as usize;
+            let mut file_count = 0;
+            let mut files_with_matches: usize = 0;
+            let mut all_results: Vec<String> = Vec::with_capacity(max_results.min(64));
+
+            for entry in walker
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            {
+                cancel.check()?;
+                if all_results.len() >= max_results {
+                    break;
                 }
-            })
-            .build();
 
-        let max_results = self.max_results as usize;
-        let mut file_count = 0;
-        let mut files_with_matches: usize = 0;
-        let mut all_results: Vec<String> = Vec::with_capacity(max_results.min(64));
+                if let Some(ref re_include) = include_re {
+                    let fname = entry.file_name().to_string_lossy();
+                    if !re_include.is_match(&fname) {
+                        continue;
+                    }
+                }
 
-        for entry in walker
-            .flatten()
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        {
-            if all_results.len() >= max_results {
-                break;
-            }
-
-            if let Some(ref re_include) = include_re {
-                let fname = entry.file_name().to_string_lossy();
-                if !re_include.is_match(&fname) {
+                if let Ok(meta) = entry.metadata()
+                    && meta.len() > 10 * 1024 * 1024
+                {
                     continue;
                 }
-            }
 
-            if let Ok(meta) = entry.metadata()
-                && meta.len() > 10 * 1024 * 1024
-            {
-                continue;
-            }
+                let path_str = entry.path().to_string_lossy().to_string();
 
-            let path_str = entry.path().to_string_lossy().to_string();
-
-            match tokio::fs::read(entry.path()).await {
-                Ok(data) => {
-                    if Self::is_binary(&data) {
-                        continue;
-                    }
-                    file_count += 1;
-                    let content = String::from_utf8_lossy(&data);
-                    let lines: Vec<&str> = content.lines().collect();
-                    let total = lines.len();
-
-                    let match_lines: Vec<usize> = lines
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, l)| re.is_match(l))
-                        .map(|(i, _)| i)
-                        .collect();
-
-                    if match_lines.is_empty() {
-                        continue;
-                    }
-                    files_with_matches += 1;
-
-                    if context == 0 {
-                        for &ml in &match_lines {
-                            all_results.push(format!("{}:{}:{}", path_str, ml + 1, lines[ml]));
-                            if all_results.len() >= max_results {
-                                break;
-                            }
+                match std::fs::read(entry.path()) {
+                    Ok(data) => {
+                        if Self::is_binary(&data) {
+                            continue;
                         }
-                    } else {
-                        let mut shown = vec![false; total];
-                        for &ml in &match_lines {
-                            let start = ml.saturating_sub(context);
-                            let end = (ml + 1 + context).min(total);
-                            for s in &mut shown[start..end] {
-                                *s = true;
+                        file_count += 1;
+                        let content = String::from_utf8_lossy(&data);
+                        let lines: Vec<&str> = content.lines().collect();
+                        let total = lines.len();
+
+                        let mut match_lines = Vec::new();
+                        for (i, line) in lines.iter().enumerate() {
+                            cancel.check()?;
+                            if re.is_match(line) {
+                                match_lines.push(i);
                             }
                         }
 
-                        let mut i = 0;
-                        while i < total && all_results.len() < max_results {
-                            if !shown[i] {
-                                i += 1;
-                                continue;
+                        if match_lines.is_empty() {
+                            continue;
+                        }
+                        files_with_matches += 1;
+
+                        if context == 0 {
+                            for &ml in &match_lines {
+                                cancel.check()?;
+                                all_results.push(format!("{}:{}:{}", path_str, ml + 1, lines[ml]));
+                                if all_results.len() >= max_results {
+                                    break;
+                                }
+                            }
+                        } else {
+                            let mut shown = vec![false; total];
+                            for &ml in &match_lines {
+                                cancel.check()?;
+                                let start = ml.saturating_sub(context);
+                                let end = (ml + 1 + context).min(total);
+                                for s in &mut shown[start..end] {
+                                    *s = true;
+                                }
                             }
 
-                            if !all_results.is_empty() {
-                                all_results.push("--".to_string());
-                            }
+                            let mut i = 0;
+                            while i < total && all_results.len() < max_results {
+                                cancel.check()?;
+                                if !shown[i] {
+                                    i += 1;
+                                    continue;
+                                }
 
-                            while i < total && shown[i] && all_results.len() < max_results {
-                                let is_match = match_lines.binary_search(&i).is_ok();
-                                let sep = if is_match { ':' } else { '-' };
-                                all_results.push(format!(
-                                    "{}-{}{} {}",
-                                    path_str,
-                                    i + 1,
-                                    sep,
-                                    lines[i]
-                                ));
-                                i += 1;
+                                if !all_results.is_empty() {
+                                    all_results.push("--".to_string());
+                                }
+
+                                while i < total && shown[i] && all_results.len() < max_results {
+                                    let is_match = match_lines.binary_search(&i).is_ok();
+                                    let sep = if is_match { ':' } else { '-' };
+                                    all_results.push(format!(
+                                        "{}-{}{} {}",
+                                        path_str,
+                                        i + 1,
+                                        sep,
+                                        lines[i]
+                                    ));
+                                    i += 1;
+                                }
                             }
                         }
                     }
+                    Err(_) => continue,
                 }
-                Err(_) => continue,
             }
-        }
 
-        if all_results.is_empty() {
-            let msg = "No matches found.".to_string();
-            return Ok(match coaching {
-                Some(c) => format!("{}\n\n{}", c, msg),
-                None => msg,
-            });
-        }
+            if all_results.is_empty() {
+                let msg = "No matches found.".to_string();
+                return Ok(match coaching {
+                    Some(c) => format!("{}\n\n{}", c, msg),
+                    None => msg,
+                });
+            }
 
-        let total = all_results.len();
-        let truncated = total >= max_results;
-        let result = if truncated {
-            format!(
-                "{} results (showing first {}, searched {} files):\n{}\n\n[truncated after {} matches — {} more matches; narrow the pattern or restrict to a path]",
-                total,
-                max_results,
+            let total = all_results.len();
+            let truncated = total >= max_results;
+            let result = if truncated {
+                format!(
+                    "{} results (showing first {}, searched {} files):\n{}\n\n[truncated after {} matches — {} more matches; narrow the pattern or restrict to a path]",
+                    total,
+                    max_results,
+                    file_count,
+                    all_results.join("\n"),
+                    max_results,
+                    total - max_results
+                )
+            } else {
+                format!(
+                    "{} results (searched {} files):\n{}",
+                    total,
+                    file_count,
+                    all_results.join("\n")
+                )
+            };
+
+            // Add a "consider task" hint when results span multiple files and the
+            // count is non-trivial. The agent sees this at the moment it decides
+            // its next action, which is the highest-leverage point in the loop.
+            // Suppressed when truncated, since the truncation hint already steers
+            // the agent toward narrowing or task.
+            let result = if !truncated && total >= 10 && files_with_matches >= 2 {
+                format!(
+                    "{}\n\n[{} matches across {} files; for cross-file enumeration or synthesis, `task` returns a verified summary in one call]",
+                    result, total, files_with_matches,
+                )
+            } else {
+                result
+            };
+
+            tracing::debug!(
+                "tool grep done: files_searched={}, files_with_matches={}, total_matches={}, truncated={}",
                 file_count,
-                all_results.join("\n"),
-                max_results,
-                total - max_results
-            )
-        } else {
-            format!(
-                "{} results (searched {} files):\n{}",
+                files_with_matches,
                 total,
-                file_count,
-                all_results.join("\n")
-            )
-        };
+                truncated,
+            );
 
-        // Add a "consider task" hint when results span multiple files and the
-        // count is non-trivial. The agent sees this at the moment it decides
-        // its next action, which is the highest-leverage point in the loop.
-        // Suppressed when truncated, since the truncation hint already steers
-        // the agent toward narrowing or task.
-        let result = if !truncated && total >= 10 && files_with_matches >= 2 {
-            format!(
-                "{}\n\n[{} matches across {} files; for cross-file enumeration or synthesis, `task` returns a verified summary in one call]",
-                result, total, files_with_matches,
-            )
-        } else {
-            result
-        };
-
-        tracing::debug!(
-            "tool grep done: files_searched={}, files_with_matches={}, total_matches={}, truncated={}",
-            file_count,
-            files_with_matches,
-            total,
-            truncated,
-        );
-
-        Ok(match coaching {
-            Some(c) => format!("{}\n\n{}", c, result),
-            None => result,
+            Ok(match coaching {
+                Some(c) => format!("{}\n\n{}", c, result),
+                None => result,
+            })
         })
+        .await
+        .map_err(Into::into)
     }
 }

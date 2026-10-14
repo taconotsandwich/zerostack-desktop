@@ -59,6 +59,8 @@ mod fake_model;
 #[cfg(test)]
 mod feed_tests;
 #[cfg(test)]
+mod file_scan_tests;
+#[cfg(test)]
 mod grep_tests;
 #[cfg(test)]
 mod headless_ask_tests;

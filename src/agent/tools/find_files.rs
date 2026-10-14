@@ -64,69 +64,79 @@ impl Tool for FindFilesTool {
 
         let search_path = crate::fs::resolve_path(args.path.as_deref().unwrap_or("."));
 
-        let walker = WalkBuilder::new(search_path)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .require_git(false)
-            .hidden(false)
-            .filter_entry(|entry| {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
-                } else {
-                    true
-                }
-            })
-            .build();
+        let max_results = self.max_results;
+        crate::engine::blocking::run_cancellable(move |cancel| {
+            let scan_cancel = cancel.clone();
+            let walker = WalkBuilder::new(search_path)
+                .git_ignore(true)
+                .git_global(true)
+                .git_exclude(true)
+                .require_git(false)
+                .hidden(false)
+                .filter_entry(move |entry| {
+                    if scan_cancel.is_cancelled() {
+                        return false;
+                    }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
+                    } else {
+                        true
+                    }
+                })
+                .build();
 
-        let mut results: Vec<String> = Vec::new();
+            let mut results: Vec<String> = Vec::new();
 
-        for entry in walker
-            .flatten()
-            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-        {
-            let fname = entry.file_name().to_string_lossy();
-            if re.is_match(&fname) {
-                results.push(entry.path().to_string_lossy().to_string());
-                if (results.len() as u64) >= self.max_results {
-                    break;
+            for entry in walker
+                .flatten()
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            {
+                cancel.check()?;
+                let fname = entry.file_name().to_string_lossy();
+                if re.is_match(&fname) {
+                    results.push(entry.path().to_string_lossy().to_string());
+                    if (results.len() as u64) >= max_results {
+                        break;
+                    }
                 }
             }
-        }
 
-        if results.is_empty() {
-            let msg = "No files found matching the pattern.".to_string();
-            return Ok(match coaching {
-                Some(c) => format!("{}\n\n{}", c, msg),
-                None => msg,
-            });
-        }
+            if results.is_empty() {
+                let msg = "No files found matching the pattern.".to_string();
+                return Ok(match coaching {
+                    Some(c) => format!("{}\n\n{}", c, msg),
+                    None => msg,
+                });
+            }
 
-        results.sort();
+            results.sort();
 
-        let total = results.len();
-        let max_results = self.max_results as usize;
-        let result = if total >= max_results {
-            format!(
-                "{} files found (showing first {}):\n{}\n\n[truncated after {} entries — {} more; narrow the pattern or path]",
+            let total = results.len();
+            let max_results = max_results as usize;
+            let result = if total >= max_results {
+                format!(
+                    "{} files found (showing first {}):\n{}\n\n[truncated after {} entries — {} more; narrow the pattern or path]",
+                    total,
+                    max_results,
+                    results[..max_results].join("\n"),
+                    max_results,
+                    total - max_results
+                )
+            } else {
+                format!("{} files found:\n{}", total, results.join("\n"))
+            };
+
+            tracing::debug!(
+                "tool find_files done: results={}, truncated={}",
                 total,
-                max_results,
-                results[..max_results].join("\n"),
-                max_results,
-                total - max_results
-            )
-        } else {
-            format!("{} files found:\n{}", total, results.join("\n"))
-        };
-
-        tracing::debug!(
-            "tool find_files done: results={}, truncated={}",
-            total,
-            total >= max_results,
-        );
-        Ok(match coaching {
-            Some(c) => format!("{}\n\n{}", c, result),
-            None => result,
+                total >= max_results,
+            );
+            Ok(match coaching {
+                Some(c) => format!("{}\n\n{}", c, result),
+                None => result,
+            })
         })
+        .await
+        .map_err(Into::into)
     }
 }

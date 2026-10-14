@@ -283,5 +283,13 @@ where
     R: Send + 'static,
 {
     let owner = current();
-    tokio::task::spawn_blocking(move || owner.sync(action))
+    let mut tasks = owner.tasks.lock().unwrap_or_else(|e| e.into_inner());
+    let worker_owner = owner.clone();
+    let task = tokio::task::spawn_blocking(move || worker_owner.sync(action));
+    if owner.is_closed() {
+        task.abort();
+    }
+    tasks.retain(|task| !task.is_finished());
+    tasks.push(task.abort_handle());
+    task
 }

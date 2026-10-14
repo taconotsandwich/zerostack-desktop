@@ -63,30 +63,45 @@ fn format_large_kb() {
 
 use crate::agent::tools::list_dir::count_dir_entries;
 
-#[test]
-fn count_empty_dir() {
+#[tokio::test]
+async fn count_empty_dir() {
     let dir = std::env::temp_dir().join(format!("zs_empty_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    assert_eq!(count_dir_entries(&dir), 0);
+    let path = dir.clone();
+    let count =
+        crate::engine::blocking::run_cancellable(move |cancel| count_dir_entries(&path, &cancel))
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn count_dir_with_files() {
+#[tokio::test]
+async fn count_dir_with_files() {
     let dir = std::env::temp_dir().join(format!("zs_files_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), b"a").unwrap();
     std::fs::write(dir.join("b.txt"), b"b").unwrap();
-    assert_eq!(count_dir_entries(&dir), 2);
+    let path = dir.clone();
+    let count =
+        crate::engine::blocking::run_cancellable(move |cancel| count_dir_entries(&path, &cancel))
+            .await
+            .unwrap();
+    assert_eq!(count, 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[test]
-fn count_nonexistent_dir() {
+#[tokio::test]
+async fn count_nonexistent_dir() {
     assert_eq!(
-        count_dir_entries(std::path::Path::new("/nonexistent_xyz_test")),
+        crate::engine::blocking::run_cancellable(|cancel| count_dir_entries(
+            std::path::Path::new("/nonexistent_xyz_test"),
+            &cancel
+        ))
+        .await
+        .unwrap(),
         0
     );
 }

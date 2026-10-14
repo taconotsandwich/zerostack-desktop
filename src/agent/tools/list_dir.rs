@@ -22,10 +22,18 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
-pub(crate) fn count_dir_entries(path: &Path) -> u64 {
-    std::fs::read_dir(path)
-        .map(|rd| rd.count() as u64)
-        .unwrap_or(0)
+pub(crate) fn count_dir_entries(
+    path: &Path,
+    cancel: &crate::engine::blocking::Cancellation,
+) -> std::io::Result<u64> {
+    let mut count = 0;
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for _ in entries {
+            cancel.check()?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 pub struct ListDirTool {
@@ -79,112 +87,122 @@ impl Tool for ListDirTool {
         tracing::debug!("tool list_dir start: path={}", path);
         let coaching = check_perm_path(&self.permission, &self.ask_tx, "list_dir", &path).await?;
 
-        let walker = WalkBuilder::new(&path)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
-            .require_git(false)
-            .hidden(false)
-            .max_depth(Some(1))
-            .filter_entry(|entry| {
-                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
-                } else {
-                    true
+        let max_entries = self.max_entries;
+        crate::engine::blocking::run_cancellable(move |cancel| {
+            let scan_cancel = cancel.clone();
+            let walker = WalkBuilder::new(&path)
+                .git_ignore(true)
+                .git_global(true)
+                .git_exclude(true)
+                .require_git(false)
+                .hidden(false)
+                .max_depth(Some(1))
+                .filter_entry(move |entry| {
+                    if scan_cancel.is_cancelled() {
+                        return false;
+                    }
+                    if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                        !is_skip_dir(entry.file_name().to_str().unwrap_or(""))
+                    } else {
+                        true
+                    }
+                })
+                .build();
+
+            let mut entries: Vec<(String, String, String)> = Vec::new();
+
+            for result in walker {
+                cancel.check()?;
+                let entry = match result {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                if entry.depth() == 0 {
+                    continue;
                 }
-            })
-            .build();
 
-        let mut entries: Vec<(String, String, String)> = Vec::new();
+                let meta = match entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
 
-        for result in walker {
-            let entry = match result {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+                let kind = if meta.is_dir() {
+                    let count = count_dir_entries(entry.path(), &cancel)?;
+                    format!("dir({})", count)
+                } else if meta.is_symlink() {
+                    "link".to_string()
+                } else {
+                    "file".to_string()
+                };
 
-            let name = entry.file_name().to_string_lossy().to_string();
+                let size = if meta.is_file() {
+                    format_size(meta.len())
+                } else {
+                    String::new()
+                };
 
-            if entry.depth() == 0 {
-                continue;
+                entries.push((name, kind, size));
             }
 
-            let meta = match entry.metadata() {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            let kind = if meta.is_dir() {
-                let count = count_dir_entries(entry.path());
-                format!("dir({})", count)
-            } else if meta.is_symlink() {
-                "link".to_string()
-            } else {
-                "file".to_string()
-            };
-
-            let size = if meta.is_file() {
-                format_size(meta.len())
-            } else {
-                String::new()
-            };
-
-            entries.push((name, kind, size));
-        }
-
-        entries.sort_by(|a, b| {
-            let a_is_dir = a.1.starts_with("dir") || a.1 == "link";
-            let b_is_dir = b.1.starts_with("dir") || b.1 == "link";
-            if a_is_dir != b_is_dir {
-                b_is_dir.cmp(&a_is_dir)
-            } else {
-                a.0.cmp(&b.0)
-            }
-        });
-
-        if entries.is_empty() {
-            let msg = format!("Listing {}:\n(empty directory)", path);
-            return Ok(match coaching {
-                Some(c) => format!("{}\n\n{}", c, msg),
-                None => msg,
+            entries.sort_by(|a, b| {
+                let a_is_dir = a.1.starts_with("dir") || a.1 == "link";
+                let b_is_dir = b.1.starts_with("dir") || b.1 == "link";
+                if a_is_dir != b_is_dir {
+                    b_is_dir.cmp(&a_is_dir)
+                } else {
+                    a.0.cmp(&b.0)
+                }
             });
-        }
 
-        let total_entries = entries.len();
-        let cap = self.max_entries.map(|c| c as usize);
-        let shown = cap.map(|c| total_entries.min(c)).unwrap_or(total_entries);
-        let max_name = entries[..shown]
-            .iter()
-            .map(|e| e.0.len())
-            .max()
-            .unwrap_or(0);
-        let mut result = format!("Listing {}:\n", path);
-        for (name, kind, size) in &entries[..shown] {
-            let padded = format!("{:width$}", name, width = max_name);
-            let size_str = if size.is_empty() {
-                String::new()
-            } else {
-                format!("  {}", size)
-            };
-            result.push_str(&format!("  [{}]  {}{}\n", kind, padded, size_str));
-        }
-        if let Some(cap) = cap
-            && total_entries > cap
-        {
-            result.push_str(&format!(
-                "\n[truncated after {} entries — {} more; list a subdirectory or use find_files with a narrower pattern]",
-                cap,
-                total_entries - cap,
-            ));
-        }
-        tracing::debug!(
-            "tool list_dir done: path={}, entries={}",
-            path,
-            total_entries,
-        );
-        if let Some(msg) = coaching {
-            result = format!("{}\n\n{}", msg, result);
-        }
-        Ok(result)
+            if entries.is_empty() {
+                let msg = format!("Listing {}:\n(empty directory)", path);
+                return Ok(match coaching {
+                    Some(c) => format!("{}\n\n{}", c, msg),
+                    None => msg,
+                });
+            }
+
+            let total_entries = entries.len();
+            let cap = max_entries.map(|c| c as usize);
+            let shown = cap.map(|c| total_entries.min(c)).unwrap_or(total_entries);
+            let max_name = entries[..shown]
+                .iter()
+                .map(|e| e.0.len())
+                .max()
+                .unwrap_or(0);
+            let mut result = format!("Listing {}:\n", path);
+            for (name, kind, size) in &entries[..shown] {
+                let padded = format!("{:width$}", name, width = max_name);
+                let size_str = if size.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {}", size)
+                };
+                result.push_str(&format!("  [{}]  {}{}\n", kind, padded, size_str));
+            }
+            if let Some(cap) = cap
+                && total_entries > cap
+            {
+                result.push_str(&format!(
+                    "\n[truncated after {} entries — {} more; list a subdirectory or use find_files with a narrower pattern]",
+                    cap,
+                    total_entries - cap,
+                ));
+            }
+            tracing::debug!(
+                "tool list_dir done: path={}, entries={}",
+                path,
+                total_entries,
+            );
+            if let Some(msg) = coaching {
+                result = format!("{}\n\n{}", msg, result);
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(Into::into)
     }
 }
