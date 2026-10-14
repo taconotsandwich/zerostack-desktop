@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::Task;
-use iced::widget::{markdown, operation, text_editor};
+use iced::widget::{operation, text_editor};
 
 use super::app::{App, Message};
 use super::live::LiveTurn;
@@ -157,16 +157,8 @@ impl App {
         self.command_output.clear();
         self.expanded.clear();
         self.expanded_rows.clear();
-        self.markdown = snapshot
-            .session
-            .messages
-            .iter()
-            .map(|message| markdown::Content::parse(message.content.as_str()))
-            .collect();
-        self.activity = super::activity::history(
-            &snapshot.session.messages,
-            std::path::Path::new(&self.project),
-        );
+        self.history_page = 0;
+        self.cache_history(&snapshot.session.messages);
         self.content = text_editor::Content::with_text(
             self.preferences
                 .drafts

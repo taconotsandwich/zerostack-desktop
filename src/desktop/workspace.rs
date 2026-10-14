@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use iced::widget::{column, container, row, scrollable, text};
 use iced::{Center, Element, Fill, Task};
 
-use super::app::{App, Message, Panel};
+use super::app::{App, Message};
 use super::components::{self, icon_button};
 use super::style::Icon;
 use super::worker::{self, Worker};

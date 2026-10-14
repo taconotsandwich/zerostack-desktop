@@ -27,9 +27,11 @@ pub(super) struct App {
     /// new one).
     pub switching: Option<(Arc<Snapshot>, Option<String>)>,
     pub content: text_editor::Content,
-    pub markdown: Vec<markdown::Content>,
+    pub history_page: usize,
+    pub history_range: std::ops::Range<usize>,
+    pub markdown: std::collections::HashMap<usize, markdown::Content>,
     /// Tool rows of each saved tool group, aligned with the messages.
-    pub activity: Vec<Vec<super::activity::Activity>>,
+    pub activity: std::collections::HashMap<usize, Vec<super::activity::Activity>>,
     pub busy: bool,
     pub error: String,
     pub status: String,
@@ -152,6 +154,7 @@ pub(super) enum Message {
     Completed(u64, worker::Reply),
     Scrolled(bool),
     Latest,
+    HistoryPage(usize),
     ToggleLive(usize),
     ToggleLiveRow(usize, usize),
     ToggleReasoningDetails,
@@ -200,8 +203,10 @@ impl App {
                 cli,
                 snapshot: None,
                 content: text_editor::Content::new(),
-                markdown: Vec::new(),
-                activity: Vec::new(),
+                history_page: 0,
+                history_range: 0..0,
+                markdown: std::collections::HashMap::new(),
+                activity: std::collections::HashMap::new(),
                 busy: !pick_project && !first_start,
                 error: String::new(),
                 status: if pick_project || first_start {
@@ -522,16 +527,10 @@ impl App {
                                 }
                             }
                         }
-                        self.markdown = snapshot
-                            .session
-                            .messages
-                            .iter()
-                            .map(|message| markdown::Content::parse(message.content.as_str()))
-                            .collect();
-                        self.activity = super::activity::history(
-                            &snapshot.session.messages,
-                            std::path::Path::new(&self.project),
-                        );
+                        if changed_session || pending.as_ref().is_some_and(Operation::is_textual) {
+                            self.history_page = 0;
+                        }
+                        self.cache_history(&snapshot.session.messages);
                         if !snapshot.notices.is_empty() {
                             self.command_output = snapshot.notices.join("\n");
                             scroll = true;
@@ -711,7 +710,22 @@ impl App {
             }
             Message::Deny => return self.answer_permission(UserDecision::Deny),
             Message::Scrolled(at_bottom) => self.follow_output = at_bottom,
+            Message::HistoryPage(page) => {
+                self.history_page = page;
+                if let Some(snapshot) = self.snapshot.clone() {
+                    self.cache_history(&snapshot.session.messages);
+                }
+                self.follow_output = page == 0;
+                return operation::snap_to(
+                    super::scroll::CONVERSATION,
+                    iced::widget::scrollable::RelativeOffset::START,
+                );
+            }
             Message::Latest => {
+                self.history_page = 0;
+                if let Some(snapshot) = self.snapshot.clone() {
+                    self.cache_history(&snapshot.session.messages);
+                }
                 self.follow_output = true;
                 return operation::snap_to_end(super::scroll::CONVERSATION);
             }
