@@ -234,6 +234,7 @@ pub(super) async fn handle_set_config_option(
     )))
 }
 
+#[cfg(any(feature = "subagents", feature = "advisor"))]
 fn role_option(
     engine: &Engine,
     role: crate::engine::models::AgentRole,

@@ -234,7 +234,7 @@ impl Engine {
             .unwrap_or_else(|e| e.into_inner()) = limit;
     }
 
-    #[cfg(feature = "acp")]
+    #[cfg(all(feature = "acp", feature = "mcp"))]
     pub(crate) fn resource_context(&self) -> std::sync::Arc<resources::Resources> {
         self.resources.clone()
     }
@@ -634,6 +634,7 @@ impl Engine {
         let owner = self.resources.clone();
         owner
             .scope(async {
+                #[cfg(any(feature = "subagents", feature = "advisor"))]
                 let choice = models::resolve_model_choice(
                     &self.cfg,
                     &self.session.provider,
@@ -645,6 +646,7 @@ impl Engine {
                     models::AgentRole::Subagent => {
                         models::select_subagent(&self.cli, &self.cfg, &choice)?;
                         self.cfg.subagent_model = Some(selection.into());
+                        Ok(())
                     }
                     #[cfg(feature = "advisor")]
                     models::AgentRole::Advisor => {
@@ -659,10 +661,10 @@ impl Engine {
                         settings.advisor_model = choice.key.id;
                         crate::extras::advisor::init_config(settings);
                         self.cfg.advisor.get_or_insert_default().model = Some(selection.into());
+                        Ok(())
                     }
                     _ => anyhow::bail!("This agent role is unavailable in this build"),
                 }
-                Ok(())
             })
             .await
     }
