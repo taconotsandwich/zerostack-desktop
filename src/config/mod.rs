@@ -52,6 +52,9 @@ pub struct Config {
     pub keep_recent_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_agent_turns: Option<usize>,
+    /// Maximum simultaneous tool calls per agent run. Defaults to one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_concurrency: Option<std::num::NonZeroUsize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_text_file_size: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -50,6 +50,20 @@ Standalone CLI bootstrap helpers retain a fallback resource context.
 
 ## Cancellation and shutdown
 
+Tool entry points return futures. Each engine owns a `tool_concurrency`
+limit: one by default, or a positive integer from configuration. The typed
+`Engine::set_tool_concurrency(NonZeroUsize)` operation changes the limit for
+subsequent runs without rebuilding the agent. Main, headless and subagent
+runners pass this limit to Rig's tool scheduler. It bounds each agent's
+tool-call batch, not the total number of agents or the worker-pool size.
+Subagents inherit their owner's setting when they start a run.
+
+At one, tool calls execute in model call order. Higher limits allow all tool
+types, including shell, write and MCP calls, to overlap. Use one when side
+effects must be ordered. Rig retains model call order in committed history
+and delivers tool results after the batch completes; the concurrency setting
+does not make results stream individually as tools finish.
+
 Hook permission overrides are scoped to the individual tool-call future.
 Concurrent calls cannot consume each other's one-shot allow/ask decisions,
 and cancellation discards any unused decision. Explicit deny rules still win.
