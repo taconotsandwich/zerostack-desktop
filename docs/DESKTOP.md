@@ -36,3 +36,11 @@ pasting continues to work. Clipboard images are stored as private PNGs under
 `<data>/attachments` so saved session references survive restart. Images are
 limited to 16 megapixels on paste; previews decode at most 128 MiB and resize to
 1024 pixels. Attachment imports finish only in the conversation that started them.
+
+## Review
+
+Changes uses the engine's structured Git snapshot. Switch between Staged and
+Unstaged, choose a file, and inspect colored hunks with old and new line numbers.
+Click a line number to compose feedback, then Add to message to place it in the
+draft for review before sending. Deleted lines retain their old-line location.
+Binary files have an explicit notice; previews show at most 400 lines.
