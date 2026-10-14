@@ -152,3 +152,8 @@ closes remaining running records when the parent turn terminates.
 independently. Unsupported roles return an error. ACP exposes `model`,
 `subagent_model` and `advisor_model` options for the compiled roles. Role changes
 apply to subsequent calls in that session; they do not retarget active tasks.
+
+Git snapshots fingerprint changed working files as well as HEAD and the index.
+Mutations reject intervening content changes, including same-length edits whose
+porcelain status is unchanged. This is a preflight check, not a transactional
+lock against unrelated external editors between validation and Git execution.

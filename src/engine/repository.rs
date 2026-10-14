@@ -81,6 +81,7 @@ pub struct Snapshot {
     pub changes: Vec<Change>,
     /// Raw staged object IDs and paths, used to reject stale mutations.
     pub index: Vec<u8>,
+    worktree_contents: Vec<Option<u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -168,7 +169,15 @@ impl Repository {
             .run(&["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
             .await?;
         let worktrees = self.run(&["worktree", "list", "--porcelain", "-z"]).await?;
+        let changes = parse_status(&status)?;
+        let worktree_contents = tokio::time::timeout(
+            Duration::from_secs(60),
+            fingerprint_changes(&self.root, &changes),
+        )
+        .await
+        .map_err(|_| GitError::Timeout)??;
         Ok(Snapshot {
+            worktree_contents,
             repository: self.clone(),
             head: self.head().await?,
             branch: self
@@ -181,7 +190,7 @@ impl Repository {
                 .map(String::from)
                 .collect(),
             worktrees: parse_worktrees(&worktrees)?,
-            changes: parse_status(&status)?,
+            changes,
             index: self.index_state().await?,
         })
     }
@@ -327,9 +336,12 @@ impl Repository {
         if current.head != expected.head
             || current.branch != expected.branch
             || current.index != expected.index
+            || current.changes != expected.changes
+            || current.worktree_contents != expected.worktree_contents
         {
             return Err(GitError::Invalid(
-                "The branch or staged changes changed since refresh. Review them again.".into(),
+                "The branch, index, or working files changed since refresh. Review them again."
+                    .into(),
             ));
         }
         let mut outcome = MutationOutcome {
@@ -445,6 +457,50 @@ impl Repository {
         )
         .await
     }
+}
+
+/// Fingerprints are used only to detect intervening edits, never as object IDs.
+async fn fingerprint_changes(
+    root: &Path,
+    changes: &[Change],
+) -> Result<Vec<Option<u64>>, GitError> {
+    use std::hash::{Hash, Hasher};
+    let mut values = Vec::with_capacity(changes.len());
+    for change in changes {
+        validate_path(&change.path)?;
+        let path = root.join(&change.path);
+        let metadata = match tokio::fs::symlink_metadata(&path).await {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                values.push(None);
+                continue;
+            }
+            Err(error) => return Err(io_error(error)),
+        };
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        metadata.permissions().readonly().hash(&mut hash);
+        if metadata.file_type().is_symlink() {
+            tokio::fs::read_link(&path)
+                .await
+                .map_err(io_error)?
+                .hash(&mut hash);
+        } else if metadata.is_file() {
+            let mut file = tokio::fs::File::open(&path).await.map_err(io_error)?;
+            let mut buffer = vec![0; 64 * 1024];
+            loop {
+                let count = file.read(&mut buffer).await.map_err(io_error)?;
+                if count == 0 {
+                    break;
+                }
+                hash.write(&buffer[..count]);
+            }
+        } else {
+            metadata.modified().ok().hash(&mut hash);
+            metadata.len().hash(&mut hash);
+        }
+        values.push(Some(hash.finish()));
+    }
+    Ok(values)
 }
 
 fn io_error(error: std::io::Error) -> GitError {
@@ -788,6 +844,18 @@ mod tests {
         .await
         .unwrap();
         tokio::fs::write(f.0.join(&path), "second\n").await.unwrap();
+        let reviewed = repo.snapshot().await.unwrap();
+        // Same length and Git status: content changes alone must invalidate review.
+        tokio::fs::write(f.0.join(&path), "third!\n").await.unwrap();
+        assert!(
+            repo.apply(&reviewed, Mutation::Restore(vec![path.clone()]))
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(f.0.join(&path)).await.unwrap(),
+            "third!\n"
+        );
         repo.apply(
             &repo.snapshot().await.unwrap(),
             Mutation::Restore(vec![path.clone()]),
