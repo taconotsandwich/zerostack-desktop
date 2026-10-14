@@ -287,6 +287,10 @@ impl App {
         self.turn_id = self.turns;
         let turn_id = self.turn_id;
         if matches!(operation, Operation::Prompt(_)) {
+            self.history_page = 0;
+            if let Some(snapshot) = self.snapshot.clone() {
+                self.cache_history(&snapshot.session.messages);
+            }
             self.follow_output = true;
             if submitted_is_unchanged(self.submitted.as_deref(), &self.content.text()) {
                 self.content = text_editor::Content::new();
@@ -771,7 +775,9 @@ impl App {
                 self.permission_scope_open = !self.permission_scope_open
             }
             Message::Deny => return self.answer_permission(UserDecision::Deny),
-            Message::Scrolled(at_bottom) => self.follow_output = at_bottom,
+            Message::Scrolled(at_bottom) => {
+                self.follow_output = at_bottom && self.history_page == 0
+            }
             Message::HistoryPage(page) => {
                 self.history_page = page;
                 if let Some(snapshot) = self.snapshot.clone() {
