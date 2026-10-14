@@ -52,3 +52,11 @@ without splitting tool groups; Latest returns to the live turn. Markdown and
 tool details are prepared only for the visible page. Session history remains
 complete for the engine and export. The `transcript_parse_work` test compares
 full-history and visible-page preparation on a 10,000-message fixture.
+
+## Branches and worktrees
+
+The branch control in Changes lists local branches and linked worktrees. Switch
+to a branch, open an existing worktree, or create a branch and a new worktree at
+an absolute path. Branch switching requires a clean checkout. Git writes wait
+until foreground and background tasks finish and reject changed HEAD/index state.
+New worktrees open as a separate project with a new conversation.

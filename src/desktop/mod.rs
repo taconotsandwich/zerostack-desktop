@@ -8,6 +8,7 @@ mod backend;
 mod bubble;
 mod commands;
 mod components;
+mod git_workspace;
 mod history;
 mod history_window;
 mod layout;

@@ -55,7 +55,7 @@ impl App {
 
     /// Another conversation can be opened now.
     pub(super) fn can_switch(&self) -> bool {
-        !self.busy || self.turn_running()
+        !self.review.mutating && (!self.busy || self.turn_running())
     }
 
     pub(super) fn running(&self, id: &str) -> Option<&Running> {
