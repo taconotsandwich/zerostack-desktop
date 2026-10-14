@@ -56,6 +56,10 @@ async fn new_session_lists_the_settings() {
             "prompt",
             "edit_system",
             "reasoning",
+            #[cfg(feature = "subagents")]
+            "subagent_model",
+            #[cfg(feature = "advisor")]
+            "advisor_model",
             "mode"
         ]
     );
@@ -143,4 +147,31 @@ async fn invalid_settings_are_rejected() {
         .await
         .unwrap_err();
     assert_eq!(error["code"], -32602, "{error}");
+}
+
+#[cfg(all(feature = "subagents", feature = "advisor"))]
+#[tokio::test]
+async fn role_options_change_only_the_selected_role() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let _data = isolate_data_dirs();
+    let (mut peer, session, original) = start(guarded()).await;
+    for id in ["subagent_model", "advisor_model"] {
+        let response = set(
+            &mut peer,
+            &session,
+            id,
+            json!("anthropic::independent-role"),
+        )
+        .await
+        .unwrap();
+        let options = &response["configOptions"];
+        assert_eq!(
+            option(options, id)["currentValue"],
+            "anthropic::independent-role"
+        );
+        assert_eq!(
+            option(options, "model")["currentValue"],
+            option(&original, "model")["currentValue"]
+        );
+    }
 }
