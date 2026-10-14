@@ -15,6 +15,7 @@ use crate::engine::RunKind;
 use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
+    pub thumbnails: std::collections::HashMap<PathBuf, iced::widget::image::Handle>,
     pub models: super::models::Models,
     pub setup: super::setup::Setup,
     pub worker: Option<Worker>,
@@ -79,6 +80,7 @@ pub(super) struct App {
 
 #[derive(Debug, Clone)]
 pub(super) enum Panel {
+    Attachment(PathBuf),
     Models,
     ProviderSetup,
     Context,
@@ -92,6 +94,7 @@ pub(super) enum Panel {
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
+    Attachment(super::attachments::Event),
     Models(super::models::Event),
     Setup(super::setup::Event),
     Ready(worker::Reply),
@@ -184,6 +187,7 @@ impl App {
         };
         (
             Self {
+                thumbnails: std::collections::HashMap::new(),
                 models: super::models::Models::default(),
                 setup,
                 worker,
@@ -349,6 +353,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Attachment(event) => return self.update_attachment(event),
             Message::Models(event) => return self.update_models(event),
             Message::Setup(event) => return self.update_setup(event),
             Message::Completed(id, reply) if id == self.turn_id => {
@@ -1001,7 +1006,7 @@ impl App {
                     if self.busy {
                         self.error = "Attach files after the current turn finishes.".into();
                     } else {
-                        return self.dispatch(Operation::AddContextFiles(paths));
+                        return self.prepare_attachments(paths);
                     }
                 }
             }
@@ -1063,6 +1068,9 @@ impl App {
                         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
                         keyboard::Key::Named(keyboard::key::Named::F2) => {
                             Some(Message::RenameSelected)
+                        }
+                        keyboard::Key::Character("v") if modifiers.command() => {
+                            Some(Message::Attachment(super::attachments::Event::Paste(true)))
                         }
                         keyboard::Key::Character("k") if modifiers.command() => {
                             Some(Message::Commands)

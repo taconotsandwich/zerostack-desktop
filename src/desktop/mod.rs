@@ -3,6 +3,7 @@ mod activity;
 mod activity_view;
 mod app;
 mod approval;
+mod attachments;
 mod backend;
 mod bubble;
 mod commands;

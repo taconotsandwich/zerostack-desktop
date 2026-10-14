@@ -115,10 +115,26 @@ impl App {
                     .unwrap_or(path.as_os_str())
                     .to_string_lossy()
                     .into_owned();
+                if let Some(handle) = self.thumbnails.get(path) {
+                    items = items.push(
+                        iced::widget::button(
+                            iced::widget::image(handle.clone()).height(48).width(64),
+                        )
+                        .style(style::flat)
+                        .on_press(Message::Attachment(
+                            super::attachments::Event::Preview(path.to_path_buf()),
+                        )),
+                    );
+                }
                 items = items.push(
                     container(
                         row![
-                            components::action(label, Some(Message::Show(Panel::Context))),
+                            components::action(
+                                label,
+                                Some(Message::Attachment(super::attachments::Event::Preview(
+                                    path.to_path_buf()
+                                )))
+                            ),
                             icon_button(
                                 Icon::Close,
                                 "Remove attachment",
