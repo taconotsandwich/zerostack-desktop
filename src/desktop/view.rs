@@ -47,6 +47,10 @@ impl App {
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
             text(title).size(style::LABEL).width(Fill),
+            components::action(
+                format!("Tasks · {}", self.running.len() + usize::from(self.busy)),
+                Some(Message::Tasks(super::tasks::Event::Open))
+            ),
             icon_button(
                 Icon::Changes,
                 "Changes",

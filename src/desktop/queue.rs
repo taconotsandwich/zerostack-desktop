@@ -120,6 +120,15 @@ impl App {
                     .take(),
             );
         }
+        for request in self.waiting_permissions.drain(..) {
+            drop(
+                request
+                    .reply
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take(),
+            );
+        }
         self.queue_paused = true;
         self.persist_pending_queue();
     }

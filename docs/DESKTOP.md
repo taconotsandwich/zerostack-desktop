@@ -77,3 +77,13 @@ and Stop pause the queue. After restart, interrupted input returns to the front
 of a paused queue; inspect or edit it, then Resume explicitly. No prompt is
 automatically replayed on launch. Repeating an interrupted prompt may repeat
 its earlier file or tool effects, so review those effects before resuming.
+
+## Tasks and notifications
+
+Tasks lists foreground/background work, queued input, permission requests,
+subagent lifecycle records, and the latest 100 durable runs. Select a task to
+return to its conversation or stop it from this panel. Interrupted queues require
+explicit resume. Parallel permission requests wait in order instead of replacing
+one another. Completion and approval updates appear in the panel. Opt in to
+desktop attention to request the platform's taskbar/dock attention indicator;
+this does not steal focus or require a notification service.

@@ -318,8 +318,9 @@ impl App {
         .height(layout::HEADER_HEIGHT);
         let mut pane = column![header].spacing(layout::SM);
         if let Some(snapshot) = &self.review.repository {
-            pane = pane.push(self.workspace_controls(snapshot));
-            pane = pane.push(
+            let mut controls = column![].spacing(layout::SM);
+            controls = controls.push(self.workspace_controls(snapshot));
+            controls = controls.push(
                 row![
                     components::action(
                         if self.review.scope == DiffScope::Unstaged {
@@ -370,8 +371,11 @@ impl App {
             if snapshot.changes.is_empty() {
                 files = files.push(text("No local changes").size(style::LABEL));
             }
-            pane = pane.push(container(scrollable(files)).max_height(160));
-            pane = pane.push(self.staging_controls(snapshot));
+            controls = controls.push(container(scrollable(files)).max_height(160));
+            controls = controls.push(self.staging_controls(snapshot));
+            pane = pane.push(
+                container(scrollable(controls)).max_height((self.size.height * 0.5).max(180.0)),
+            );
         }
         if self.review.mutating {
             pane = pane.push(text("Applying Git operation…").size(style::CAPTION));

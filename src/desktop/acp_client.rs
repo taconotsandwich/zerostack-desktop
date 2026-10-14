@@ -162,6 +162,11 @@ pub(super) fn agent_event(update: SessionUpdate) -> Option<AgentEvent> {
             ContentBlock::Text(text) => Some(AgentEvent::Reasoning(text.text.into())),
             _ => None,
         },
+        SessionUpdate::ToolCall(call) if call.name.as_deref() == Some("zerostack.subagent") => {
+            serde_json::from_value(call.raw_input?)
+                .ok()
+                .map(AgentEvent::SubagentProgress)
+        }
         SessionUpdate::ToolCall(call) => {
             let name = call.name.clone().unwrap_or_else(|| title_tool(&call.title));
             let args = call.raw_input.unwrap_or(serde_json::Value::Null);
@@ -177,6 +182,13 @@ pub(super) fn agent_event(update: SessionUpdate) -> Option<AgentEvent> {
                 name: name.into(),
                 args,
             })
+        }
+        SessionUpdate::ToolCallUpdate(update)
+            if update.fields.name.as_deref() == Some("zerostack.subagent") =>
+        {
+            serde_json::from_value(update.fields.raw_output?)
+                .ok()
+                .map(AgentEvent::SubagentProgress)
         }
         SessionUpdate::ToolCallUpdate(update) => {
             let failed = match update.fields.status? {
@@ -558,3 +570,38 @@ fn login_url(text: &str) -> Option<String> {
 #[cfg(test)]
 #[path = "acp_client_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    use crate::event::{SubagentProgress, SubagentState};
+    #[test]
+    fn lifecycle_metadata_round_trips_without_becoming_tool_activity() {
+        let mut progress = SubagentProgress {
+            id: "child-a".into(),
+            batch_id: "batch".into(),
+            title: "Inspect".into(),
+            state: SubagentState::Running,
+            detail: None,
+        };
+        let start = SessionUpdate::ToolCall(
+            ToolCall::new("subagent:child-a", "Inspect")
+                .name("zerostack.subagent")
+                .raw_input(Some(serde_json::to_value(&progress).unwrap())),
+        );
+        assert!(
+            matches!(agent_event(start),Some(AgentEvent::SubagentProgress(p)) if p.id == "child-a" && p.state == SubagentState::Running)
+        );
+        progress.state = SubagentState::Cancelled;
+        let end = SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            "subagent:child-a",
+            ToolCallUpdateFields::new()
+                .name("zerostack.subagent")
+                .status(ToolCallStatus::Failed)
+                .raw_output(serde_json::to_value(progress).unwrap()),
+        ));
+        assert!(
+            matches!(agent_event(end),Some(AgentEvent::SubagentProgress(p)) if p.id == "child-a" && p.state == SubagentState::Cancelled)
+        );
+    }
+}

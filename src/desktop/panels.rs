@@ -8,6 +8,7 @@ use super::{commands, components, layout, style};
 impl App {
     pub fn panel_view<'a>(&'a self, panel: &'a Panel) -> Element<'a, Message> {
         let title = match panel {
+            Panel::Tasks => "Tasks",
             Panel::Attachment(_) => "Attachment",
             Panel::Models => "Models",
             Panel::ProviderSetup => "Provider setup",
@@ -25,9 +26,10 @@ impl App {
         };
         let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
-            Panel::Attachment(path) => return self.attachment_view(path),
-            Panel::Models => return self.models_view(),
-            Panel::ProviderSetup => return self.setup_view(),
+            Panel::Tasks => content = content.push(self.tasks_view()),
+            Panel::Attachment(path) => content = content.push(self.attachment_view(path)),
+            Panel::Models => content = content.push(self.models_view()),
+            Panel::ProviderSetup => content = content.push(self.setup_view()),
             Panel::Projects => content = content.push(self.project_picker()),
             Panel::Context => {
                 if let Some(snapshot) = &self.snapshot {
