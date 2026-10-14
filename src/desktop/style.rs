@@ -2,10 +2,12 @@ use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor
 use iced::{Border, Color, Theme};
 
 // Typography roles are shared by labels, fields, buttons, and message bodies.
-pub(super) const CAPTION: f32 = 12.0;
+pub(super) const CAPTION: f32 = 13.0;
 pub(super) const LABEL: f32 = 14.0;
 pub(super) const BODY: f32 = 16.0;
 pub(super) const TITLE: f32 = 18.0;
+pub(super) const GREETING: f32 = 28.0;
+pub(super) const BODY_LINE_HEIGHT: f32 = 1.5;
 pub(super) const CONTROL_LINE: f32 = 20.0;
 pub(super) const ICON_SIZE: f32 = 18.0;
 pub(super) const CONTROL_RADIUS: f32 = 8.0;

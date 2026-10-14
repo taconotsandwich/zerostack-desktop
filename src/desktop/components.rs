@@ -1,9 +1,47 @@
-use iced::widget::{button, container, pick_list, row, space, text, text_input, tooltip};
+use iced::widget::{
+    button, container, markdown, pick_list, rich_text, row, space, text, text_input, tooltip,
+};
 use iced::{Center, Element, Fill, Length};
 
 use super::app::Message;
 use super::layout::{self, Layout};
 use super::style::{self, Icon};
+
+/// Saved and streaming responses share the same reading rhythm.
+pub(super) fn prose<'a>(
+    items: impl IntoIterator<Item = &'a markdown::Item>,
+) -> Element<'a, Message> {
+    let settings = markdown::Settings {
+        h1_size: 26.0.into(),
+        h2_size: 22.0.into(),
+        h3_size: 19.0.into(),
+        h4_size: style::TITLE.into(),
+        code_size: style::LABEL.into(),
+        spacing: layout::MD.into(),
+        ..markdown::Settings::with_text_size(style::BODY, style::theme())
+    };
+    markdown::view_with(items, settings, &Prose)
+}
+
+struct Prose;
+
+impl<'a> markdown::Viewer<'a, Message> for Prose {
+    fn on_link_click(url: markdown::Uri) -> Message {
+        Message::Link(url)
+    }
+
+    fn paragraph(
+        &self,
+        settings: markdown::Settings,
+        content: &markdown::Text,
+    ) -> Element<'a, Message> {
+        rich_text(content.spans(settings.style))
+            .size(settings.text_size)
+            .line_height(style::BODY_LINE_HEIGHT)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+}
 
 pub(super) fn icon_target<'a>(
     content: impl Into<Element<'a, Message>>,
@@ -61,6 +99,64 @@ pub(super) fn action<'a>(
         .on_press_maybe(message.clone())
         .style(style::flat);
     super::controls::Action::new(control, label, message)
+}
+
+/// A single-line name that yields space to adjacent controls. The complete
+/// value stays available on hover/focus instead of wrapping the toolbar.
+pub(super) fn selector<'a>(
+    label: &'a str,
+    max_width: f32,
+    message: Option<Message>,
+) -> Element<'a, Message> {
+    let control = button(
+        row![
+            container(
+                text(label)
+                    .size(style::LABEL)
+                    .color(style::INK)
+                    .wrapping(text::Wrapping::None)
+            )
+            .max_width((max_width - 3.0 * layout::SM - style::CAPTION).max(0.0))
+            .clip(true),
+            style::chevron(true)
+        ]
+        .spacing(layout::SM)
+        .align_y(Center),
+    )
+    .height(layout::CONTROL_HEIGHT)
+    .padding([layout::SM, layout::SM])
+    .on_press_maybe(message.clone())
+    .style(style::flat);
+    container(super::controls::named(
+        tooltip(
+            control,
+            text(label).size(style::CAPTION),
+            tooltip::Position::Top,
+        )
+        .padding(layout::SM)
+        .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
+        .into(),
+        label.into(),
+        message,
+        true,
+    ))
+    .width(Fill)
+    .into()
+}
+
+pub(super) fn single_line<'a>(
+    label: impl Into<std::borrow::Cow<'a, str>>,
+    size: f32,
+) -> Element<'a, Message> {
+    container(
+        text(label.into())
+            .size(size)
+            .color(style::INK)
+            .wrapping(iced::widget::text::Wrapping::None),
+    )
+    .width(Fill)
+    .clip(true)
+    .into()
 }
 
 /// An action led by an icon.

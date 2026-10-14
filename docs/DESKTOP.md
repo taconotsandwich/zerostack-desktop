@@ -13,6 +13,14 @@ for new conversations and preserves other configuration keys.
 
 ## Conversations
 
+The greeting, composer and transcript share a centered reading column. The
+project sits below the greeting; the composer groups attachment, model and
+prompt controls together, with token usage beside Send. The prompt selector opens
+a keyboard-accessible menu with full names; choosing one closes the menu. Long model names stay
+on one line and show their complete value on hover or keyboard focus. Response
+paragraphs use more line spacing, and code remains large enough to read beside
+body text. Saved and streaming responses use the same typography.
+
 Search matches titles, project paths and saved message text across projects.
 The row menu can pin conversations to the top of their project or archive them.
 The filter icon beside search switches between Active and Archived. An Archived
@@ -28,6 +36,10 @@ the context and pricing details, then Use model. Custom model… reveals provide
 and model-ID fields. The star beside Use model reveals the favorite-name field;
 Save names that selection for later use, replacing the `/models-add` form. Advisor availability still follows its enabled setting.
 Role changes affect subsequent calls in the current session.
+Model choices put the name above the provider, with the selection marker at the
+right. The current model appears separately above the search field. The header
+and action buttons remain visible while the body scrolls in short windows,
+including when the favorite-name field is open.
 
 ## Attachments
 

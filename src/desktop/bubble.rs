@@ -17,11 +17,18 @@ pub(super) fn user(content: &str) -> Element<'_, Message> {
                 color: style::LIFTED,
                 ..rule::default(theme)
             }),
-            text(quote).size(style::LABEL).color(style::MUTED),
+            text(quote)
+                .size(style::LABEL)
+                .line_height(style::BODY_LINE_HEIGHT)
+                .color(style::MUTED),
         ]
         .spacing(layout::SM)
         .into(),
-        Part::Text(body) => text(body).size(style::BODY).color(color).into(),
+        Part::Text(body) => text(body)
+            .size(style::BODY)
+            .line_height(style::BODY_LINE_HEIGHT)
+            .color(color)
+            .into(),
     });
     container(
         container(column(parts).spacing(layout::MD))

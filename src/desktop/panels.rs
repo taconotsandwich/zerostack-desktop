@@ -1,4 +1,4 @@
-use iced::widget::{column, markdown, row, text};
+use iced::widget::{column, row, text};
 use iced::{Element, Fill};
 
 use super::app::{App, Message, Panel};
@@ -15,6 +15,7 @@ impl App {
             Panel::Context => "Context",
             Panel::Attachments => "Attachments",
             Panel::ConversationFilter => "Conversations",
+            Panel::Prompts => "System prompt",
             Panel::AdvancedSettings => "Advanced settings",
             Panel::Settings => "Settings",
             Panel::Projects => "Projects",
@@ -31,7 +32,7 @@ impl App {
         match panel {
             Panel::Tasks => content = content.push(self.tasks_view()),
             Panel::Attachment(path) => content = content.push(self.attachment_view(path)),
-            Panel::Models => content = content.push(self.models_view()),
+            Panel::Models => return self.models_view(),
             Panel::ProviderSetup => content = content.push(self.setup_view()),
             Panel::Projects => content = content.push(self.project_picker()),
             Panel::Context => {
@@ -167,6 +168,25 @@ impl App {
                             .width(Fill),
                     );
             }
+            Panel::Prompts => {
+                if let Some(snapshot) = &self.snapshot {
+                    for prompt in &snapshot.prompts {
+                        let message = (!self.busy).then_some(Message::Prompt(prompt.clone()));
+                        let control = iced::widget::button(text(prompt).size(style::LABEL))
+                            .width(Fill)
+                            .padding([layout::SM, layout::MD])
+                            .on_press_maybe(message.clone())
+                            .style(move |theme, status| {
+                                style::selected_action(theme, status, *prompt == snapshot.prompt)
+                            });
+                        content = content.push(super::controls::Action::new(
+                            control,
+                            prompt.into(),
+                            message,
+                        ));
+                    }
+                }
+            }
             Panel::ConversationFilter => {
                 for (label, archived) in [
                     ("Active conversations", false),
@@ -241,13 +261,7 @@ impl App {
             }
             Panel::Document => {
                 if let Some((_, document)) = &self.document {
-                    content = content.push(
-                        markdown::view(
-                            document.items(),
-                            markdown::Settings::with_text_size(style::BODY, style::theme()),
-                        )
-                        .map(Message::Link),
-                    );
+                    content = content.push(components::prose(document.items()));
                 }
             }
             Panel::Delete { title, .. } => {

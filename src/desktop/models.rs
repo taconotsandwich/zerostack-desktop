@@ -1,7 +1,7 @@
 use super::app::{App, Message, Panel};
 use super::{components, layout, style, worker::Operation};
 use crate::engine::models::{AgentRole, ModelChoice};
-use iced::widget::{column, row, scrollable, text};
+use iced::widget::{button, column, container, row, scrollable, space, text, tooltip};
 use iced::{Element, Fill, Task};
 
 pub(super) struct Models {
@@ -199,18 +199,42 @@ impl App {
                 .selected
                 .as_ref()
                 .is_some_and(|s| s.key == choice.key);
-            choices = choices.push(
-                components::action(
-                    format!(
-                        "{}{} · {}",
-                        if selected { "✓ " } else { "" },
-                        choice.label,
-                        choice.key.provider
-                    ),
-                    Some(Message::Models(Event::Select((*choice).clone()))),
+            let label = format!("{} · {}", choice.label, choice.key.provider);
+            let message = Message::Models(Event::Select((*choice).clone()));
+            let control = button(
+                row![
+                    column![
+                        components::single_line(choice.label.as_str(), style::LABEL),
+                        text(choice.key.provider.as_str())
+                            .size(style::CAPTION)
+                            .color(style::MUTED),
+                    ]
+                    .spacing(layout::XS)
+                    .width(Fill),
+                    container(text(if selected { "✓" } else { "" }).size(style::LABEL))
+                        .width(style::ICON_SIZE),
+                ]
+                .spacing(layout::SM)
+                .align_y(iced::Center),
+            )
+            .width(Fill)
+            .height(layout::MODEL_ROW_HEIGHT)
+            .padding([layout::SM, layout::MD])
+            .on_press(message.clone())
+            .style(move |theme, status| style::selected_action(theme, status, selected));
+            choices = choices.push(super::controls::named(
+                tooltip(
+                    control,
+                    text(label.clone()).size(style::CAPTION),
+                    tooltip::Position::Top,
                 )
-                .width(Fill),
-            );
+                .padding(layout::SM)
+                .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
+                .into(),
+                label.clone().into(),
+                Some(message),
+                true,
+            ));
         }
         let current = self
             .snapshot
@@ -220,17 +244,24 @@ impl App {
             .unwrap_or("Not selected");
         let mut content = column![
             roles,
-            text(format!("{:?} · current: {current}", self.models.role)).size(style::LABEL),
-            text("Applies to subsequent calls in this conversation.").size(style::CAPTION),
+            column![
+                text("Current model")
+                    .size(style::CAPTION)
+                    .color(style::MUTED),
+                text(current)
+                    .size(style::LABEL)
+                    .line_height(style::BODY_LINE_HEIGHT),
+            ]
+            .spacing(layout::XS),
             components::field("Search models or favorites…", &self.models.query)
                 .id("model-search")
                 .on_input(|v| Message::Models(Event::Search(v))),
             iced::widget::container(scrollable(choices)).height(
-                (filtered.len().min(100) as f32 * layout::CONTROL_HEIGHT)
-                    .clamp(layout::CONTROL_HEIGHT, 220.0)
+                (filtered.len().min(100) as f32 * (layout::MODEL_ROW_HEIGHT + layout::XS))
+                    .clamp(layout::MODEL_ROW_HEIGHT, 220.0)
             ),
         ]
-        .spacing(layout::SM);
+        .spacing(layout::LG);
         if filtered.len() > 100 {
             content = content.push(
                 text(format!(
@@ -270,25 +301,27 @@ impl App {
                         .on_input(|v| Message::Models(Event::Custom(v))),
                 );
         }
-        content = content.push(
-            row![
-                components::action(
-                    "Use model",
-                    (!self.busy && self.models.can_apply())
-                        .then_some(Message::Models(Event::Apply))
-                ),
-                components::icon_button(
-                    style::Icon::Favorite,
-                    "Save as favorite",
-                    (!self.busy && self.models.can_apply())
-                        .then_some(Message::Models(Event::ToggleFavorite))
-                ),
-            ]
-            .spacing(layout::SM)
-            .align_y(iced::Center),
-        );
+        let actions = row![
+            space::horizontal(),
+            components::action(
+                "Use model",
+                (!self.busy && self.models.can_apply()).then_some(Message::Models(Event::Apply))
+            )
+            .style(button::primary),
+            components::icon_button(
+                style::Icon::Favorite,
+                "Save as favorite",
+                (!self.busy && self.models.can_apply())
+                    .then_some(Message::Models(Event::ToggleFavorite))
+            ),
+        ]
+        .spacing(layout::SM)
+        .align_y(iced::Center);
+        let mut footer = column![actions].spacing(layout::SM);
+        let mut footer_height = layout::CONTROL_HEIGHT;
         if self.models.favorite_open {
-            content = content.push(
+            footer_height += layout::CONTROL_HEIGHT + layout::SM;
+            footer = footer.push(
                 row![
                     components::field("Favorite name", &self.models.alias)
                         .id("favorite-name")
@@ -309,9 +342,24 @@ impl App {
                 .align_y(iced::Center),
             );
         }
-        content
-            .push(text(&self.models.notice).size(style::CAPTION))
-            .into()
+        if !self.models.notice.is_empty() {
+            content = content.push(text(&self.models.notice).size(style::CAPTION));
+        }
+        if !self.error.is_empty() {
+            content = content.push(
+                text(&self.error)
+                    .size(style::LABEL)
+                    .color(self.theme().palette().danger),
+            );
+        }
+        column![
+            components::panel_header("Models"),
+            container(scrollable(content).height(iced::Length::Shrink))
+                .max_height(self.layout().modal_body_height(footer_height)),
+            footer,
+        ]
+        .spacing(layout::LG)
+        .into()
     }
 }
 #[cfg(test)]

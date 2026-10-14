@@ -93,6 +93,7 @@ pub(super) enum Panel {
     Context,
     Attachments,
     ConversationFilter,
+    Prompts,
     AdvancedSettings,
     Settings,
     Form(Command),
@@ -983,6 +984,7 @@ impl App {
             }
             Message::ToggleUsage => self.usage_open = !self.usage_open,
             Message::Prompt(prompt) if !self.busy => {
+                self.panel = None;
                 return self.dispatch(Operation::SelectPrompt { prompt });
             }
             Message::Link(uri) => {

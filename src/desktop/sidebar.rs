@@ -176,7 +176,7 @@ impl App {
                 column![
                     top,
                     row![
-                        components::field("Search conversations…", &self.search)
+                        components::field("Search…", &self.search)
                             .id("conversation-search")
                             .on_input(Message::Search),
                         icon_button(

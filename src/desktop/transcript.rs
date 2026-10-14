@@ -1,7 +1,7 @@
 //! The conversation: its saved messages, the live turn and what a command
 //! printed.
 
-use iced::widget::{button, column, container, markdown, row, scrollable, space, stack, text};
+use iced::widget::{button, column, container, row, scrollable, space, stack, text};
 use iced::{Element, Fill, Font, Right};
 
 use super::app::{App, Message};
@@ -94,11 +94,7 @@ impl App {
                         );
                     }
                     MessageRole::Assistant => {
-                        let body = markdown::view(
-                            self.markdown[&index].items(),
-                            markdown::Settings::with_text_size(style::BODY, style::theme()),
-                        )
-                        .map(Message::Link);
+                        let body = components::prose(self.markdown[&index].items());
                         let mut actions = row![
                             icon_button(
                                 Icon::Copy,
@@ -125,7 +121,9 @@ impl App {
                     MessageRole::Command => {
                         messages = messages.push(
                             column![
-                                text(message.content.trim()).size(style::BODY),
+                                text(message.content.trim())
+                                    .size(style::BODY)
+                                    .line_height(style::BODY_LINE_HEIGHT),
                                 icon_button(
                                     Icon::Copy,
                                     "Copy output",
@@ -175,7 +173,11 @@ impl App {
                 messages = messages.push(self.live_turn());
             }
             if !self.command_output.is_empty() {
-                messages = messages.push(text(&self.command_output).size(style::BODY));
+                messages = messages.push(
+                    text(&self.command_output)
+                        .size(style::BODY)
+                        .line_height(style::BODY_LINE_HEIGHT),
+                );
             }
         } else if self.busy {
             messages = messages.push(text(&self.status).size(style::LABEL).color(style::MUTED));

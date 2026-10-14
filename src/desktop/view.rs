@@ -1,5 +1,5 @@
 use iced::widget::{
-    button, column, container, markdown, row, scrollable, space, stack, text, text_editor, tooltip,
+    button, column, container, row, scrollable, space, stack, text, text_editor, tooltip,
 };
 use iced::{Center, Color, Element, Fill, Font, Right, Theme, keyboard};
 
@@ -46,7 +46,7 @@ impl App {
             .unwrap_or_else(|| "zerostack".into());
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
-            text(title).size(style::LABEL).width(Fill),
+            components::single_line(title, style::LABEL),
             components::icon_badge(
                 Icon::Tasks,
                 "Tasks",
@@ -69,16 +69,26 @@ impl App {
         // fillers. The composer keeps its place in the tree either way, so it
         // stays focused when the first message docks it to the bottom.
         let (above, below): (Element<'_, Message>, Element<'_, Message>) = if self.starting() {
-            let greeting = text("What would you like to work on?")
-                .size(style::TITLE)
-                .color(style::MUTED);
+            let mut greeting = column![
+                text("What would you like to work on?")
+                    .size(style::GREETING)
+                    .line_height(1.2)
+            ]
+            .spacing(layout::MD);
+            if let Some(snapshot) = &self.snapshot {
+                greeting = greeting.push(
+                    components::icon_action(
+                        Icon::Folder,
+                        super::sidebar::folder_name(&snapshot.session.working_dir),
+                        (!self.busy).then_some(Message::Show(Panel::Projects)),
+                    )
+                    .padding([0.0, 0.0]),
+                );
+            }
             (
-                container(components::rail(
-                    container(greeting).center_x(Fill),
-                    self.layout(),
-                ))
-                .align_bottom(Fill)
-                .into(),
+                container(components::rail(greeting, self.layout()))
+                    .align_bottom(Fill)
+                    .into(),
                 space().height(Fill).into(),
             )
         } else {
@@ -136,10 +146,13 @@ impl App {
                 .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
             return stack![base, scrim(sheet)].into();
         }
-        if let Some(panel @ (Panel::Attachments | Panel::ConversationFilter)) = &self.panel {
+        if let Some(panel @ (Panel::Attachments | Panel::ConversationFilter | Panel::Prompts)) =
+            &self.panel
+        {
             let menu = container(self.panel_view(panel))
                 .id(super::controls::DIALOG)
                 .width(280)
+                .max_height(256)
                 .padding(layout::MD)
                 .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
             let position = super::controls::menu_position(self.panel_anchor, self.size);
@@ -216,14 +229,7 @@ impl App {
             match block {
                 Block::Response {
                     markdown: content, ..
-                } => entries.push(
-                    markdown::view(
-                        content.items(),
-                        markdown::Settings::with_text_size(style::BODY, style::theme()),
-                    )
-                    .map(Message::Link)
-                    .into(),
-                ),
+                } => entries.push(components::prose(content.items())),
                 Block::Tools(tools) => entries.push(super::activity_view::group(
                     tools,
                     true,
@@ -331,7 +337,6 @@ impl App {
         let files = self.snapshot.as_ref().map_or(0, |snapshot| {
             snapshot.files.len() + snapshot.session.pending_media.len()
         });
-        let context = row![space::horizontal(), usage].align_y(Center);
         let slash_open = !self.slash_commands().is_empty();
         let editor = text_editor(&self.content)
             .id("composer")
@@ -343,6 +348,7 @@ impl App {
             .height(layout::EDITOR_HEIGHT)
             .padding(0)
             .size(style::BODY)
+            .line_height(style::BODY_LINE_HEIGHT)
             .on_action(Message::Edit)
             .style(style::editor)
             .key_binding(move |press| composer_binding(press, slash_open));
@@ -351,27 +357,22 @@ impl App {
             "Attachments and context",
             Some(Message::Show(Panel::Attachments))
         )]
-        .spacing(layout::SM)
+        .spacing(layout::XS)
         .align_y(Center);
         if let Some(snapshot) = &self.snapshot {
-            tools = tools.push(components::choice(
-                snapshot.prompts.clone(),
-                Some(snapshot.prompt.clone()),
-                Message::Prompt,
-                iced::Length::Shrink,
-            ));
-            if self.starting() {
-                tools = tools.push(components::icon_action(
-                    Icon::Folder,
-                    super::sidebar::folder_name(&snapshot.session.working_dir),
-                    (!self.busy).then_some(Message::Show(Panel::Projects)),
-                ));
-            }
-            tools = tools.push(space::horizontal());
-            tools = tools.push(components::action(
-                snapshot.session.model.to_string(),
+            tools = tools.push(components::selector(
+                &snapshot.session.model,
+                self.layout().model_width(self.busy),
                 Some(Message::Models(super::models::Event::Open)),
             ));
+            tools = tools.push(
+                container(components::selector(
+                    &snapshot.prompt,
+                    self.layout().prompt_width(),
+                    (!self.busy).then_some(Message::Show(Panel::Prompts)),
+                ))
+                .width(self.layout().prompt_width()),
+            );
         } else {
             tools = tools.push(space::horizontal());
         }
@@ -382,6 +383,7 @@ impl App {
         } else {
             ("Send", !input.trim().is_empty())
         };
+        tools = tools.push(usage);
         if self.busy {
             tools = tools.push(icon_button(Icon::Stop, "Stop", Some(Message::Stop)));
         }
@@ -445,7 +447,6 @@ impl App {
         if !self.queued.is_empty() {
             area = area.push(self.queued_view());
         }
-        area = area.push(context);
         if !self.error.is_empty() && self.snapshot.is_some() && self.panel.is_none() {
             area = area.push(
                 text(&self.error)
