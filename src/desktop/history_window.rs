@@ -20,6 +20,10 @@ pub(super) fn range(messages: &[SessionMessage], page: usize) -> Range<usize> {
     let begin = end.saturating_sub(PAGE_SIZE);
     starts.get(begin).copied().unwrap_or(0)..starts.get(end).copied().unwrap_or(messages.len())
 }
+pub(super) fn is_paged(visible: &Range<usize>, total: usize) -> bool {
+    visible.start > 0 || visible.end < total
+}
+
 fn parse(messages: &[SessionMessage], range: Range<usize>) -> HashMap<usize, markdown::Content> {
     range
         .filter(|i| messages[*i].role == MessageRole::Assistant)
@@ -80,6 +84,17 @@ mod tests {
         }
         assert_eq!(range(&[], usize::MAX), 0..0);
     }
+    #[test]
+    fn pagination_only_appears_when_history_is_outside_the_visible_page() {
+        for count in [0, 1, 80] {
+            let messages = vec![message(MessageRole::Assistant); count];
+            assert!(!is_paged(&range(&messages, 0), count));
+        }
+        let messages = vec![message(MessageRole::Assistant); 81];
+        assert!(is_paged(&range(&messages, 0), 81));
+        assert!(is_paged(&range(&messages, 1), 81));
+    }
+
     #[test]
     fn transcript_parse_work_is_bounded_for_ten_thousand_messages() {
         let messages = vec![message(MessageRole::Assistant); 10_000];

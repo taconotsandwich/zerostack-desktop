@@ -47,9 +47,11 @@ impl App {
         let header = row![
             icon_button(Icon::Sidebar, "Conversations", Some(Message::ToggleSidebar)),
             text(title).size(style::LABEL).width(Fill),
-            components::action(
-                format!("Tasks · {}", self.running.len() + usize::from(self.busy)),
-                Some(Message::Tasks(super::tasks::Event::Open))
+            components::icon_badge(
+                Icon::Tasks,
+                "Tasks",
+                self.running.len() + usize::from(self.busy),
+                Some(Message::Tasks(super::tasks::Event::Open)),
             ),
             icon_button(
                 Icon::Changes,
@@ -123,12 +125,32 @@ impl App {
             .height(Fill)
             .style(|_| style::surface(style::PAPER, 0.0))
             .into();
+        let base = super::controls::layer(
+            base,
+            self.permission.is_some() || self.panel.is_some() || self.menu.is_some(),
+        );
         if let Some(permission) = &self.permission {
             let sheet = container(self.permission_prompt(permission))
                 .padding(layout::XL)
                 .max_width(layout::PANEL_WIDTH)
                 .style(|_| style::surface(style::RAISED, style::PANEL_RADIUS));
             return stack![base, scrim(sheet)].into();
+        }
+        if let Some(panel @ (Panel::Attachments | Panel::ConversationFilter)) = &self.panel {
+            let menu = container(self.panel_view(panel))
+                .id(super::controls::DIALOG)
+                .width(280)
+                .padding(layout::MD)
+                .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));
+            let position = super::controls::menu_position(self.panel_anchor, self.size);
+            let overlay = iced::widget::mouse_area(
+                container(iced::widget::opaque(menu))
+                    .width(Fill)
+                    .height(Fill)
+                    .padding(iced::Padding::ZERO.left(position.x).top(position.y)),
+            )
+            .on_press(Message::ClosePanel);
+            return stack![base, overlay].into();
         }
         if let Some(panel) = &self.panel {
             let sheet = container(self.panel_view(panel))
@@ -300,22 +322,16 @@ impl App {
         } else {
             tooltip(usage_button, self.usage(), tooltip::Position::Top).into()
         };
+        let usage = super::controls::named(
+            usage,
+            "Token usage".into(),
+            Some(Message::ToggleUsage),
+            true,
+        );
         let files = self.snapshot.as_ref().map_or(0, |snapshot| {
             snapshot.files.len() + snapshot.session.pending_media.len()
         });
-        let context = row![
-            components::action(
-                format!(
-                    "Context · {files} file{}",
-                    if files == 1 { "" } else { "s" }
-                ),
-                Some(Message::Show(Panel::Context))
-            )
-            .padding(0),
-            space::horizontal(),
-            usage
-        ]
-        .align_y(Center);
+        let context = row![space::horizontal(), usage].align_y(Center);
         let slash_open = !self.slash_commands().is_empty();
         let editor = text_editor(&self.content)
             .id("composer")
@@ -329,30 +345,11 @@ impl App {
             .size(style::BODY)
             .on_action(Message::Edit)
             .style(style::editor)
-            .key_binding(move |press| match press.key.as_ref() {
-                keyboard::Key::Named(keyboard::key::Named::Enter) if !press.modifiers.shift() => {
-                    Some(text_editor::Binding::Custom(Message::Send))
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowDown) if slash_open => {
-                    Some(text_editor::Binding::Custom(Message::SlashMove(1)))
-                }
-                keyboard::Key::Named(keyboard::key::Named::ArrowUp) if slash_open => {
-                    Some(text_editor::Binding::Custom(Message::SlashMove(-1)))
-                }
-                _ => {
-                    let command = press.modifiers.command();
-                    match text_editor::Binding::from_key_press(press) {
-                        // iced types the letter of a shortcut it does not
-                        // know, so Cmd+N would leave an "n" behind.
-                        Some(text_editor::Binding::Insert(_)) if command => None,
-                        binding => binding,
-                    }
-                }
-            });
+            .key_binding(move |press| composer_binding(press, slash_open));
         let mut tools = row![icon_button(
             Icon::Attachment,
-            "Attach files",
-            (!self.busy && !self.picking).then_some(Message::PickFiles)
+            "Attachments and context",
+            Some(Message::Show(Panel::Attachments))
         )]
         .spacing(layout::SM)
         .align_y(Center);
@@ -370,11 +367,6 @@ impl App {
                     (!self.busy).then_some(Message::Show(Panel::Projects)),
                 ));
             }
-            tools = tools.push(components::action(
-                "Paste image",
-                (!self.busy)
-                    .then_some(Message::Attachment(super::attachments::Event::Paste(false))),
-            ));
             tools = tools.push(space::horizontal());
             tools = tools.push(components::action(
                 snapshot.session.model.to_string(),
@@ -466,12 +458,96 @@ impl App {
 }
 
 fn scrim<'a>(sheet: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    container(sheet)
-        .center_x(Fill)
-        .center_y(Fill)
-        .style(|_| container::Style {
-            background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
-            ..Default::default()
-        })
-        .into()
+    iced::widget::opaque(
+        container(sheet)
+            .id(super::controls::DIALOG)
+            .center_x(Fill)
+            .center_y(Fill)
+            .style(|_| container::Style {
+                background: Some(Color::BLACK.scale_alpha(style::SCRIM_ALPHA).into()),
+                ..Default::default()
+            }),
+    )
+    .into()
+}
+
+fn composer_binding(
+    press: text_editor::KeyPress,
+    slash_open: bool,
+) -> Option<text_editor::Binding<Message>> {
+    if !matches!(press.status, text_editor::Status::Focused { .. }) {
+        return text_editor::Binding::from_key_press(press);
+    }
+    match press.key.as_ref() {
+        keyboard::Key::Named(keyboard::key::Named::Tab) => Some(text_editor::Binding::Custom(
+            Message::FocusNext(press.modifiers.shift()),
+        )),
+        keyboard::Key::Named(keyboard::key::Named::Enter) if !press.modifiers.shift() => {
+            Some(text_editor::Binding::Custom(Message::Send))
+        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowDown) if slash_open => {
+            Some(text_editor::Binding::Custom(Message::SlashMove(1)))
+        }
+        keyboard::Key::Named(keyboard::key::Named::ArrowUp) if slash_open => {
+            Some(text_editor::Binding::Custom(Message::SlashMove(-1)))
+        }
+        _ => {
+            let command = press.modifiers.command();
+            match text_editor::Binding::from_key_press(press) {
+                // iced types the letter of a shortcut it does not
+                // know, so Cmd+N would leave an "n" behind.
+                Some(text_editor::Binding::Insert(_)) if command => None,
+                binding => binding,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn press(key: keyboard::key::Named, focused: bool, shift: bool) -> text_editor::KeyPress {
+        text_editor::KeyPress {
+            key: keyboard::Key::Named(key),
+            modified_key: keyboard::Key::Named(key),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            modifiers: if shift {
+                keyboard::Modifiers::SHIFT
+            } else {
+                keyboard::Modifiers::empty()
+            },
+            text: None,
+            status: if focused {
+                text_editor::Status::Focused { is_hovered: false }
+            } else {
+                text_editor::Status::Active
+            },
+        }
+    }
+    #[test]
+    fn unfocused_composer_does_not_steal_navigation_or_button_activation() {
+        for key in [
+            keyboard::key::Named::Tab,
+            keyboard::key::Named::Enter,
+            keyboard::key::Named::ArrowUp,
+            keyboard::key::Named::ArrowDown,
+        ] {
+            assert!(composer_binding(press(key, false, false), true).is_none());
+        }
+        for backwards in [false, true] {
+            assert!(
+                matches!(composer_binding(press(keyboard::key::Named::Tab, true, backwards), false), Some(text_editor::Binding::Custom(Message::FocusNext(direction))) if direction == backwards)
+            );
+        }
+        assert!(matches!(
+            composer_binding(press(keyboard::key::Named::Enter, true, false), false),
+            Some(text_editor::Binding::Custom(Message::Send))
+        ));
+        assert!(matches!(
+            composer_binding(press(keyboard::key::Named::Enter, true, true), false),
+            Some(text_editor::Binding::Enter)
+        ));
+    }
 }

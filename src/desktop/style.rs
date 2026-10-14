@@ -1,5 +1,5 @@
 use iced::widget::{button, container, overlay::menu, pick_list, svg, text_editor, text_input};
-use iced::{Border, Color, Shadow, Theme, Vector};
+use iced::{Border, Color, Theme};
 
 // Typography roles are shared by labels, fields, buttons, and message bodies.
 pub(super) const CAPTION: f32 = 12.0;
@@ -193,27 +193,6 @@ pub(super) fn flat(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A control floating over the transcript (the `Latest` pill), lifted off
-/// whatever scrolls beneath it, raised bubbles included.
-pub(super) fn floating(_theme: &Theme, status: button::Status) -> button::Style {
-    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-    button::Style {
-        background: Some(if hovered { LIFTED } else { SELECTED }.into()),
-        text_color: INK,
-        border: Border {
-            radius: CONTROL_RADIUS.into(),
-            width: 1.0,
-            color: LIFTED,
-        },
-        shadow: Shadow {
-            color: Color::BLACK.scale_alpha(0.4),
-            offset: Vector::new(0.0, 2.0),
-            blur_radius: 8.0,
-        },
-        ..button::Style::default()
-    }
-}
-
 pub(super) fn editor(_theme: &Theme, _status: text_editor::Status) -> text_editor::Style {
     text_editor::Style {
         background: RAISED.into(),
@@ -295,6 +274,11 @@ pub(super) enum Icon {
     NewChat,
     Reply,
     Stop,
+    Tasks,
+    Latest,
+    OpenExternal,
+    Favorite,
+    Filter,
 }
 
 pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
@@ -302,7 +286,7 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         Icon::Sidebar => include_bytes!("icons/rectangle-stack.svg"),
         Icon::Send => include_bytes!("icons/arrow-up.svg"),
         Icon::Retry => include_bytes!("icons/arrow-path.svg"),
-        Icon::Copy => include_bytes!("icons/clipboard.svg"),
+        Icon::Copy => include_bytes!("icons/clipboard-document.svg"),
         Icon::Settings => include_bytes!("icons/cog-6-tooth.svg"),
         Icon::Revert => include_bytes!("icons/arrow-uturn-left.svg"),
         Icon::More => include_bytes!("icons/ellipsis-horizontal.svg"),
@@ -314,6 +298,11 @@ pub(super) fn icon<'a>(icon: Icon, enabled: bool) -> svg::Svg<'a, Theme> {
         Icon::NewChat => include_bytes!("icons/plus.svg"),
         Icon::Reply => include_bytes!("icons/chat-bubble-left.svg"),
         Icon::Stop => include_bytes!("icons/stop.svg"),
+        Icon::Tasks => include_bytes!("icons/queue-list.svg"),
+        Icon::Latest => include_bytes!("icons/arrow-down.svg"),
+        Icon::OpenExternal => include_bytes!("icons/arrow-top-right-on-square.svg"),
+        Icon::Favorite => include_bytes!("icons/star.svg"),
+        Icon::Filter => include_bytes!("icons/funnel.svg"),
     };
     svg(svg::Handle::from_memory(bytes))
         .width(ICON_SIZE)
@@ -404,4 +393,17 @@ mod tests {
         // Without colors the built-in desktop palette is kept.
         assert_eq!(theme_for(None).palette(), theme().palette());
     }
+}
+
+/// Preserve hover feedback while making the selected option visible.
+pub(super) fn selected_action(
+    theme: &Theme,
+    status: button::Status,
+    selected: bool,
+) -> button::Style {
+    let mut appearance = flat(theme, status);
+    if selected && matches!(status, button::Status::Active) {
+        appearance.background = Some(SELECTED.into());
+    }
+    appearance
 }

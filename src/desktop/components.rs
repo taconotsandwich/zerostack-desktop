@@ -22,25 +22,45 @@ pub(super) fn icon_button<'a>(
     label: &'a str,
     message: Option<Message>,
 ) -> Element<'a, Message> {
-    tooltip(
-        icon_target(style::icon(icon, message.is_some()), message),
-        text(label).size(style::CAPTION),
-        tooltip::Position::Top,
+    super::controls::named(
+        tooltip(
+            icon_target(style::icon(icon, message.is_some()), message.clone()),
+            text(label).size(style::CAPTION),
+            tooltip::Position::Top,
+        )
+        .padding(layout::SM)
+        .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
+        .into(),
+        label.into(),
+        message,
+        true,
     )
-    .padding(layout::SM)
-    .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS))
-    .into()
+}
+
+pub(super) fn icon_badge<'a>(
+    icon: Icon,
+    label: &'a str,
+    count: usize,
+    message: Option<Message>,
+) -> Element<'a, Message> {
+    let mut content = row![icon_button(icon, label, message)].align_y(Center);
+    if count > 0 {
+        content = content.push(text(count.to_string()).size(style::CAPTION));
+    }
+    content.into()
 }
 
 pub(super) fn action<'a>(
     label: impl Into<std::borrow::Cow<'a, str>>,
     message: Option<Message>,
-) -> button::Button<'a, Message> {
-    button(container(text(label.into()).size(style::LABEL)).center_y(Fill))
+) -> super::controls::Action<'a> {
+    let label = label.into();
+    let control = button(container(text(label.clone()).size(style::LABEL)).center_y(Fill))
         .height(layout::CONTROL_HEIGHT)
         .padding([0.0, layout::MD])
-        .on_press_maybe(message)
-        .style(style::flat)
+        .on_press_maybe(message.clone())
+        .style(style::flat);
+    super::controls::Action::new(control, label, message)
 }
 
 /// An action led by an icon.
@@ -48,18 +68,20 @@ pub(super) fn icon_action<'a>(
     icon: Icon,
     label: impl Into<std::borrow::Cow<'a, str>>,
     message: Option<Message>,
-) -> button::Button<'a, Message> {
+) -> super::controls::Action<'a> {
+    let label = label.into();
     let content = row![
         style::icon(icon, message.is_some()),
-        text(label.into()).size(style::LABEL)
+        text(label.clone()).size(style::LABEL)
     ]
     .spacing(layout::SM)
     .align_y(Center);
-    button(container(content).center_y(Fill))
+    let control = button(container(content).center_y(Fill))
         .height(layout::CONTROL_HEIGHT)
         .padding([0.0, layout::MD])
-        .on_press_maybe(message)
-        .style(style::flat)
+        .on_press_maybe(message.clone())
+        .style(style::flat);
+    super::controls::Action::new(control, label, message)
 }
 
 pub(super) fn choice<'a>(
@@ -109,7 +131,7 @@ pub(super) fn panel_header<'a>(title: &'a str) -> Element<'a, Message> {
     row![
         text(title).size(style::TITLE),
         space::horizontal(),
-        action("Close", Some(Message::ClosePanel)),
+        icon_button(Icon::Close, "Close panel", Some(Message::ClosePanel)),
     ]
     .height(layout::CONTROL_HEIGHT)
     .align_y(Center)

@@ -13,6 +13,9 @@ impl App {
             Panel::Models => "Models",
             Panel::ProviderSetup => "Provider setup",
             Panel::Context => "Context",
+            Panel::Attachments => "Attachments",
+            Panel::ConversationFilter => "Conversations",
+            Panel::AdvancedSettings => "Advanced settings",
             Panel::Settings => "Settings",
             Panel::Projects => "Projects",
             Panel::Form(command) => command.label,
@@ -44,8 +47,9 @@ impl App {
                         content = content.push(
                             row![
                                 text(path.clone()).size(style::LABEL).width(Fill),
-                                components::action(
-                                    "Remove",
+                                components::icon_button(
+                                    style::Icon::Close,
+                                    "Remove attachment",
                                     (!self.busy).then_some(Message::Operate(
                                         Operation::DropContextFile {
                                             path: file.to_path_buf()
@@ -100,6 +104,20 @@ impl App {
                                 Fill,
                             ));
                     }
+                }
+                if let Some(command) = commands::find("/reasoning") {
+                    content = content.push(components::action(
+                        command.label,
+                        (!self.busy).then_some(Message::Choose(command)),
+                    ));
+                }
+                content = content.push(components::action(
+                    "Advanced…",
+                    Some(Message::Show(Panel::AdvancedSettings)),
+                ));
+            }
+            Panel::AdvancedSettings => {
+                if let Some(snapshot) = &self.snapshot {
                     content = content
                         .push(
                             text("File editing")
@@ -109,21 +127,62 @@ impl App {
                         .push(components::choice(
                             vec!["similarity".into(), "hashedit".into()],
                             Some(snapshot.edit_system.clone()),
-                            |value| Message::Operate(Operation::SetEditSystem { system: value }),
+                            |system| Message::Operate(Operation::SetEditSystem { system }),
                             Fill,
                         ));
                 }
-                for syntax in ["/reasoning", "/regen-prompts"] {
-                    if let Some(command) = commands::find(syntax) {
-                        content = content.push(
-                            components::action(
-                                command.label,
-                                (!self.busy).then_some(Message::Choose(command)),
-                            )
-                            .padding(0)
+                if let Some(command) = commands::find("/regen-prompts") {
+                    content = content.push(components::action(
+                        command.label,
+                        (!self.busy).then_some(Message::Choose(command)),
+                    ));
+                }
+                content = content.push(components::action(
+                    "Back to settings",
+                    Some(Message::Show(Panel::Settings)),
+                ));
+            }
+            Panel::Attachments => {
+                content = content
+                    .push(
+                        components::icon_action(
+                            style::Icon::Attachment,
+                            "Attach files…",
+                            (!self.busy && !self.picking).then_some(Message::PickFiles),
+                        )
+                        .width(Fill),
+                    )
+                    .push(
+                        components::icon_action(
+                            style::Icon::Copy,
+                            "Paste image",
+                            (!self.busy).then_some(Message::Attachment(
+                                super::attachments::Event::Paste(false),
+                            )),
+                        )
+                        .width(Fill),
+                    )
+                    .push(
+                        components::action("Manage context…", Some(Message::Show(Panel::Context)))
                             .width(Fill),
-                        );
-                    }
+                    );
+            }
+            Panel::ConversationFilter => {
+                for (label, archived) in [
+                    ("Active conversations", false),
+                    ("Archived conversations", true),
+                ] {
+                    content = content.push(
+                        components::action(label, Some(Message::ArchiveView(archived)))
+                            .width(Fill)
+                            .style(move |theme, status| {
+                                style::selected_action(
+                                    theme,
+                                    status,
+                                    self.show_archived == archived,
+                                )
+                            }),
+                    );
                 }
             }
             Panel::Form(command) => {

@@ -99,8 +99,11 @@ impl App {
     pub(super) fn update_attachment(&mut self, event: Event) -> Task<Message> {
         match event {
             Event::Paste(quiet)
-                if !self.busy && self.snapshot.is_some() && self.panel.is_none() =>
+                if !self.busy
+                    && self.snapshot.is_some()
+                    && (self.panel.is_none() || matches!(self.panel, Some(Panel::Attachments))) =>
             {
+                self.panel = None;
                 let id = self.snapshot.as_ref().unwrap().session.id.to_string();
                 let directory = crate::session::storage::data_dir().join("attachments");
                 return Task::perform(
@@ -156,7 +159,8 @@ impl App {
             content = content.push(image(handle.clone()).height(400));
         }
         content
-            .push(components::action(
+            .push(components::icon_button(
+                style::Icon::Close,
                 "Remove attachment",
                 (!self.busy).then_some(Message::Operate(Operation::DropContextFile {
                     path: path.into(),

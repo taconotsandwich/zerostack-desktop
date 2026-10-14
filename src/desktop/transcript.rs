@@ -25,31 +25,35 @@ impl App {
                 .messages
                 .iter()
                 .rposition(|message| message.role == MessageRole::Assistant);
-            messages = messages.push(
-                row![
-                    components::action(
-                        "Older",
-                        (self.history_range.start > 0)
-                            .then_some(Message::HistoryPage(self.history_page + 1))
-                    ),
-                    text(format!(
-                        "{}–{} of {}",
-                        self.history_range
-                            .start
-                            .saturating_add(1)
-                            .min(snapshot.session.messages.len()),
-                        self.history_range.end,
-                        snapshot.session.messages.len()
-                    ))
-                    .size(style::CAPTION),
-                    components::action(
-                        "Newer",
-                        (self.history_page > 0)
-                            .then_some(Message::HistoryPage(self.history_page.saturating_sub(1)))
-                    ),
-                ]
-                .spacing(layout::MD),
-            );
+            if super::history_window::is_paged(&self.history_range, snapshot.session.messages.len())
+            {
+                messages = messages.push(
+                    row![
+                        components::action(
+                            "Older",
+                            (self.history_range.start > 0)
+                                .then_some(Message::HistoryPage(self.history_page + 1))
+                        ),
+                        text(format!(
+                            "{}–{} of {}",
+                            self.history_range
+                                .start
+                                .saturating_add(1)
+                                .min(snapshot.session.messages.len()),
+                            self.history_range.end,
+                            snapshot.session.messages.len()
+                        ))
+                        .size(style::CAPTION),
+                        components::action(
+                            "Newer",
+                            (self.history_page > 0).then_some(Message::HistoryPage(
+                                self.history_page.saturating_sub(1)
+                            ))
+                        ),
+                    ]
+                    .spacing(layout::MD),
+                );
+            }
             for index in self.history_range.clone() {
                 let message = &snapshot.session.messages[index];
                 if let Some(group) = super::history::tool_group(&snapshot.session.messages, index) {
@@ -202,11 +206,18 @@ impl App {
         let latest: Element<'_, Message> = if self.follow_output {
             space().into()
         } else {
-            container(components::action("Latest", Some(Message::Latest)).style(style::floating))
-                .center_x(Fill)
-                .align_bottom(Fill)
-                .padding(layout::SM)
-                .into()
+            container(
+                container(icon_button(
+                    style::Icon::Latest,
+                    "Jump to latest",
+                    Some(Message::Latest),
+                ))
+                .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS)),
+            )
+            .center_x(Fill)
+            .align_bottom(Fill)
+            .padding(layout::SM)
+            .into()
         };
         stack![transcript, latest].into()
     }

@@ -138,7 +138,6 @@ impl App {
     }
     pub(super) fn tasks_view(&self) -> Element<'_, Message> {
         let mut pane = column![
-            text("Tasks").size(style::TITLE),
             checkbox(self.preferences.task_attention)
                 .label("Request desktop attention for task updates")
                 .on_toggle(|v| Message::Tasks(Event::Notifications(v)))
@@ -159,7 +158,11 @@ impl App {
                     }
                 ))
                 .width(Fill),
-                components::action("Stop", Some(Message::Tasks(Event::Cancel(id))))
+                components::icon_button(
+                    style::Icon::Stop,
+                    "Stop task",
+                    Some(Message::Tasks(Event::Cancel(id)))
+                )
             ]);
             for progress in &self.live.subagents {
                 pane = pane.push(
@@ -185,7 +188,11 @@ impl App {
                     Some(Message::Select(id.clone()))
                 )
                 .width(Fill),
-                components::action("Stop", Some(Message::Tasks(Event::Cancel(id))))
+                components::icon_button(
+                    style::Icon::Stop,
+                    "Stop task",
+                    Some(Message::Tasks(Event::Cancel(id)))
+                )
             ]);
             for progress in &running.live.subagents {
                 pane = pane.push(
@@ -251,8 +258,9 @@ impl App {
         }
         pane = pane.push(row![
             text("Recent runs").width(Fill),
-            components::action(
-                "Refresh",
+            components::icon_button(
+                style::Icon::Retry,
+                "Refresh runs",
                 (!self.tasks.loading).then_some(Message::Tasks(Event::Refresh))
             )
         ]);

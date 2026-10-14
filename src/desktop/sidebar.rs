@@ -175,16 +175,31 @@ impl App {
             container(
                 column![
                     top,
-                    components::field("Search conversations…", &self.search)
-                        .on_input(Message::Search),
-                    components::action(
-                        if self.show_archived {
-                            "Archived · show active"
-                        } else {
-                            "Show archived"
-                        },
-                        Some(Message::ToggleArchiveView)
-                    ),
+                    row![
+                        components::field("Search conversations…", &self.search)
+                            .id("conversation-search")
+                            .on_input(Message::Search),
+                        icon_button(
+                            Icon::Filter,
+                            "Filter conversations",
+                            Some(Message::Show(Panel::ConversationFilter))
+                        ),
+                    ]
+                    .align_y(Center)
+                    .spacing(layout::XS),
+                    if self.show_archived {
+                        row![
+                            text("Archived").size(style::CAPTION).color(style::MUTED),
+                            icon_button(
+                                Icon::Close,
+                                "Show active conversations",
+                                Some(Message::ArchiveView(false))
+                            ),
+                        ]
+                        .align_y(Center)
+                    } else {
+                        row![]
+                    },
                     container(heading)
                         .padding([0.0, layout::MD])
                         .height(layout::CONTROL_HEIGHT),
@@ -240,6 +255,7 @@ impl App {
         menu = menu
             .push(components::action("Delete", Some(Message::Delete(id.to_string()))).width(Fill));
         let menu = container(menu)
+            .id(super::controls::DIALOG)
             .width(layout::MENU_WIDTH)
             .padding(layout::XS)
             .style(|_| style::surface(style::RAISED, style::CONTROL_RADIUS));

@@ -44,6 +44,7 @@ pub(super) struct App {
     pub menu: Option<(String, Point)>,
     pub rename: Option<(String, String)>,
     pub panel: Option<Panel>,
+    pub panel_anchor: Point,
     pub fields: Vec<String>,
     pub expanded: HashSet<usize>,
     /// Saved tool rows opened to their detail, by (group, row).
@@ -90,6 +91,9 @@ pub(super) enum Panel {
     Models,
     ProviderSetup,
     Context,
+    Attachments,
+    ConversationFilter,
+    AdvancedSettings,
     Settings,
     Form(Command),
     Delete { id: String, title: String },
@@ -126,9 +130,11 @@ pub(super) enum Message {
     Operate(Operation),
     Field(usize, String),
     Show(Panel),
+    ShowAt(Panel, Point, bool),
     ClosePanel,
     Search(String),
-    ToggleArchiveView,
+    ArchiveView(bool),
+    FocusNext(bool),
     PinSession(String),
     ArchiveSession(String),
     ToggleSidebar,
@@ -229,6 +235,7 @@ impl App {
                 menu: None,
                 rename: None,
                 panel: first_start.then_some(Panel::ProviderSetup),
+                panel_anchor: Point::ORIGIN,
                 fields: Vec::new(),
                 expanded: HashSet::new(),
                 expanded_rows: HashSet::new(),
@@ -915,18 +922,39 @@ impl App {
                 }
             }
             Message::Show(panel) => {
+                self.panel_anchor = self.cursor;
                 self.panel = Some(panel);
                 self.menu = None;
                 self.error.clear();
+            }
+            Message::ShowAt(panel, position, keyboard) => {
+                let task = self.update(Message::Show(panel));
+                self.panel_anchor = position;
+                return if keyboard {
+                    super::controls::focus_next(false, true)
+                } else {
+                    task
+                };
             }
             Message::ClosePanel => {
                 self.submitted = None;
                 self.panel = None;
                 self.menu = None;
                 self.error.clear();
+                return operation::focus("composer");
             }
             Message::Search(query) => self.search = query,
-            Message::ToggleArchiveView => self.show_archived = !self.show_archived,
+            Message::ArchiveView(archived) => {
+                self.show_archived = archived;
+                self.panel = None;
+                return operation::focus("conversation-search");
+            }
+            Message::FocusNext(backwards) => {
+                return super::controls::focus_next(
+                    backwards,
+                    self.panel.is_some() || self.permission.is_some() || self.menu.is_some(),
+                );
+            }
             Message::PinSession(id) => {
                 self.preferences.toggle_pin(id);
                 self.menu = None;
@@ -1065,6 +1093,9 @@ impl App {
                 }
             }
             Message::PickFiles if !self.busy && !self.picking && self.snapshot.is_some() => {
+                if matches!(self.panel, Some(Panel::Attachments)) {
+                    self.panel = None;
+                }
                 self.picking = true;
                 let directory = self.project.clone();
                 return Task::perform(
@@ -1137,7 +1168,7 @@ impl App {
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::batch([
-            iced::event::listen_with(|event, _, _| match event {
+            iced::event::listen_with(|event, status, _| match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
                     Some(Message::Cursor(position))
                 }
@@ -1148,6 +1179,11 @@ impl App {
                 iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
                     match key.as_ref() {
                         keyboard::Key::Named(keyboard::key::Named::Escape) => Some(Message::Escape),
+                        keyboard::Key::Named(keyboard::key::Named::Tab)
+                            if status == iced::event::Status::Ignored =>
+                        {
+                            Some(Message::FocusNext(modifiers.shift()))
+                        }
                         keyboard::Key::Named(keyboard::key::Named::F2) => {
                             Some(Message::RenameSelected)
                         }

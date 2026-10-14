@@ -394,7 +394,11 @@ impl App {
                 text(diff.path.display().to_string())
                     .size(style::CAPTION)
                     .width(Fill),
-                components::action("Copy patch", Some(Message::Copy(diff.patch.clone())))
+                icon_button(
+                    Icon::Copy,
+                    "Copy patch",
+                    Some(Message::Copy(diff.patch.clone()))
+                )
             ]);
             let mut lines = column![].spacing(1);
             if diff.binary {
@@ -465,7 +469,11 @@ impl App {
                     text(preview.path.display().to_string())
                         .size(style::CAPTION)
                         .width(Fill),
-                    components::action("Open", Some(Message::Review(Event::OpenExternal)))
+                    icon_button(
+                        Icon::OpenExternal,
+                        "Open externally",
+                        Some(Message::Review(Event::OpenExternal))
+                    )
                 ])
                 .push(
                     text_editor(&self.review.content)

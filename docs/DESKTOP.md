@@ -15,24 +15,28 @@ for new conversations and preserves other configuration keys.
 
 Search matches titles, project paths and saved message text across projects.
 The row menu can pin conversations to the top of their project or archive them.
-Show archived lists archived conversations; Restore moves them back. These
+The filter icon beside search switches between Active and Archived. An Archived
+indicator remains visible until the filter is cleared; Restore moves a
+conversation back to Active. These
 choices persist in desktop preferences and do not delete session files.
 
 ## Models and agent roles
 
 Open Models and agent roles in Settings or choose `/model` in the command menu.
 Pick Main, Subagents or Advisor, search by model, provider or favorite, inspect
-the context and pricing details, then Use model. A custom model ID can be entered
-in the same panel. Save favorite names that selection for later use, replacing
-the `/models-add` form. Advisor availability still follows its enabled setting.
+the context and pricing details, then Use model. Custom model… reveals provider
+and model-ID fields. The star beside Use model reveals the favorite-name field;
+Save names that selection for later use, replacing the `/models-add` form. Advisor availability still follows its enabled setting.
 Role changes affect subsequent calls in the current session.
 
 ## Attachments
 
 Drop or choose files to see image thumbnails beside the composer. Click a
-thumbnail for a larger preview or a filename for a text preview. Paste image
-(or Cmd/Ctrl+V over the conversation) imports clipboard images; normal text
-pasting continues to work. Clipboard images are stored as private PNGs under
+thumbnail for a larger preview or a filename for a text preview. The paperclip
+opens an attachment menu with Attach files, Paste image, and Manage context.
+Cmd/Ctrl+V over the conversation imports clipboard images; normal text pasting
+continues to work. The composer shows attachment chips only when files exist;
+the × removes an attachment without deleting its file. Clipboard images are stored as private PNGs under
 `<data>/attachments` so saved session references survive restart. Images are
 limited to 16 megapixels on paste; previews decode at most 128 MiB and resize to
 1024 pixels. Attachment imports finish only in the conversation that started them.
@@ -48,7 +52,8 @@ Binary files have an explicit notice; previews show at most 400 lines.
 ## Long conversations
 
 The transcript renders pages of 80 logical entries. Older and Newer navigate
-without splitting tool groups; Latest returns to the live turn. Markdown and
+without splitting tool groups; paging controls are hidden when all entries fit.
+The down-arrow button returns to the latest output. Markdown and
 tool details are prepared only for the visible page. Session history remains
 complete for the engine and export. The `transcript_parse_work` test compares
 full-history and visible-page preparation on a 10,000-message fixture.
@@ -81,13 +86,27 @@ its earlier file or tool effects, so review those effects before resuming.
 
 ## Tasks and notifications
 
-Tasks lists foreground/background work, queued input, permission requests,
+The task-list icon in the header opens Tasks; its badge appears only while work
+is active. Tasks lists foreground/background work, queued input, permission requests,
 subagent lifecycle records, and the latest 100 durable runs. Select a task to
 return to its conversation or stop it from this panel. Interrupted queues require
 explicit resume. Parallel permission requests wait in order instead of replacing
 one another. Completion and approval updates appear in the panel. Opt in to
 desktop attention to request the platform's taskbar/dock attention indicator;
 this does not steal focus or require a notification service.
+
+## Controls and settings
+
+Routine actions use Heroicons with labels shown on hover or keyboard focus.
+Tab and Shift+Tab move through shared controls; Enter or Space activates the
+focused button. Disabled actions are skipped. Menus and panels keep keyboard
+navigation inside them and block input to the conversation underneath.
+Iced 0.14 does not expose a native accessibility tree, so these labels and focus
+controls do not provide platform screen-reader support yet.
+
+Settings → Advanced contains the file-editing system and prompt regeneration.
+Model names, agent roles, Git scopes, commit actions and permission decisions
+retain visible text labels.
 
 ## Development validation
 

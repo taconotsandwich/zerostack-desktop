@@ -13,6 +13,8 @@ pub(super) struct Models {
     selected: Option<ModelChoice>,
     choices: Vec<ModelChoice>,
     notice: String,
+    custom_open: bool,
+    favorite_open: bool,
 }
 impl Default for Models {
     fn default() -> Self {
@@ -25,10 +27,30 @@ impl Default for Models {
             selected: None,
             choices: Vec::new(),
             notice: String::new(),
+            custom_open: false,
+            favorite_open: false,
         }
     }
 }
 impl Models {
+    fn select(&mut self, choice: ModelChoice) {
+        self.provider = choice.key.provider.clone();
+        self.custom_id = choice.key.id.clone();
+        self.selected = Some(choice);
+        self.custom_open = false;
+        self.favorite_open = false;
+        self.alias.clear();
+        self.notice.clear();
+    }
+
+    fn can_apply(&self) -> bool {
+        !self.provider.trim().is_empty() && !self.custom_id.trim().is_empty()
+    }
+
+    fn can_save_favorite(&self) -> bool {
+        self.favorite_open && self.can_apply() && !self.alias.trim().is_empty()
+    }
+
     pub(super) fn favorite_saved(
         &mut self,
         name: &str,
@@ -37,6 +59,8 @@ impl Models {
     ) {
         self.choices = crate::engine::models::model_choices(cfg, &session.provider, &session.model);
         self.notice = format!("Saved favorite: {name}");
+        self.favorite_open = false;
+        self.alias.clear();
     }
 }
 #[derive(Debug, Clone)]
@@ -50,6 +74,8 @@ pub(super) enum Event {
     Alias(String),
     Apply,
     SaveFavorite,
+    ToggleCustom,
+    ToggleFavorite,
 }
 
 fn matches(choice: &ModelChoice, query: &str) -> bool {
@@ -83,14 +109,15 @@ impl App {
                 self.models.selected = None;
                 self.models.custom_id.clear();
                 self.models.alias.clear();
+                self.models.custom_open = false;
+                self.models.favorite_open = false;
                 self.panel = Some(Panel::Models);
+                return iced::widget::operation::focus("model-search");
             }
             Event::Role(role) => self.models.role = role,
             Event::Search(query) => self.models.query = query,
             Event::Select(choice) => {
-                self.models.provider = choice.key.provider.clone();
-                self.models.custom_id = choice.key.id.clone();
-                self.models.selected = Some(choice);
+                self.models.select(choice);
             }
             Event::Provider(value) => {
                 self.models.provider = value;
@@ -101,6 +128,18 @@ impl App {
                 self.models.selected = None;
             }
             Event::Alias(value) => self.models.alias = value,
+            Event::ToggleCustom => {
+                self.models.custom_open = !self.models.custom_open;
+                if self.models.custom_open {
+                    return iced::widget::operation::focus("model-provider");
+                }
+            }
+            Event::ToggleFavorite => {
+                self.models.favorite_open = !self.models.favorite_open;
+                if self.models.favorite_open {
+                    return iced::widget::operation::focus("favorite-name");
+                }
+            }
             Event::Apply if !self.busy => {
                 let selection = format!(
                     "{}::{}",
@@ -118,7 +157,7 @@ impl App {
                     selection,
                 });
             }
-            Event::SaveFavorite if !self.busy => {
+            Event::SaveFavorite if !self.busy && self.models.can_save_favorite() => {
                 return self.dispatch(Operation::SaveQuickModel {
                     name: self.models.alias.trim().into(),
                     provider: self.models.provider.trim().into(),
@@ -139,10 +178,13 @@ impl App {
         ]
         .into_iter()
         .fold(row![].spacing(layout::SM), |row, (label, role)| {
-            row.push(components::action(
-                label,
-                Some(Message::Models(Event::Role(role))),
-            ))
+            row.push(
+                components::action(label, Some(Message::Models(Event::Role(role)))).style(
+                    move |theme, status| {
+                        style::selected_action(theme, status, self.models.role == role)
+                    },
+                ),
+            )
         });
         let mut choices = column![].spacing(layout::XS);
         let filtered: Vec<_> = self
@@ -177,48 +219,96 @@ impl App {
             .map(String::as_str)
             .unwrap_or("Not selected");
         let mut content = column![
-            text("Models").size(style::TITLE),
             roles,
             text(format!("{:?} · current: {current}", self.models.role)).size(style::LABEL),
             text("Applies to subsequent calls in this conversation.").size(style::CAPTION),
             components::field("Search models or favorites…", &self.models.query)
+                .id("model-search")
                 .on_input(|v| Message::Models(Event::Search(v))),
-            text(format!("{} matches · showing up to 100", filtered.len())).size(style::CAPTION),
-            iced::widget::container(scrollable(choices)).height(220),
+            iced::widget::container(scrollable(choices)).height(
+                (filtered.len().min(100) as f32 * layout::CONTROL_HEIGHT)
+                    .clamp(layout::CONTROL_HEIGHT, 220.0)
+            ),
         ]
         .spacing(layout::SM);
+        if filtered.len() > 100 {
+            content = content.push(
+                text(format!(
+                    "Showing 100 of {} models · refine your search",
+                    filtered.len()
+                ))
+                .size(style::CAPTION),
+            );
+        } else if filtered.is_empty() {
+            content = content.push(
+                text("No models match. Try another search or add a custom model.")
+                    .size(style::CAPTION),
+            );
+        }
         if let Some(choice) = &self.models.selected {
             content = content.push(text(choice.detail()).size(style::CAPTION));
         }
-        content = content
-            .push(text("Custom model or selected model").size(style::LABEL))
-            .push(
-                components::field("Provider", &self.models.provider)
-                    .on_input(|v| Message::Models(Event::Provider(v))),
-            )
-            .push(
-                components::field("Model ID", &self.models.custom_id)
-                    .on_input(|v| Message::Models(Event::Custom(v))),
-            )
-            .push(components::action(
-                "Use model",
-                (!self.busy && !self.models.custom_id.trim().is_empty())
-                    .then_some(Message::Models(Event::Apply)),
-            ))
-            .push(
+        content = content.push(components::action(
+            if self.models.custom_open {
+                "Hide custom model"
+            } else {
+                "Custom model…"
+            },
+            Some(Message::Models(Event::ToggleCustom)),
+        ));
+        if self.models.custom_open {
+            content = content
+                .push(text("Provider").size(style::CAPTION))
+                .push(
+                    components::field("Provider", &self.models.provider)
+                        .id("model-provider")
+                        .on_input(|v| Message::Models(Event::Provider(v))),
+                )
+                .push(text("Model ID").size(style::CAPTION))
+                .push(
+                    components::field("Model ID", &self.models.custom_id)
+                        .on_input(|v| Message::Models(Event::Custom(v))),
+                );
+        }
+        content = content.push(
+            row![
+                components::action(
+                    "Use model",
+                    (!self.busy && self.models.can_apply())
+                        .then_some(Message::Models(Event::Apply))
+                ),
+                components::icon_button(
+                    style::Icon::Favorite,
+                    "Save as favorite",
+                    (!self.busy && self.models.can_apply())
+                        .then_some(Message::Models(Event::ToggleFavorite))
+                ),
+            ]
+            .spacing(layout::SM)
+            .align_y(iced::Center),
+        );
+        if self.models.favorite_open {
+            content = content.push(
                 row![
-                    components::field("Favorite name (optional)", &self.models.alias)
-                        .on_input(|v| Message::Models(Event::Alias(v))),
+                    components::field("Favorite name", &self.models.alias)
+                        .id("favorite-name")
+                        .on_input(|v| Message::Models(Event::Alias(v)))
+                        .on_submit(Message::Models(Event::SaveFavorite)),
                     components::action(
-                        "Save favorite",
-                        (!self.busy
-                            && !self.models.alias.trim().is_empty()
-                            && !self.models.custom_id.trim().is_empty())
-                        .then_some(Message::Models(Event::SaveFavorite))
-                    )
+                        "Save",
+                        (!self.busy && self.models.can_save_favorite())
+                            .then_some(Message::Models(Event::SaveFavorite))
+                    ),
+                    components::icon_button(
+                        style::Icon::Close,
+                        "Cancel favorite",
+                        Some(Message::Models(Event::ToggleFavorite))
+                    ),
                 ]
-                .spacing(layout::SM),
+                .spacing(layout::SM)
+                .align_y(iced::Center),
             );
+        }
         content
             .push(text(&self.models.notice).size(style::CAPTION))
             .into()
@@ -227,6 +317,28 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn choosing_a_model_closes_advanced_fields_and_discards_stale_favorite_names() {
+        let mut models = Models {
+            custom_open: true,
+            favorite_open: true,
+            alias: "old".into(),
+            ..Models::default()
+        };
+        models.select(ModelChoice::new("provider", "model"));
+        assert!(models.can_apply());
+        assert!(!models.custom_open);
+        assert!(!models.favorite_open);
+        assert!(models.alias.is_empty());
+        assert!(!models.can_save_favorite());
+        models.favorite_open = true;
+        models.alias = "daily".into();
+        assert!(models.can_save_favorite());
+        models.provider = " ".into();
+        assert!(!models.can_apply());
+        assert!(!models.can_save_favorite());
+    }
+
     #[test]
     fn search_matches_provider_id_label_and_alias_together() {
         let mut choice = ModelChoice::new("custom", "claude-sonnet");
