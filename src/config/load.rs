@@ -13,14 +13,29 @@ use crate::extras::mcp::config::McpServerConfig;
 use crate::session::storage;
 
 /// Write `content` to `path` atomically via temp-file + rename.
-fn atomic_config_write(path: &Path, content: &str) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+pub(crate) fn atomic_config_write(path: &Path, content: &str) -> io::Result<()> {
+    use std::io::Write;
+    let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
+    let result = (|| {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Candidate config filenames, in priority order within each search dir.

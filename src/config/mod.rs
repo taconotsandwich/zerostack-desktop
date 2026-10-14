@@ -1,4 +1,5 @@
 pub mod load;
+pub mod setup;
 pub mod types;
 
 use std::collections::HashMap;
