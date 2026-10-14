@@ -29,6 +29,7 @@
 //! read stdin.
 
 pub mod actions;
+pub(crate) mod blocking;
 pub(crate) mod compaction;
 pub(crate) mod headless;
 pub mod models;
