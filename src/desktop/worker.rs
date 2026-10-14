@@ -26,6 +26,10 @@ pub(super) enum Operation {
     Undo,
     Redo,
     Retry,
+    SelectRoleModel {
+        role: crate::engine::models::AgentRole,
+        selection: String,
+    },
     SelectModel {
         selection: String,
     },
@@ -156,8 +160,7 @@ pub(super) struct Snapshot {
     pub files: Vec<PathBuf>,
     pub prompts: Vec<String>,
     pub prompt: String,
-    pub models: Vec<String>,
-    pub providers: Vec<String>,
+    pub role_models: std::collections::HashMap<String, String>,
     pub permission_mode: Option<String>,
     pub edit_system: String,
     pub show_reasoning: bool,

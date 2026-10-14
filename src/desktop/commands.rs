@@ -106,13 +106,10 @@ pub(super) fn available() -> Vec<Command> {
                 "Regenerate project instructions? Existing architecture instructions may be overwritten.",
             ),
         ),
-        command("Use provider", "/provider", &["Provider"], false, None),
-        command("Use model", "/model", &["Model ID"], false, None),
-        command("Saved models", "/models", &[], false, None),
         command(
-            "Save quick model",
-            "/models-add",
-            &["Name", "Provider", "Model ID"],
+            "Models and agent roles",
+            "/model",
+            &["Model ID"],
             false,
             None,
         ),
@@ -343,12 +340,7 @@ mod tests {
             "/compress"
         );
         assert!(find("/rename").unwrap().input(&[String::new()]).is_err());
-        assert!(
-            find("/models-add")
-                .unwrap()
-                .input(&["only-name".into()])
-                .is_err()
-        );
+        assert!(find("/models-add").is_none());
     }
 }
 

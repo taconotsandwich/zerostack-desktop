@@ -17,3 +17,12 @@ Search matches titles, project paths and saved message text across projects.
 The row menu can pin conversations to the top of their project or archive them.
 Show archived lists archived conversations; Restore moves them back. These
 choices persist in desktop preferences and do not delete session files.
+
+## Models and agent roles
+
+Open Models and agent roles in Settings or choose `/model` in the command menu.
+Pick Main, Subagents or Advisor, search by model, provider or favorite, inspect
+the context and pricing details, then Use model. A custom model ID can be entered
+in the same panel. Save favorite names that selection for later use, replacing
+the `/models-add` form. Advisor availability still follows its enabled setting.
+Role changes affect subsequent calls in the current session.

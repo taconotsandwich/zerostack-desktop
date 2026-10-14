@@ -367,18 +367,9 @@ impl App {
                 ));
             }
             tools = tools.push(space::horizontal());
-            let mut models = snapshot.models.clone();
-            if !models
-                .iter()
-                .any(|model| model == snapshot.session.model.as_str())
-            {
-                models.push(snapshot.session.model.to_string());
-            }
-            tools = tools.push(components::choice(
-                models,
-                Some(snapshot.session.model.to_string()),
-                Message::Model,
-                iced::Length::Shrink,
+            tools = tools.push(components::action(
+                snapshot.session.model.to_string(),
+                Some(Message::Models(super::models::Event::Open)),
             ));
         } else {
             tools = tools.push(space::horizontal());
