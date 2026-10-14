@@ -58,7 +58,8 @@ full-history and visible-page preparation on a 10,000-message fixture.
 The branch control in Changes lists local branches and linked worktrees. Switch
 to a branch, open an existing worktree, or create a branch and a new worktree at
 an absolute path. Branch switching requires a clean checkout. Git writes wait
-until foreground and background tasks finish and reject changed HEAD/index state.
+until foreground and background tasks finish and reject changes to HEAD, the
+index, or working-file contents since review.
 New worktrees open as a separate project with a new conversation.
 
 ## Stage and commit
@@ -87,3 +88,15 @@ explicit resume. Parallel permission requests wait in order instead of replacing
 one another. Completion and approval updates appear in the panel. Opt in to
 desktop attention to request the platform's taskbar/dock attention indicator;
 this does not steal focus or require a notification service.
+
+## Development validation
+
+Use `cargo fmt`, `cargo test --all-features -- --test-threads=1`, and
+`cargo install --path . --debug --all-features`. The `desktop` feature also
+works with default features disabled; auxiliary role controls follow the
+compiled features. Shared engine changes live on `refactor/engine-core`, with
+SDK, TUI and desktop branches above it. Grit integration remains deferred.
+
+The 10,000-message markdown fixture measured 40.04 ms for full preparation
+and 0.39 ms for an 80-entry page on the development host. This measures
+preparation work, not rendering frame rate or a cross-machine performance bound.
