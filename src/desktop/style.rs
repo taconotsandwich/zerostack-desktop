@@ -330,23 +330,64 @@ pub(super) fn chevron<'a>(open: bool) -> svg::Svg<'a, Theme> {
 }
 
 pub(super) fn usage_ring<'a>(fraction: f64) -> svg::Svg<'a, Theme> {
-    let fraction = if fraction.is_finite() {
-        fraction.clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    svg(svg::Handle::from_memory(format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5"/><circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-width="2.5" stroke-dasharray="{} 56.55" transform="rotate(-90 12 12)"/></svg>"##,
-        fraction * std::f64::consts::TAU * 9.0,
-    ).into_bytes()))
+    svg(svg::Handle::from_memory(
+        usage_ring_svg(fraction).into_bytes(),
+    ))
     .width(ICON_SIZE)
     .height(ICON_SIZE)
     .style(|_, _| svg::Style { color: Some(INK) })
 }
 
+fn usage_ring_svg(fraction: f64) -> String {
+    let fraction = if fraction.is_finite() {
+        fraction.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let mut svg = String::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-opacity="0.3" stroke-width="2.5"/>"#,
+    );
+    if fraction >= 1.0 {
+        svg.push_str(
+            r#"<circle cx="12" cy="12" r="9" fill="none" stroke="white" stroke-width="2.5"/>"#,
+        );
+    } else if fraction >= 0.001 {
+        // A filled annular segment avoids tiny-skia's failed stroke on an
+        // empty dash. Subpixel amounts use the empty track until visible.
+        let angle = fraction * std::f64::consts::TAU;
+        let (sin, cos) = angle.sin_cos();
+        let large = u8::from(fraction > 0.5);
+        svg.push_str(&format!(
+            r#"<path fill="white" d="M12 1.75 A10.25 10.25 0 {large} 1 {} {} L{} {} A7.75 7.75 0 {large} 0 12 4.25 Z"/>"#,
+            12.0 + 10.25 * sin, 12.0 - 10.25 * cos,
+            12.0 + 7.75 * sin, 12.0 - 7.75 * cos,
+        ));
+    }
+    svg.push_str("</svg>");
+    svg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_ring_has_no_degenerate_strokes_at_empty_or_full_context() {
+        let empty = usage_ring_svg(0.0);
+        assert_eq!(empty.matches("<circle").count(), 1);
+        assert!(!empty.contains("<path"));
+        for fraction in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 1e-9] {
+            assert_eq!(usage_ring_svg(fraction), empty);
+        }
+        let full = usage_ring_svg(1.0);
+        assert_eq!(full.matches("<circle").count(), 2);
+        assert_eq!(full, usage_ring_svg(2.0));
+        for fraction in [0.001, 0.25, 0.5, 0.75, 0.999, 1.0] {
+            let svg = usage_ring_svg(fraction);
+            assert!(!svg.contains("stroke-dasharray"));
+            assert_eq!(svg.contains("<path"), fraction < 1.0);
+        }
+    }
 
     #[test]
     fn terminal_colours_translate_to_iced() {

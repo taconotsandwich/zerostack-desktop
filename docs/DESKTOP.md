@@ -110,6 +110,29 @@ retain visible text labels.
 
 ## Development validation
 
+### Renderer diagnostics
+
+The pinned wgpu backend may log `Unable to find extension:
+VK_EXT_physical_device_drm` while filtering optional Vulkan extensions. It also
+logs `Re-initializing Gles context due to Wayland window` when adapting its EGL
+context to the window's Wayland display. Neither message alone indicates that
+the window failed to render.
+
+`radv is not a conformant Vulkan implementation, testing use only` is emitted by
+the Mesa driver during device enumeration; it can also appear in
+`vulkaninfo --summary` independently of zerostack. Keep the driver diagnostic
+visible. For rendering problems, `ICED_BACKEND=tiny-skia zerostack --desktop`
+selects Iced's software renderer for comparison. The default still supports GPU
+rendering and Iced's fallback.
+
+The empty context ring previously used a zero-length SVG dash, which produced
+`tiny_skia::painter: path stroking failed`. Empty/full rings now use complete
+circles, and partial usage uses a filled arc, avoiding degenerate strokes. SVG
+rasterization can use tiny-skia even with the GPU renderer; that warning alone
+does not identify which renderer the app selected.
+
+### Checks
+
 Use `cargo fmt`, `cargo test --all-features -- --test-threads=1`, and
 `cargo install --path . --debug --all-features`. The `desktop` feature also
 works with default features disabled; auxiliary role controls follow the
