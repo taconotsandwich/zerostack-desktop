@@ -19,6 +19,7 @@ mod reply;
 mod review;
 mod review_view;
 mod scroll;
+mod setup;
 mod sidebar;
 mod style;
 mod transcript;
