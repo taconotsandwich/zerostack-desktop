@@ -9,6 +9,36 @@ use crate::permission::{Action, PermissionConfig, PermissionConfigs, SecurityMod
 
 pub type PermCheck = Arc<Mutex<PermissionChecker>>;
 
+#[cfg(feature = "hooks")]
+struct HookPermission {
+    tool: String,
+    action: std::cell::Cell<Option<Action>>,
+}
+
+#[cfg(feature = "hooks")]
+tokio::task_local! {
+    static HOOK_PERMISSION: HookPermission;
+}
+
+/// A one-shot hook decision belongs to this call's future, so concurrent or
+/// cancelled calls cannot consume or leave behind another call's permission.
+#[cfg(feature = "hooks")]
+pub(crate) async fn with_hook_permission<F: std::future::Future>(
+    tool: String,
+    action: Option<Action>,
+    call: F,
+) -> F::Output {
+    HOOK_PERMISSION
+        .scope(
+            HookPermission {
+                tool,
+                action: std::cell::Cell::new(action),
+            },
+            call,
+        )
+        .await
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckResult {
     Allowed,
@@ -42,15 +72,6 @@ pub struct PermissionChecker {
     user_mode: SecurityMode,
     permission_modes: Vec<SecurityMode>,
     allow_all_mcp_calls: bool,
-    /// One-shot: the next `check`/`check_path` call for this tool is forced
-    /// to `Ask`, consumed immediately after. Set by a hook `ask` verdict.
-    #[cfg(feature = "hooks")]
-    pending_forced_ask: Option<String>,
-    /// One-shot: the next `check`/`check_path` call for this tool suppresses
-    /// the prompt (`Allowed`), consumed immediately after. Set by a hook
-    /// `allow` verdict. Never bypasses a deny rule (checked first).
-    #[cfg(feature = "hooks")]
-    pending_one_shot_allow: Option<String>,
 }
 
 impl PermissionChecker {
@@ -204,27 +225,7 @@ impl PermissionChecker {
             user_mode: mode,
             permission_modes: resolved_modes,
             allow_all_mcp_calls: false,
-            #[cfg(feature = "hooks")]
-            pending_forced_ask: None,
-            #[cfg(feature = "hooks")]
-            pending_one_shot_allow: None,
         }
-    }
-
-    /// Forces the next `check`/`check_path` call for `tool` to `Ask`,
-    /// regardless of permission mode. Consumed after that one call. Set by a
-    /// hook `ask` verdict; never overrides a deny rule (checked first).
-    #[cfg(feature = "hooks")]
-    pub fn force_ask_once(&mut self, tool: String) {
-        self.pending_forced_ask = Some(tool);
-    }
-
-    /// Suppresses the interactive prompt for the next `check`/`check_path`
-    /// call for `tool`. Consumed after that one call. Set by a hook `allow`
-    /// verdict; never overrides a deny rule (checked first).
-    #[cfg(feature = "hooks")]
-    pub fn allow_once(&mut self, tool: String) {
-        self.pending_one_shot_allow = Some(tool);
     }
 
     fn apply_rules(&self) -> bool {
@@ -350,20 +351,22 @@ impl PermissionChecker {
         }
     }
 
-    /// Consumes a hook-set one-shot forced-ask/allow entry for `tool`, if
-    /// pending. Called after the deny-rule check in `check`/`check_path` so
-    /// neither can ever bypass a deny.
+    /// Consume this call's hook decision after checking deny rules.
     #[cfg(feature = "hooks")]
     fn take_pending_one_shot(&mut self, tool: &str) -> Option<CheckResult> {
-        if self.pending_forced_ask.as_deref() == Some(tool) {
-            self.pending_forced_ask = None;
-            return Some(CheckResult::Ask);
-        }
-        if self.pending_one_shot_allow.as_deref() == Some(tool) {
-            self.pending_one_shot_allow = None;
-            return Some(CheckResult::Allowed);
-        }
-        None
+        HOOK_PERMISSION
+            .try_with(|permission| {
+                if permission.tool != tool {
+                    return None;
+                }
+                permission.action.take().map(|action| match action {
+                    Action::Allow => CheckResult::Allowed,
+                    Action::Ask => CheckResult::Ask,
+                    Action::Deny => CheckResult::Denied("Blocked by hook".into()),
+                })
+            })
+            .ok()
+            .flatten()
     }
 
     pub fn check(&mut self, tool: &str, input: &str) -> CheckResult {

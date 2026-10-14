@@ -95,7 +95,7 @@ impl HookedTool {
                         .dispatch_pre_tool_use(&ctx, &tool_name, tool_input.clone())
                         .await;
 
-                    match pre.verdict {
+                    let permission = match pre.verdict {
                         Verdict::Deny => {
                             let reason = pre.reason.unwrap_or_else(|| "denied by hook".to_string());
                             if let Some(perm) = &this.permission {
@@ -107,31 +107,10 @@ impl HookedTool {
                                 "Blocked by guard rail: {reason}"
                             )));
                         }
-                        // Forces the inner tool's own permission check to
-                        // prompt regardless of mode; that check already
-                        // escalates to deny in non-interactive contexts (no
-                        // `ask_tx`), giving the spec's fail-closed behavior
-                        // for free.
-                        Verdict::Ask => {
-                            if let Some(perm) = &this.permission {
-                                perm.lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .force_ask_once(tool_name.clone());
-                            }
-                        }
-                        // Suppresses the inner tool's own permission prompt
-                        // for only this call; never bypasses a deny rule
-                        // (checked first in `PermissionChecker::check` /
-                        // `check_path`).
-                        Verdict::Allow => {
-                            if let Some(perm) = &this.permission {
-                                perm.lock()
-                                    .unwrap_or_else(|e| e.into_inner())
-                                    .allow_once(tool_name.clone());
-                            }
-                        }
-                        Verdict::Defer => {}
-                    }
+                        Verdict::Ask => Some(crate::permission::Action::Ask),
+                        Verdict::Allow => Some(crate::permission::Action::Allow),
+                        Verdict::Defer => None,
+                    };
 
                     // A PreToolUse hook may rewrite the arguments the inner
                     // tool actually runs with. Multiple rewrites are folded
@@ -139,7 +118,12 @@ impl HookedTool {
                     // result.
                     let call_args = pre.updated_input.unwrap_or(args);
 
-                    let result = this.inner.execute_with(context, call_args).await;
+                    let result = crate::permission::checker::with_hook_permission(
+                        tool_name.clone(),
+                        permission,
+                        this.inner.execute_with(context, call_args),
+                    )
+                    .await;
 
                     match &result {
                         Ok(output) => {

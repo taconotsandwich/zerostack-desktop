@@ -278,28 +278,32 @@ fn record_blocked_feeds_doom_loop_detection() {
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn force_ask_once_forces_ask_for_the_next_call_regardless_of_mode() {
+#[tokio::test]
+async fn force_ask_once_forces_ask_for_the_next_call_regardless_of_mode() {
     // Yolo would otherwise allow bash unconditionally.
     let mut checker = make_checker(SecurityMode::Yolo);
-    checker.force_ask_once("bash".to_string());
-    let result = checker.check("bash", "ls -la");
-    assert!(matches!(result, CheckResult::Ask));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Ask), async {
+        let result = checker.check("bash", "ls -la");
+        assert!(matches!(result, CheckResult::Ask));
+    })
+    .await;
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn force_ask_once_is_consumed_after_one_call() {
+#[tokio::test]
+async fn force_ask_once_is_consumed_after_one_call() {
     let mut checker = make_checker(SecurityMode::Yolo);
-    checker.force_ask_once("bash".to_string());
-    let _ = checker.check("bash", "ls -la");
-    let result = checker.check("bash", "ls -la");
-    assert!(matches!(result, CheckResult::Allowed));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Ask), async {
+        let _ = checker.check("bash", "ls -la");
+        let result = checker.check("bash", "ls -la");
+        assert!(matches!(result, CheckResult::Allowed));
+    })
+    .await;
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn force_ask_once_never_overrides_a_deny_rule() {
+#[tokio::test]
+async fn force_ask_once_never_overrides_a_deny_rule() {
     let config = PermissionConfig {
         bash: Some(ToolPerm::Granular({
             let mut m = std::collections::HashMap::new();
@@ -314,33 +318,39 @@ fn force_ask_once_never_overrides_a_deny_rule() {
         Some(std::path::PathBuf::from("/home/user/project")),
         default_modes(),
     );
-    checker.force_ask_once("bash".to_string());
-    let result = checker.check("bash", "rm -rf important");
-    assert!(matches!(result, CheckResult::Denied(_)));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Ask), async {
+        let result = checker.check("bash", "rm -rf important");
+        assert!(matches!(result, CheckResult::Denied(_)));
+    })
+    .await;
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn allow_once_suppresses_the_prompt_for_the_next_call() {
+#[tokio::test]
+async fn allow_once_suppresses_the_prompt_for_the_next_call() {
     let mut checker = make_checker(SecurityMode::Restrictive);
-    checker.allow_once("bash".to_string());
-    let result = checker.check("bash", "ls -la");
-    assert!(matches!(result, CheckResult::Allowed));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Allow), async {
+        let result = checker.check("bash", "ls -la");
+        assert!(matches!(result, CheckResult::Allowed));
+    })
+    .await;
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn allow_once_is_consumed_after_one_call() {
+#[tokio::test]
+async fn allow_once_is_consumed_after_one_call() {
     let mut checker = make_checker(SecurityMode::Restrictive);
-    checker.allow_once("bash".to_string());
-    let _ = checker.check("bash", "ls -la");
-    let result = checker.check("bash", "ls -la");
-    assert!(matches!(result, CheckResult::Ask));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Allow), async {
+        let _ = checker.check("bash", "ls -la");
+        let result = checker.check("bash", "ls -la");
+        assert!(matches!(result, CheckResult::Ask));
+    })
+    .await;
 }
 
 #[cfg(feature = "hooks")]
-#[test]
-fn allow_once_never_overrides_a_deny_rule() {
+#[tokio::test]
+async fn allow_once_never_overrides_a_deny_rule() {
     let config = PermissionConfig {
         bash: Some(ToolPerm::Granular({
             let mut m = std::collections::HashMap::new();
@@ -355,9 +365,11 @@ fn allow_once_never_overrides_a_deny_rule() {
         Some(std::path::PathBuf::from("/home/user/project")),
         default_modes(),
     );
-    checker.allow_once("bash".to_string());
-    let result = checker.check("bash", "rm -rf important");
-    assert!(matches!(result, CheckResult::Denied(_)));
+    crate::permission::checker::with_hook_permission("bash".into(), Some(Action::Allow), async {
+        let result = checker.check("bash", "rm -rf important");
+        assert!(matches!(result, CheckResult::Denied(_)));
+    })
+    .await;
 }
 
 // --- Session allowlist ---
