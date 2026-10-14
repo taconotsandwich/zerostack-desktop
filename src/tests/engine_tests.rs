@@ -843,3 +843,47 @@ async fn persisted_prompts_record_terminal_run_state() {
     assert_eq!(records[0].session_id, id);
     assert_eq!(records[0].state, crate::engine::runs::RunState::Completed);
 }
+
+#[cfg(all(feature = "subagents", feature = "advisor"))]
+#[tokio::test]
+async fn role_models_change_independently_and_reject_empty_selection() {
+    let _guard = fake_model::run_print_guard::acquire();
+    let mut engine = Engine::new(
+        test_cli(),
+        Config::default(),
+        test_session(),
+        test_context(),
+        test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    );
+    let main = engine.session().model.clone();
+    use crate::engine::models::AgentRole;
+    engine
+        .set_role_model(AgentRole::Subagent, "anthropic::child-model")
+        .await
+        .unwrap();
+    engine
+        .set_role_model(AgentRole::Advisor, "anthropic::advisor-model")
+        .await
+        .unwrap();
+    assert_eq!(engine.session().model, main);
+    assert_eq!(
+        engine
+            .resources()
+            .sync(|| crate::extras::subagents::model_settings().unwrap().1),
+        "child-model"
+    );
+    assert_eq!(
+        engine
+            .resources()
+            .sync(|| crate::extras::advisor::with_config(|c| c.advisor_model.clone())),
+        "advisor-model"
+    );
+    assert!(engine.set_role_model(AgentRole::Advisor, "").await.is_err());
+    assert_eq!(
+        engine.config().subagent_model.as_deref(),
+        Some("anthropic::child-model")
+    );
+    engine.shutdown().await;
+}

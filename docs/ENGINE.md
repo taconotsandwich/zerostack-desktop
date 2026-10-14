@@ -147,3 +147,8 @@ it is never silently replayed. ACP carries the same metadata as tool calls named
 `zerostack.subagent`, with stable `subagent:<id>` IDs and terminal raw output.
 Cancellation delivery is best effort at the bounded task channel; the engine
 closes remaining running records when the parent turn terminates.
+
+`set_role_model(AgentRole, selection)` changes main, subagent or advisor models
+independently. Unsupported roles return an error. ACP exposes `model`,
+`subagent_model` and `advisor_model` options for the compiled roles. Role changes
+apply to subsequent calls in that session; they do not retarget active tasks.

@@ -142,6 +142,27 @@ pub(super) fn config_options(engine: &Engine) -> Vec<SessionConfigOption> {
         SessionConfigOption::boolean(REASONING, "Reasoning", engine.reasoning_enabled())
             .category(SessionConfigOptionCategory::ThoughtLevel),
     ];
+    #[cfg(feature = "subagents")]
+    options.push(role_option(
+        engine,
+        crate::engine::models::AgentRole::Subagent,
+        engine
+            .config()
+            .subagent_model
+            .as_deref()
+            .unwrap_or(&engine.session().model),
+    ));
+    #[cfg(feature = "advisor")]
+    options.push(role_option(
+        engine,
+        crate::engine::models::AgentRole::Advisor,
+        engine
+            .config()
+            .advisor
+            .as_ref()
+            .and_then(|c| c.model.as_deref())
+            .unwrap_or(&engine.session().model),
+    ));
     options.extend(mode_option(engine));
     options
 }
@@ -165,7 +186,21 @@ async fn apply(
         .ok_or_else(|| anyhow::anyhow!("{id} takes a value id"))?;
     let value: &str = &value.0;
     match id {
-        MODEL => engine.set_model_selection(value).await,
+        MODEL => {
+            engine
+                .set_role_model(crate::engine::models::AgentRole::Main, value)
+                .await
+        }
+        "subagent_model" => {
+            engine
+                .set_role_model(crate::engine::models::AgentRole::Subagent, value)
+                .await
+        }
+        "advisor_model" => {
+            engine
+                .set_role_model(crate::engine::models::AgentRole::Advisor, value)
+                .await
+        }
         PROVIDER => engine.set_provider(value).await,
         PROMPT => engine.set_prompt(value).await,
         EDIT_SYSTEM => engine.set_edit_system(value),
@@ -197,4 +232,31 @@ pub(super) async fn handle_set_config_option(
     responder.respond(SetSessionConfigOptionResponse::new(config_options(
         &live.engine,
     )))
+}
+
+fn role_option(
+    engine: &Engine,
+    role: crate::engine::models::AgentRole,
+    current: &str,
+) -> SessionConfigOption {
+    let values = crate::engine::models::model_choices(
+        engine.config(),
+        &engine.session().provider,
+        &engine.session().model,
+    )
+    .into_iter()
+    .map(|choice| {
+        (
+            format!("{}::{}", choice.key.provider, choice.key.id),
+            choice.label,
+        )
+    })
+    .collect();
+    SessionConfigOption::select(
+        role.option(),
+        role.option(),
+        current.to_string(),
+        select_options(current, values),
+    )
+    .category(SessionConfigOptionCategory::Model)
 }

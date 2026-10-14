@@ -583,3 +583,20 @@ mod selection_tests {
         );
     }
 }
+
+/// Frontend roles. Availability follows the compiled feature set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRole {
+    Main,
+    Subagent,
+    Advisor,
+}
+impl AgentRole {
+    pub fn option(self) -> &'static str {
+        match self {
+            Self::Main => "model",
+            Self::Subagent => "subagent_model",
+            Self::Advisor => "advisor_model",
+        }
+    }
+}
