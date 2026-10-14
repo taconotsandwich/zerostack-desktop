@@ -50,6 +50,10 @@ Standalone CLI bootstrap helpers retain a fallback resource context.
 
 ## Cancellation and shutdown
 
+Hook permission overrides are scoped to the individual tool-call future.
+Concurrent calls cannot consume each other's one-shot allow/ask decisions,
+and cancellation discards any unused decision. Explicit deny rules still win.
+
 An `AgentRunner` owns a `RunGuard`. Dropping or replacing it aborts its task;
 dropping a pending `Engine::run_prompt` future also drops that guard. Explicit
 `CancelHandle::cancel()` preserves the interrupted conversation. Cancellation
