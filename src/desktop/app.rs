@@ -15,6 +15,7 @@ use crate::engine::RunKind;
 use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
+    pub setup: super::setup::Setup,
     pub worker: Option<Worker>,
     pub project: String,
     pub cli: Cli,
@@ -76,6 +77,7 @@ pub(super) struct App {
 
 #[derive(Debug, Clone)]
 pub(super) enum Panel {
+    ProviderSetup,
     Context,
     Settings,
     Form(Command),
@@ -87,6 +89,7 @@ pub(super) enum Panel {
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
+    Setup(super::setup::Event),
     Ready(worker::Reply),
     Edit(text_editor::Action),
     Send,
@@ -154,6 +157,8 @@ pub(super) enum Message {
 impl App {
     pub fn new(cli: Cli) -> (Self, Task<Message>) {
         let preferences = super::preferences::Preferences::load();
+        let (configuration, first_start) = crate::config::load();
+        let setup = super::setup::Setup::new(configuration);
         // A bundled app has no meaningful working directory: it reopens the
         // last project, and asks for one only when there is none left.
         let directory = std::env::var_os("ZS_DESKTOP_PICK_PROJECT").map(|_| {
@@ -164,7 +169,7 @@ impl App {
                 .map(|project| project.display().to_string())
         });
         let pick_project = matches!(directory, Some(None));
-        let (worker, task) = if pick_project {
+        let (worker, task) = if pick_project || first_start {
             (None, Task::none())
         } else {
             let (worker, ready) = Worker::start(cli.clone(), directory.clone().flatten());
@@ -175,6 +180,7 @@ impl App {
         };
         (
             Self {
+                setup,
                 worker,
                 project: directory.flatten().unwrap_or_else(|| {
                     std::env::current_dir()
@@ -187,9 +193,9 @@ impl App {
                 content: text_editor::Content::new(),
                 markdown: Vec::new(),
                 activity: Vec::new(),
-                busy: !pick_project,
+                busy: !pick_project && !first_start,
                 error: String::new(),
-                status: if pick_project {
+                status: if pick_project || first_start {
                     String::new()
                 } else {
                     "Loading…".into()
@@ -198,7 +204,7 @@ impl App {
                 sidebar: true,
                 menu: None,
                 rename: None,
-                panel: None,
+                panel: first_start.then_some(Panel::ProviderSetup),
                 fields: Vec::new(),
                 expanded: HashSet::new(),
                 expanded_rows: HashSet::new(),
@@ -334,6 +340,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Setup(event) => return self.update_setup(event),
             Message::Completed(id, reply) if id == self.turn_id => {
                 return self.update(Message::Ready(reply));
             }
