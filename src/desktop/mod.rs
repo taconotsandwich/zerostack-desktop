@@ -20,6 +20,7 @@ mod panels;
 mod parallel;
 mod preferences;
 mod queue;
+mod queue_store;
 mod reply;
 mod review;
 mod review_view;

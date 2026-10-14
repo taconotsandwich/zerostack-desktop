@@ -26,6 +26,39 @@ pub(super) fn restore(draft: &str, queued: impl IntoIterator<Item = String>) -> 
 }
 
 impl App {
+    pub(super) fn persist_queue(&mut self, active: Option<String>, paused: bool) -> bool {
+        let Some(snapshot) = &self.snapshot else {
+            return true;
+        };
+        let id = snapshot.session.id.to_string();
+        let queue = super::queue_store::SavedQueue {
+            project: self.project.clone(),
+            pending: self.queued.clone(),
+            active,
+            paused,
+        };
+        if queue.empty() {
+            self.preferences.queues.remove(&id);
+        } else {
+            self.preferences.queues.insert(id, queue);
+        }
+        match self.preferences.save() {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = error;
+                false
+            }
+        }
+    }
+    pub(super) fn persist_pending_queue(&mut self) -> bool {
+        let active = self
+            .snapshot
+            .as_ref()
+            .and_then(|s| self.preferences.queues.get(s.session.id.as_str()))
+            .and_then(|q| q.active.clone());
+        self.persist_queue(active, self.queue_paused)
+    }
+
     /// Moves the composer's text behind the running turn.
     pub(super) fn queue_composer(&mut self) {
         let input = self.content.text().trim().to_string();
@@ -33,6 +66,10 @@ impl App {
             return;
         }
         self.queued.push_back(input);
+        if !self.persist_pending_queue() {
+            self.queued.pop_back();
+            return;
+        }
         self.content = text_editor::Content::new();
         self.remember_draft();
     }
@@ -40,30 +77,36 @@ impl App {
     /// Takes the first queued `text` out of the queue.
     pub(super) fn unqueue(&mut self, text: &str) -> bool {
         let index = self.queued.iter().position(|queued| queued == text);
-        index.and_then(|index| self.queued.remove(index)).is_some()
+        let removed = index.and_then(|index| self.queued.remove(index)).is_some();
+        self.persist_pending_queue();
+        removed
     }
 
     /// Sends the oldest queued text once a turn ends cleanly. After an error,
-    /// or while the window closes, the queue goes back into the composer
-    /// instead: nothing is sent to a failing provider, and nothing is lost.
+    /// or while the window closes, the queue pauses for explicit resume.
     pub(super) fn send_queued(&mut self) -> Task<Message> {
-        if self.error.is_empty()
-            && self.snapshot.is_some()
-            && self.closing.is_none()
+        if self.queue_paused || self.closing.is_some() {
+            return Task::none();
+        }
+        if !self.error.is_empty() {
+            self.queue_paused = true;
+            self.persist_pending_queue();
+            return Task::none();
+        }
+        if self.snapshot.is_some()
             && let Some(next) = self.queued.pop_front()
         {
-            return self.dispatch(Operation::Prompt(next));
-        }
-        if !self.queued.is_empty() {
-            let queued = std::mem::take(&mut self.queued);
-            self.restore_into_composer(queued);
+            let task = self.dispatch(Operation::Prompt(next.clone()));
+            if !self.busy {
+                self.queued.push_front(next);
+                self.queue_paused = true;
+            }
+            return task;
         }
         Task::none()
     }
 
-    /// Stops the running turn. The queue goes back into the composer, since
-    /// whoever stops a turn has not decided on what was meant to follow it,
-    /// and an open permission ask is answered as cancelled.
+    /// Stops the turn and pauses pending input. Permission asks are cancelled.
     pub(super) fn stop(&mut self) {
         if let Some(worker) = &self.worker {
             worker.cancel();
@@ -77,10 +120,8 @@ impl App {
                     .take(),
             );
         }
-        let queued = std::mem::take(&mut self.queued);
-        if !queued.is_empty() {
-            self.restore_into_composer(queued);
-        }
+        self.queue_paused = true;
+        self.persist_pending_queue();
     }
 
     /// Moves a queued `text` back into the composer to edit.
@@ -101,8 +142,23 @@ impl App {
     }
 
     pub(super) fn queued_view(&self) -> Element<'_, Message> {
-        let mut list =
-            column![text("Queued").size(style::CAPTION).color(style::MUTED)].spacing(layout::XS);
+        let mut list = column![
+            row![
+                text(if self.queue_paused {
+                    "Paused queue · review before resuming"
+                } else {
+                    "Queued"
+                })
+                .size(style::CAPTION)
+                .color(style::MUTED),
+                components::action(
+                    "Resume",
+                    (self.queue_paused && !self.busy).then_some(Message::ResumeQueue)
+                )
+            ]
+            .spacing(layout::SM)
+        ]
+        .spacing(layout::XS);
         for queued in &self.queued {
             let label = queued.lines().next().unwrap_or_default().to_string();
             list = list.push(

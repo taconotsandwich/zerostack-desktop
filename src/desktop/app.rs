@@ -60,6 +60,7 @@ pub(super) struct App {
     pub pending: Option<Operation>,
     /// Prompts typed while a turn runs, sent one by one as turns end.
     pub queued: VecDeque<String>,
+    pub queue_paused: bool,
     submitted: Option<String>,
     pub after_load: Option<Command>,
     pub closing: Option<window::Id>,
@@ -75,7 +76,7 @@ pub(super) struct App {
     pub follow_output: bool,
     pub turn_id: u64,
     /// The last turn id handed out; turns running aside keep theirs.
-    turns: u64,
+    pub(super) turns: u64,
     /// Conversations whose turn runs while another one is shown.
     pub running: Vec<super::parallel::Running>,
 }
@@ -103,6 +104,7 @@ pub(super) enum Message {
     Edit(text_editor::Action),
     Send,
     Stop,
+    ResumeQueue,
     Unqueue(String),
     EditQueued(String),
     Copy(String),
@@ -237,6 +239,7 @@ impl App {
                 usage_open: false,
                 pending: None,
                 queued: VecDeque::new(),
+                queue_paused: false,
                 submitted: None,
                 after_load: None,
                 closing: None,
@@ -262,6 +265,11 @@ impl App {
         let Some(worker) = self.worker.clone() else {
             return Task::none();
         };
+        if let Operation::Prompt(prompt) = &operation {
+            if !self.persist_queue(Some(prompt.clone()), self.queue_paused) {
+                return Task::none();
+            }
+        }
         self.remember_draft();
         self.busy = true;
         self.error.clear();
@@ -382,6 +390,10 @@ impl App {
                 self.events = None;
                 self.permission = None;
                 let pending = self.pending.take();
+                if matches!(pending, Some(Operation::Prompt(_))) {
+                    self.queue_paused |= !super::queue_store::successful(&result);
+                    self.persist_queue(None, self.queue_paused);
+                }
                 let mut scroll = false;
                 let mut focus = false;
                 let mut open_path: Option<String> = None;
@@ -428,6 +440,9 @@ impl App {
                             })
                             .map(str::to_string);
                         if changed_session {
+                            let queue = self.preferences.queues.get(snapshot.session.id.as_str());
+                            self.queued = queue.map(|q| q.pending.clone()).unwrap_or_default();
+                            self.queue_paused = queue.is_some_and(|q| q.paused);
                             self.follow_output = true;
                             scroll = true;
                             focus = true;
@@ -660,6 +675,10 @@ impl App {
                 self.queue_composer()
             }
             Message::Stop if self.busy => self.stop(),
+            Message::ResumeQueue if !self.busy => {
+                self.queue_paused = false;
+                return self.send_queued();
+            }
             Message::Unqueue(text) => {
                 self.unqueue(&text);
             }

@@ -28,6 +28,7 @@ pub(super) struct Running {
     pub events: Option<UiSender>,
     pub pending: Option<Operation>,
     pub queued: VecDeque<String>,
+    pub paused: bool,
 }
 
 /// The conversation a running turn belongs to, as the sidebar should list
@@ -123,6 +124,7 @@ impl App {
             events: self.events.take(),
             pending,
             queued: std::mem::take(&mut self.queued),
+            paused: self.queue_paused,
         });
         self.permission_scope_open = false;
         self.busy = false;
@@ -151,6 +153,7 @@ impl App {
         self.events = running.events;
         self.pending = running.pending;
         self.queued = running.queued;
+        self.queue_paused = running.paused;
         self.busy = true;
         self.status = "Working…".into();
         self.follow_output = true;
@@ -207,23 +210,66 @@ impl App {
         else {
             return Task::none();
         };
-        let running = self.running.remove(index);
+        let mut running = self.running.remove(index);
+        let completed = super::queue_store::successful(&reply);
+        let id = running.session.id.to_string();
+        if let Ok(snapshot) = &reply {
+            running.snapshot = snapshot.clone();
+            running.session = snapshot.session.clone();
+        }
         if let Err(error) = &reply {
             self.error = format!("{}: {error}", super::worker::title(&running.session));
         }
-        if !running.queued.is_empty() {
-            let key = super::preferences::draft_key(&running.session).to_string();
-            let draft = self
-                .preferences
-                .drafts
-                .get(&key)
-                .cloned()
-                .unwrap_or_default();
-            self.preferences
-                .set_draft(key, super::queue::restore(&draft, running.queued));
-            if let Err(error) = self.preferences.save() {
-                self.error = error;
+        let active = match &running.pending {
+            Some(Operation::Prompt(prompt)) => Some(prompt.clone()),
+            _ => None,
+        };
+        let mut record = super::queue_store::SavedQueue {
+            project: running.project.clone(),
+            pending: running.queued.clone(),
+            active,
+            paused: running.paused,
+        };
+        let next = record.finish(completed, self.closing.is_none() && !running.paused);
+        running.queued = record.pending.clone();
+        if record.empty() {
+            self.preferences.queues.remove(&id);
+        } else {
+            self.preferences.queues.insert(id.clone(), record);
+        }
+        if let Err(error) = self.preferences.save() {
+            self.error = error;
+            if let Some(record) = self.preferences.queues.get_mut(&id) {
+                record.recover();
             }
+            return Task::future(running.worker.stop()).discard();
+        }
+        if let Some(next) = next {
+            self.turns += 1;
+            running.turn_id = self.turns;
+            let turn_id = running.turn_id;
+            running.pending = Some(Operation::Prompt(next.clone()));
+            running.live = LiveTurn::default();
+            running.permission = None;
+            let (events, receiver) = tokio::sync::mpsc::unbounded_channel();
+            running.events = Some(events.clone());
+            let worker = running.worker.clone();
+            self.running.push(running);
+            return Task::batch([
+                Task::stream(futures::stream::unfold(
+                    receiver,
+                    move |mut receiver| async move {
+                        receiver
+                            .recv()
+                            .await
+                            .map(|event| (Message::Engine(turn_id, event), receiver))
+                    },
+                )),
+                Task::perform(
+                    worker.request(Operation::Prompt(next), Some(events)),
+                    move |reply| Message::Completed(turn_id, reply),
+                ),
+            ]);
         }
         self.refresh_sessions();
         Task::future(running.worker.stop()).discard()
