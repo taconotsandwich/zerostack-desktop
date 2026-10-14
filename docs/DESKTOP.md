@@ -60,3 +60,11 @@ to a branch, open an existing worktree, or create a branch and a new worktree at
 an absolute path. Branch switching requires a clean checkout. Git writes wait
 until foreground and background tasks finish and reject changed HEAD/index state.
 New worktrees open as a separate project with a new conversation.
+
+## Stage and commit
+
+Stage file and Unstage file operate on the selected change, including both
+sides of a rename. Discard unstaged requires an explicit confirmation and
+restores the file from the index, preserving staged edits. Enter a commit message
+then Commit staged; only staged changes are committed. Conflicts block commits.
+Errors preserve the message for correction. Git hooks and signing remain active.

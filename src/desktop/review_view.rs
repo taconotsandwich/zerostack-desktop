@@ -17,11 +17,12 @@ pub(super) struct Review {
     pub(super) loading: bool,
     pub(super) mutating: bool,
     pub(super) workspace: super::git_workspace::Workspace,
+    pub(super) writes: super::git_write::Writes,
     pub(super) repository: Option<Snapshot>,
     preview: Option<Preview>,
     diff: Option<FileDiff>,
-    selected: Option<Change>,
-    scope: DiffScope,
+    pub(super) selected: Option<Change>,
+    pub(super) scope: DiffScope,
     content: text_editor::Content,
     pub(super) error: String,
     comment: String,
@@ -37,6 +38,11 @@ impl Review {
 }
 #[derive(Debug, Clone)]
 pub(super) enum Event {
+    CommitMessage(String),
+    Commit,
+    AskRestore(Change),
+    ConfirmRestore,
+    CancelRestore,
     Workspace,
     BranchName(String),
     WorktreePath(String),
@@ -81,6 +87,20 @@ impl App {
             return Task::none();
         }
         match event {
+            Event::CommitMessage(value) => self.review.writes.message = value,
+            Event::Commit => {
+                self.review.writes.committing = true;
+                return self.mutate_repository(Mutation::Commit {
+                    message: self.review.writes.message.clone(),
+                });
+            }
+            Event::AskRestore(change) => self.review.writes.restore = Some(change),
+            Event::CancelRestore => self.review.writes.restore = None,
+            Event::ConfirmRestore => {
+                if let Some(change) = self.review.writes.restore.take() {
+                    return self.mutate_repository(Mutation::Restore(vec![change.path]));
+                }
+            }
             Event::Workspace => self.review.workspace.open = !self.review.workspace.open,
             Event::BranchName(value) => self.review.workspace.branch = value,
             Event::WorktreePath(value) => self.review.workspace.path = value,
@@ -90,13 +110,20 @@ impl App {
                 self.review.mutating = false;
                 match result {
                     Ok(outcome) => {
+                        if self.review.writes.committing {
+                            self.review.writes.message.clear();
+                        }
+                        self.review.writes.committing = false;
                         self.status = outcome.message;
                         if let Some(path) = outcome.workspace {
                             return self.open_project(path, None);
                         }
                         return self.update_review(Event::Refresh);
                     }
-                    Err(error) => self.review.error = error,
+                    Err(error) => {
+                        self.review.writes.committing = false;
+                        self.review.error = error;
+                    }
                 }
             }
             Event::Toggle => {
@@ -344,6 +371,7 @@ impl App {
                 files = files.push(text("No local changes").size(style::LABEL));
             }
             pane = pane.push(container(scrollable(files)).max_height(160));
+            pane = pane.push(self.staging_controls(snapshot));
         }
         if self.review.mutating {
             pane = pane.push(text("Applying Git operation…").size(style::CAPTION));
