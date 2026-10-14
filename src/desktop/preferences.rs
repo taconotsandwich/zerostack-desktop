@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,9 +8,34 @@ use serde::{Deserialize, Serialize};
 pub(super) struct Preferences {
     pub projects: Vec<PathBuf>,
     pub drafts: HashMap<String, String>,
+    pub pinned: HashSet<String>,
+    pub archived: HashSet<String>,
 }
 
 impl Preferences {
+    pub fn toggle_pin(&mut self, id: String) {
+        if !self.pinned.remove(&id) {
+            self.pinned.insert(id);
+        }
+    }
+    pub fn toggle_archive(&mut self, id: String) {
+        if !self.archived.remove(&id) {
+            self.archived.insert(id);
+        }
+    }
+    pub fn visible(&self, session: &crate::session::Session, query: &str, archive: bool) -> bool {
+        if self.archived.contains(session.id.as_str()) != archive {
+            return false;
+        }
+        let query = query.trim().to_lowercase();
+        query.is_empty()
+            || session.name.to_lowercase().contains(&query)
+            || session.working_dir.to_lowercase().contains(&query)
+            || session
+                .messages
+                .iter()
+                .any(|message| message.content.to_lowercase().contains(&query))
+    }
     pub fn load() -> Self {
         std::fs::read(Self::path())
             .ok()
@@ -128,5 +153,27 @@ mod tests {
         );
         assert!(!restored.drafts.contains_key("session-b"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod organization_tests {
+    use super::*;
+    #[test]
+    fn archive_is_reversible_and_search_includes_message_content() {
+        let mut preferences: Preferences = serde_json::from_str("{}").unwrap();
+        let mut session = crate::session::Session::new("anthropic", "model", 1000, "");
+        session.add_message(crate::session::MessageRole::User, "Find the NEEDLE");
+        assert!(preferences.visible(&session, "needle", false));
+        assert!(!preferences.visible(&session, "missing", false));
+        preferences.toggle_archive(session.id.to_string());
+        preferences.toggle_pin(session.id.to_string());
+        let mut restored: Preferences =
+            serde_json::from_str(&serde_json::to_string(&preferences).unwrap()).unwrap();
+        assert!(!restored.visible(&session, "", false));
+        assert!(restored.visible(&session, "needle", true));
+        assert!(restored.pinned.contains(session.id.as_str()));
+        restored.toggle_archive(session.id.to_string());
+        assert!(restored.visible(&session, "needle", false));
     }
 }

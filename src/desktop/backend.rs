@@ -72,7 +72,7 @@ impl Backend {
         }
         if cli.continue_session {
             let folder = self.folder.to_string_lossy();
-            return storage::find_recent_sessions(100)
+            return storage::find_recent_sessions(usize::MAX)
                 .ok()?
                 .into_iter()
                 .find(|session| session.working_dir == folder.as_ref())
@@ -282,7 +282,7 @@ impl Backend {
             .unwrap_or_else(|| ("default".to_string(), vec!["default".to_string()]));
         let active = self.session.id.clone();
         Ok(Snapshot {
-            sessions: storage::find_recent_sessions(100)?
+            sessions: storage::find_recent_sessions(usize::MAX)?
                 .into_iter()
                 .filter(|session| !session.messages.is_empty() || session.id == active)
                 .collect(),

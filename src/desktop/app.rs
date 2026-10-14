@@ -33,6 +33,8 @@ pub(super) struct App {
     pub status: String,
     pub command_output: String,
     pub sidebar: bool,
+    pub search: String,
+    pub show_archived: bool,
     pub menu: Option<(String, Point)>,
     pub rename: Option<(String, String)>,
     pub panel: Option<Panel>,
@@ -112,6 +114,10 @@ pub(super) enum Message {
     Field(usize, String),
     Show(Panel),
     ClosePanel,
+    Search(String),
+    ToggleArchiveView,
+    PinSession(String),
+    ArchiveSession(String),
     ToggleSidebar,
     ToggleTool(usize),
     ToggleToolRow(usize, usize),
@@ -202,6 +208,8 @@ impl App {
                 },
                 command_output: String::new(),
                 sidebar: true,
+                search: String::new(),
+                show_archived: false,
                 menu: None,
                 rename: None,
                 panel: first_start.then_some(Panel::ProviderSetup),
@@ -828,6 +836,22 @@ impl App {
                 self.panel = None;
                 self.menu = None;
                 self.error.clear();
+            }
+            Message::Search(query) => self.search = query,
+            Message::ToggleArchiveView => self.show_archived = !self.show_archived,
+            Message::PinSession(id) => {
+                self.preferences.toggle_pin(id);
+                self.menu = None;
+                if let Err(error) = self.preferences.save() {
+                    self.error = error;
+                }
+            }
+            Message::ArchiveSession(id) => {
+                self.preferences.toggle_archive(id);
+                self.menu = None;
+                if let Err(error) = self.preferences.save() {
+                    self.error = error;
+                }
             }
             Message::ToggleSidebar => {
                 self.sidebar = !self.sidebar;

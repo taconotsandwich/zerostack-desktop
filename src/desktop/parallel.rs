@@ -245,7 +245,7 @@ impl App {
             return;
         };
         let active = snapshot.session.id.clone();
-        let Ok(sessions) = storage::find_recent_sessions(100) else {
+        let Ok(sessions) = storage::find_recent_sessions(usize::MAX) else {
             return;
         };
         let sessions = sessions
