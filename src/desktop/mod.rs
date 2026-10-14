@@ -9,6 +9,7 @@ mod bubble;
 mod commands;
 mod components;
 mod git_workspace;
+mod git_write;
 mod history;
 mod history_window;
 mod layout;
