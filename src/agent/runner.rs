@@ -97,12 +97,17 @@ async fn start_stream(
     retry_config: &RetryConfig,
     failures: Option<&ToolFailures>,
 ) -> Result<StreamingResult, anyhow::Error> {
+    let concurrency = crate::engine::resources::current()
+        .tool_concurrency
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get();
     retry::retry_stream_chat(retry_config, || {
         let p = prompt.clone();
         let h = history.clone();
         let failures = failures.cloned();
         async move {
-            let run = agent.prompt(p).history(h);
+            let run = agent.prompt(p).history(h).tool_concurrency(concurrency);
             match failures {
                 Some(failures) => run.add_hook(failures).stream(),
                 None => run.stream(),
@@ -860,6 +865,11 @@ pub async fn run_subagent(
     event_tx: Option<&mpsc::Sender<AgentEvent>>,
     retry_config: &RetryConfig,
 ) -> anyhow::Result<String> {
+    let concurrency = crate::engine::resources::current()
+        .tool_concurrency
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get();
     let mut stream = retry::retry_stream_chat(retry_config, || {
         let p = prompt.to_string();
         async move {
@@ -867,6 +877,7 @@ pub async fn run_subagent(
                 .prompt(p)
                 .history(Vec::<Message>::new())
                 .max_turns(max_turns)
+                .tool_concurrency(concurrency)
                 .stream()
         }
     })

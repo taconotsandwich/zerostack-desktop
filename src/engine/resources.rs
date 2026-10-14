@@ -28,6 +28,7 @@ pub(crate) struct Resources {
     #[cfg(feature = "hooks")]
     pub hooks: Mutex<Option<Arc<crate::extras::hooks::dispatcher::HookDispatcher>>>,
     pub session_id: RwLock<String>,
+    pub tool_concurrency: RwLock<std::num::NonZeroUsize>,
     closing: std::sync::atomic::AtomicBool,
     tasks: Mutex<Vec<tokio::task::AbortHandle>>,
 }
@@ -54,6 +55,7 @@ impl Default for Resources {
             #[cfg(feature = "hooks")]
             hooks: Mutex::default(),
             session_id: RwLock::new(uuid::Uuid::new_v4().to_string()),
+            tool_concurrency: RwLock::new(std::num::NonZeroUsize::MIN),
             closing: std::sync::atomic::AtomicBool::new(false),
             tasks: Mutex::default(),
         }
@@ -78,6 +80,12 @@ impl Resources {
         let parent = current();
         Arc::new(Self {
             workspace: RwLock::new(Some(workspace)),
+            tool_concurrency: RwLock::new(
+                *parent
+                    .tool_concurrency
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner()),
+            ),
             data_dir: Some(crate::session::storage::data_dir()),
             config_dir: Some(
                 crate::config::config_file_path()

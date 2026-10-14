@@ -170,6 +170,16 @@ permission.doom_loop = "ask"
 
 Accepted top-level keys:
 
+`tool_concurrency` controls how many tool calls one agent can execute at once.
+It defaults to `1`, which preserves execution order. Set a positive integer
+(for example, `tool_concurrency = 4`) to overlap calls in a model response.
+This includes tools with side effects such as shell, edit and MCP calls;
+keep `1` when those operations must be ordered. Main and subagent runs use the
+same setting, with a separate limit for each run. It does not limit the number
+of subagents. Results remain in model call order and arrive after the batch.
+Zero and negative values are invalid. This setting does not require the
+`multithread` feature.
+
 | Key                       | Type    | Description                                                                                                                                                                 |
 | ------------------------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `provider`                | string  | Provider name. Built-ins are `openrouter`, `openai`, `anthropic`, `gemini`/`google`, `ollama`, `opencode-zen`, and `opencode-go`; custom provider aliases are also accepted. Default: `openrouter`. |

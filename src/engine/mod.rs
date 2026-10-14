@@ -209,6 +209,26 @@ impl Drop for Engine {
 }
 
 impl Engine {
+    /// Maximum tool calls running at once in each agent's model-response batch.
+    pub fn tool_concurrency(&self) -> std::num::NonZeroUsize {
+        *self
+            .resources
+            .tool_concurrency
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Set the limit for subsequent runs, including newly started subagents.
+    /// One preserves tool call order. Higher values let tool side effects
+    /// interleave; results are still recorded in model call order.
+    pub fn set_tool_concurrency(&mut self, limit: std::num::NonZeroUsize) {
+        *self
+            .resources
+            .tool_concurrency
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = limit;
+    }
+
     #[cfg(feature = "acp")]
     pub(crate) fn resource_context(&self) -> std::sync::Arc<resources::Resources> {
         self.resources.clone()
@@ -247,6 +267,11 @@ impl Engine {
         let resources = resources::Resources::for_workspace(std::path::PathBuf::from(
             session.working_dir.as_str(),
         ));
+        *resources
+            .tool_concurrency
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) =
+            cfg.tool_concurrency.unwrap_or(std::num::NonZeroUsize::MIN);
         resources.clone().sync(|| {
             crate::provider::set_opencode_session_id(&session.id);
             crate::agent::tools::set_edit_system(cli.resolve_edit_system(&cfg));

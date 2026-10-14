@@ -63,6 +63,11 @@ impl<'a> ExecutionContext<'a> {
         let resources = crate::engine::resources::Resources::for_workspace(
             std::path::PathBuf::from(session.working_dir.as_str()),
         );
+        *resources
+            .tool_concurrency
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) =
+            cfg.tool_concurrency.unwrap_or(std::num::NonZeroUsize::MIN);
         resources
             .clone()
             .sync(|| crate::provider::set_opencode_session_id(&session.id));

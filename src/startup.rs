@@ -506,6 +506,13 @@ impl Startup {
         let edit_system = self.cli.resolve_edit_system(&self.cfg);
         tools::set_edit_system(edit_system);
         tools::set_deny_repeated_reads(self.cfg.deny_repeated_reads.unwrap_or(true));
+        *crate::engine::resources::current()
+            .tool_concurrency
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = self
+            .cfg
+            .tool_concurrency
+            .unwrap_or(std::num::NonZeroUsize::MIN);
 
         #[cfg(feature = "status-signals")]
         {
