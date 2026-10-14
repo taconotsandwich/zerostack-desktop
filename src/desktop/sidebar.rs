@@ -143,8 +143,15 @@ impl App {
                 .into_iter()
                 .chain(aside)
                 .chain(&snapshot.sessions)
-                .filter(|session| !self.deleted.contains(session.id.as_str()));
-            for group in groups(sessions, &self.project) {
+                .filter(|session| !self.deleted.contains(session.id.as_str()))
+                .filter(|session| {
+                    self.preferences
+                        .visible(session, &self.search, self.show_archived)
+                });
+            for mut group in groups(sessions, &self.project) {
+                group
+                    .sessions
+                    .sort_by_key(|session| !self.preferences.pinned.contains(session.id.as_str()));
                 list =
                     list.push(self.project_heading(group.project, group.project == self.project));
                 for session in group.sessions {
@@ -168,6 +175,16 @@ impl App {
             container(
                 column![
                     top,
+                    components::field("Search conversations…", &self.search)
+                        .on_input(Message::Search),
+                    components::action(
+                        if self.show_archived {
+                            "Archived · show active"
+                        } else {
+                            "Show archived"
+                        },
+                        Some(Message::ToggleArchiveView)
+                    ),
                     container(heading)
                         .padding([0.0, layout::MD])
                         .height(layout::CONTROL_HEIGHT),
@@ -188,7 +205,26 @@ impl App {
     /// The actions of a conversation row, at `position`; a press anywhere
     /// else closes it.
     pub(super) fn row_menu<'a>(&self, id: &'a str, position: Point) -> Element<'a, Message> {
-        let mut menu = column![];
+        let mut menu = column![
+            components::action(
+                if self.preferences.pinned.contains(id) {
+                    "Unpin"
+                } else {
+                    "Pin"
+                },
+                Some(Message::PinSession(id.into()))
+            )
+            .width(Fill),
+            components::action(
+                if self.preferences.archived.contains(id) {
+                    "Restore"
+                } else {
+                    "Archive"
+                },
+                Some(Message::ArchiveSession(id.into()))
+            )
+            .width(Fill),
+        ];
         for (label, syntax) in [
             ("Export", "/export"),
             ("Share", "/share"),
