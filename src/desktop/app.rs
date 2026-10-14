@@ -15,6 +15,7 @@ use crate::engine::RunKind;
 use crate::permission::ask::UserDecision;
 
 pub(super) struct App {
+    pub models: super::models::Models,
     pub setup: super::setup::Setup,
     pub worker: Option<Worker>,
     pub project: String,
@@ -58,7 +59,6 @@ pub(super) struct App {
     pub queued: VecDeque<String>,
     submitted: Option<String>,
     pub after_load: Option<Command>,
-    pub model_input: String,
     pub closing: Option<window::Id>,
     /// Streamed state of the in-flight turn (cleared when the snapshot lands).
     pub live: LiveTurn,
@@ -79,6 +79,7 @@ pub(super) struct App {
 
 #[derive(Debug, Clone)]
 pub(super) enum Panel {
+    Models,
     ProviderSetup,
     Context,
     Settings,
@@ -91,6 +92,7 @@ pub(super) enum Panel {
 
 #[derive(Debug, Clone)]
 pub(super) enum Message {
+    Models(super::models::Event),
     Setup(super::setup::Event),
     Ready(worker::Reply),
     Edit(text_editor::Action),
@@ -122,10 +124,6 @@ pub(super) enum Message {
     ToggleTool(usize),
     ToggleToolRow(usize, usize),
     ToggleUsage,
-    Model(String),
-    ModelInput(String),
-    SaveModel,
-    Provider(String),
     Prompt(String),
     Link(markdown::Uri),
     LinkOpened(Result<(), String>),
@@ -186,6 +184,7 @@ impl App {
         };
         (
             Self {
+                models: super::models::Models::default(),
                 setup,
                 worker,
                 project: directory.flatten().unwrap_or_else(|| {
@@ -231,7 +230,6 @@ impl App {
                 queued: VecDeque::new(),
                 submitted: None,
                 after_load: None,
-                model_input: String::new(),
                 closing: None,
                 live: LiveTurn::default(),
                 permission: None,
@@ -320,6 +318,9 @@ impl App {
         }
         self.menu = None;
         self.slash_dismissed = true;
+        if matches!(command.syntax, "/model" | "/models" | "/provider") {
+            return self.update_models(super::models::Event::Open);
+        }
         if command.syntax == "/rewind" {
             self.panel = Some(Panel::Rewind);
             self.error.clear();
@@ -348,6 +349,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Models(event) => return self.update_models(event),
             Message::Setup(event) => return self.update_setup(event),
             Message::Completed(id, reply) if id == self.turn_id => {
                 return self.update(Message::Ready(reply));
@@ -525,7 +527,6 @@ impl App {
                             &snapshot.session.messages,
                             std::path::Path::new(&self.project),
                         );
-                        self.model_input = snapshot.session.model.to_string();
                         if !snapshot.notices.is_empty() {
                             self.command_output = snapshot.notices.join("\n");
                             scroll = true;
@@ -866,22 +867,6 @@ impl App {
                 return super::scroll::measure();
             }
             Message::ToggleUsage => self.usage_open = !self.usage_open,
-            Message::Model(model) if !self.busy => {
-                return self.dispatch(Operation::SelectModel { selection: model });
-            }
-            Message::ModelInput(value) => self.model_input = value,
-            Message::SaveModel if !self.busy => {
-                let model = self.model_input.trim();
-                if !model.is_empty() && !model.contains(char::is_whitespace) {
-                    return self.dispatch(Operation::SelectModel {
-                        selection: model.to_string(),
-                    });
-                }
-                self.error = "Enter a model ID without spaces.".into();
-            }
-            Message::Provider(provider) if !self.busy => {
-                return self.dispatch(Operation::SelectProvider { provider });
-            }
             Message::Prompt(prompt) if !self.busy => {
                 return self.dispatch(Operation::SelectPrompt { prompt });
             }

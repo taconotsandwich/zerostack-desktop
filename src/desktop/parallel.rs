@@ -167,7 +167,6 @@ impl App {
             &snapshot.session.messages,
             std::path::Path::new(&self.project),
         );
-        self.model_input = snapshot.session.model.to_string();
         self.content = text_editor::Content::with_text(
             self.preferences
                 .drafts

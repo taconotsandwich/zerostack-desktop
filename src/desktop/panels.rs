@@ -8,6 +8,7 @@ use super::{commands, components, layout, style};
 impl App {
     pub fn panel_view<'a>(&'a self, panel: &'a Panel) -> Element<'a, Message> {
         let title = match panel {
+            Panel::Models => "Models",
             Panel::ProviderSetup => "Provider setup",
             Panel::Context => "Context",
             Panel::Settings => "Settings",
@@ -23,6 +24,7 @@ impl App {
         };
         let mut content = column![components::panel_header(title)].spacing(layout::LG);
         match panel {
+            Panel::Models => return self.models_view(),
             Panel::ProviderSetup => return self.setup_view(),
             Panel::Projects => content = content.push(self.project_picker()),
             Panel::Context => {
@@ -75,31 +77,10 @@ impl App {
                     Some(Message::Show(Panel::ProviderSetup)),
                 ));
                 if let Some(snapshot) = &self.snapshot {
-                    content = content
-                        .push(text("Provider").size(style::CAPTION).color(style::MUTED))
-                        .push(components::choice(
-                            snapshot.providers.clone(),
-                            Some(snapshot.session.provider.to_string()),
-                            Message::Provider,
-                            Fill,
-                        ))
-                        .push(text("Model").size(style::CAPTION).color(style::MUTED))
-                        .push(
-                            row![
-                                components::field("Model ID", &self.model_input)
-                                    .on_input(Message::ModelInput)
-                                    .on_submit(Message::SaveModel),
-                                components::action(
-                                    "Apply",
-                                    (!self.busy
-                                        && self.model_input.trim()
-                                            != snapshot.session.model.as_str())
-                                    .then_some(Message::SaveModel)
-                                ),
-                            ]
-                            .spacing(layout::SM)
-                            .align_y(iced::Center),
-                        );
+                    content = content.push(components::action(
+                        "Models and agent roles…",
+                        Some(Message::Models(super::models::Event::Open)),
+                    ));
                     if let Some(mode) = &snapshot.permission_mode {
                         content = content
                             .push(text("Permissions").size(style::CAPTION).color(style::MUTED))
@@ -128,7 +109,7 @@ impl App {
                             Fill,
                         ));
                 }
-                for syntax in ["/models-add", "/reasoning", "/regen-prompts"] {
+                for syntax in ["/reasoning", "/regen-prompts"] {
                     if let Some(command) = commands::find(syntax) {
                         content = content.push(
                             components::action(

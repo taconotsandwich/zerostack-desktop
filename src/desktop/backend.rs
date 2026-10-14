@@ -170,6 +170,9 @@ impl Backend {
                     self.conversation = None;
                 }
             }
+            Operation::SelectRoleModel { role, selection } => {
+                self.set_option(role.option(), value(selection)).await?
+            }
             Operation::SelectModel { selection } => {
                 self.set_option("model", value(selection)).await?
             }
@@ -289,12 +292,12 @@ impl Backend {
             files: self.files.clone(),
             prompts,
             prompt,
-            models: acp_client::select(&options, "model")
-                .map(|(_, values)| values)
-                .unwrap_or_default(),
-            providers: acp_client::select(&options, "provider")
-                .map(|(_, values)| values)
-                .unwrap_or_default(),
+            role_models: ["model", "subagent_model", "advisor_model"]
+                .into_iter()
+                .filter_map(|key| {
+                    acp_client::select(&options, key).map(|(value, _)| (key.to_string(), value))
+                })
+                .collect(),
             permission_mode: acp_client::select(&options, "mode").map(|(mode, _)| mode),
             edit_system: acp_client::select(&options, "edit_system")
                 .map(|(system, _)| system)

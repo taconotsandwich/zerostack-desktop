@@ -10,6 +10,7 @@ mod components;
 mod history;
 mod layout;
 mod live;
+mod models;
 mod operations;
 mod panels;
 mod parallel;
