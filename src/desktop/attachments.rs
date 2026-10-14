@@ -43,11 +43,10 @@ fn save_rgba(
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(&path).map_err(|e| e.to_string())?;
-    if let Err(error) = ::image::DynamicImage::ImageRgba8(image).write_to(
-        &mut std::io::BufWriter::new(file),
-        ::image::ImageFormat::Png,
-    ) {
+    let mut file = options.open(&path).map_err(|e| e.to_string())?;
+    if let Err(error) =
+        ::image::DynamicImage::ImageRgba8(image).write_to(&mut file, ::image::ImageFormat::Png)
+    {
         let _ = std::fs::remove_file(&path);
         return Err(error.to_string());
     }
