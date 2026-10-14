@@ -21,6 +21,15 @@ external diff/text-conversion programs. Child processes stop when callers
 cancel; commands have a 60-second timeout and bounded output. Untracked and
 binary previews never change the index. Diff previews are capped at 1 MiB.
 
+Repository mutations take the inspected snapshot and an explicit `Mutation`.
+They reject changes to HEAD, the branch, or staged object IDs since that
+snapshot. Stage/unstage/restore operate on literal relative paths; restore
+uses the index and never removes untracked files. Commits use only the index
+and honor Git hooks and signing configuration. Branch switching requires a
+clean checkout. Worktree creation uses a new directory and branch. These
+checks supplement Git's own locks; external Git processes still control
+their own changes, so hosts refresh after each action.
+
 Both the TUI and the owned `Engine` use these modules:
 
 | Module | Responsibility |
