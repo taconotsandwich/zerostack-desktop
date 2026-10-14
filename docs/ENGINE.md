@@ -13,6 +13,14 @@ output. Config writes are atomic and private (0600 on Unix). Environment
 credentials retain their normal precedence over saved keys. A successful
 catalog probe establishes connectivity, not access to paid completions.
 
+`engine::repository` provides asynchronous repository discovery, branch and
+worktree inspection, byte-safe file status, and structured staged/unstaged
+diffs. It uses the installed Git executable with literal path arguments and
+an explicit working directory. Reads disable optional index writes and
+external diff/text-conversion programs. Child processes stop when callers
+cancel; commands have a 60-second timeout and bounded output. Untracked and
+binary previews never change the index. Diff previews are capped at 1 MiB.
+
 Both the TUI and the owned `Engine` use these modules:
 
 | Module | Responsibility |
