@@ -5,6 +5,14 @@ Rust embedding library; it does not yet publish a supported SDK API.
 
 ## Shared execution code
 
+`config::setup::ProviderSetup` validates provider/model settings and probes a
+model-list endpoint without starting an agent. Its save operation modifies
+only user-level provider settings and preserves unknown configuration keys.
+Credentials have explicit keep/replace/remove actions and redacted debug
+output. Config writes are atomic and private (0600 on Unix). Environment
+credentials retain their normal precedence over saved keys. A successful
+catalog probe establishes connectivity, not access to paid completions.
+
 Both the TUI and the owned `Engine` use these modules:
 
 | Module | Responsibility |
