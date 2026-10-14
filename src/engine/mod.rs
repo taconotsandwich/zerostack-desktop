@@ -33,6 +33,9 @@ pub(crate) mod blocking;
 pub(crate) mod compaction;
 pub(crate) mod headless;
 pub mod models;
+// Host-facing Git API; desktop consumers live on the frontend branch.
+#[allow(dead_code)]
+pub mod repository;
 pub(crate) mod resources;
 pub(crate) mod runtime;
 pub(crate) mod shell;
