@@ -107,7 +107,17 @@ pub(super) async fn handle_load(
         Ok(None) => return responder.respond_with_error(unknown_session(&req.session_id)),
         Err(e) => return responder.respond_with_error(store_error(e)),
     };
-    let updates = replay(&stored.messages);
+    let mut updates = replay(&stored.messages);
+    for progress in &stored.subagent_runs {
+        let mut start = progress.clone();
+        start.state = crate::event::SubagentState::Running;
+        updates.push(super::events::subagent_update(start));
+        let mut end = progress.clone();
+        if end.state == crate::event::SubagentState::Running {
+            end.state = crate::event::SubagentState::Interrupted;
+        }
+        updates.push(super::events::subagent_update(end));
+    }
 
     let started = state
         .start_session(&req.cwd, req.mcp_servers, Some(&req.session_id), |engine| {

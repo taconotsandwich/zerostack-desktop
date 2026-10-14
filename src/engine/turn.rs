@@ -72,6 +72,17 @@ impl TurnState {
     ) {
         use crate::event::AgentEvent;
         match event {
+            AgentEvent::SubagentProgress(progress) => {
+                if let Some(existing) = session
+                    .subagent_runs
+                    .iter_mut()
+                    .find(|run| run.id == progress.id)
+                {
+                    *existing = progress.clone();
+                } else {
+                    session.subagent_runs.push(progress.clone());
+                }
+            }
             AgentEvent::ToolCall {
                 call_id,
                 name,

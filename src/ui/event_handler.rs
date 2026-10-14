@@ -77,6 +77,13 @@ pub async fn handle_agent_event(
             renderer.render_viewport()?;
             run.agent_line_started = true;
         }
+        AgentEvent::SubagentProgress(progress) => {
+            save_session_if_enabled(ui.session, ui.cli, renderer)?;
+            renderer.write_line(
+                &sanitize_output(&format!("⌥ {:?}: {}", progress.state, progress.title)),
+                C_TOOL,
+            )?;
+        }
         AgentEvent::ToolCall {
             call_id: _,
             name,

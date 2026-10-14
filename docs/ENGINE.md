@@ -136,3 +136,14 @@ Regression coverage includes simultaneous workspaces, tool callbacks invoked
 outside their caller's scope, separate todo/read state, cancellation while a
 tool is active, shutdown, hook `once` isolation, accounting, ACP sessions and
 headless TUI navigation.
+
+### Subagent lifecycle
+
+Each task emits `SubagentProgress` with a unique ID and a shared batch ID.
+Running, completed, failed, cancelled, and timed-out states remain correlated
+through concurrent execution. Sessions persist these records separately from
+legacy tool-call activity. Resuming an abandoned running task marks it interrupted;
+it is never silently replayed. ACP carries the same metadata as tool calls named
+`zerostack.subagent`, with stable `subagent:<id>` IDs and terminal raw output.
+Cancellation delivery is best effort at the bounded task channel; the engine
+closes remaining running records when the parent turn terminates.

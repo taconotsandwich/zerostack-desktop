@@ -452,7 +452,7 @@ impl Engine {
     /// Continue a saved session: it replaces the current one, its
     /// "allow always" answers apply again, and the client and agent follow
     /// its provider and model.
-    pub fn resume_session(&mut self, session: Session) -> anyhow::Result<()> {
+    pub fn resume_session(&mut self, mut session: Session) -> anyhow::Result<()> {
         let owner = self.resources.clone();
         owner.sync(|| {
             if session.provider != self.session.provider {
@@ -476,6 +476,11 @@ impl Engine {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .load_session_allowlist(&allowlist);
+            }
+            for run in &mut session.subagent_runs {
+                if run.state == crate::event::SubagentState::Running {
+                    run.state = crate::event::SubagentState::Interrupted;
+                }
             }
             self.session = session;
             Ok(())
@@ -1103,6 +1108,19 @@ impl Engine {
         } else {
             self.run_agent_text_inner(text).await
         };
+        for progress in &mut self.session.subagent_runs {
+            if progress.state == crate::event::SubagentState::Running {
+                progress.state = if output.cancelled {
+                    crate::event::SubagentState::Cancelled
+                } else {
+                    crate::event::SubagentState::Interrupted
+                };
+                if let Some(tx) = &self.event_tx {
+                    let _ = tx.send(AgentEvent::SubagentProgress(progress.clone()));
+                }
+            }
+        }
+        self.save_session_best_effort();
         if let Some(lease) = lease {
             let state = if output.cancelled {
                 runs::RunState::Cancelled
@@ -1206,6 +1224,7 @@ impl Engine {
             }
             self.turn.observe(&mut self.session, &self.cfg, &event);
             match event {
+                AgentEvent::SubagentProgress(_) => self.save_session_best_effort(),
                 AgentEvent::Reasoning(text) => {
                     if self.show_reasoning {
                         self.response_buf.push_str(&text);

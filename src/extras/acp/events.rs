@@ -159,6 +159,7 @@ impl EventForwarder {
                     .insert(event_id, AnnouncedCall { id, name, args });
                 Some(SessionUpdate::ToolCall(tool_call))
             }
+            AgentEvent::SubagentProgress(progress) => Some(subagent_update(progress)),
             AgentEvent::SubagentToolCall { name, args } => {
                 // Announce-only: subagent calls carry no correlating id, so
                 // they never receive a ToolCallUpdate. Announced as already
@@ -218,5 +219,55 @@ impl EventForwarder {
                 None
             }
         }
+    }
+}
+
+/// Lifecycle metadata uses a stable task id independently of tool call ordering.
+pub(super) fn subagent_update(progress: crate::event::SubagentProgress) -> SessionUpdate {
+    use crate::event::SubagentState;
+    let id = ToolCallId::new(format!("subagent:{}", progress.id));
+    let status = match progress.state {
+        SubagentState::Running => ToolCallStatus::InProgress,
+        SubagentState::Completed => ToolCallStatus::Completed,
+        _ => ToolCallStatus::Failed,
+    };
+    let data = serde_json::to_value(&progress).expect("serializable progress");
+    if progress.state == SubagentState::Running {
+        SessionUpdate::ToolCall(
+            ToolCall::new(id, progress.title)
+                .name("zerostack.subagent")
+                .status(status)
+                .raw_input(Some(data)),
+        )
+    } else {
+        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+            id,
+            ToolCallUpdateFields::new()
+                .name("zerostack.subagent")
+                .title(progress.title)
+                .status(status)
+                .raw_output(data),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_tests {
+    use super::*;
+    #[test]
+    fn subagent_updates_correlate_terminal_states() {
+        let mut progress = crate::event::SubagentProgress {
+            id: "task-1".into(),
+            batch_id: "batch".into(),
+            title: "Inspect".into(),
+            state: crate::event::SubagentState::Running,
+            detail: None,
+        };
+        let start = serde_json::to_value(subagent_update(progress.clone())).unwrap();
+        progress.state = crate::event::SubagentState::TimedOut;
+        let end = serde_json::to_value(subagent_update(progress)).unwrap();
+        assert_eq!(start["toolCallId"], end["toolCallId"]);
+        assert_eq!(start["status"], "in_progress");
+        assert_eq!(end["rawOutput"]["state"], "timed_out");
     }
 }

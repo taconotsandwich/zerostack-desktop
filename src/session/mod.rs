@@ -131,6 +131,8 @@ pub struct Session {
     pub id: CompactString,
     pub name: CompactString,
     pub messages: Vec<SessionMessage>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subagent_runs: Vec<crate::event::SubagentProgress>,
     pub compactions: Vec<Compaction>,
     pub created_at: CompactString,
     pub updated_at: CompactString,
@@ -275,6 +277,7 @@ impl Session {
                 .unwrap_or_default(),
             permission_allowlist: Vec::new(),
             next_tool_call_id: 0,
+            subagent_runs: Vec::new(),
             prompt: None,
             #[cfg(feature = "multimodal")]
             pending_media: Vec::new(),
