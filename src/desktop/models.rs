@@ -12,6 +12,7 @@ pub(super) struct Models {
     alias: String,
     selected: Option<ModelChoice>,
     choices: Vec<ModelChoice>,
+    notice: String,
 }
 impl Default for Models {
     fn default() -> Self {
@@ -23,7 +24,19 @@ impl Default for Models {
             alias: String::new(),
             selected: None,
             choices: Vec::new(),
+            notice: String::new(),
         }
+    }
+}
+impl Models {
+    pub(super) fn favorite_saved(
+        &mut self,
+        name: &str,
+        session: &crate::session::Session,
+        cfg: &crate::config::Config,
+    ) {
+        self.choices = crate::engine::models::model_choices(cfg, &session.provider, &session.model);
+        self.notice = format!("Saved favorite: {name}");
     }
 }
 #[derive(Debug, Clone)]
@@ -65,6 +78,7 @@ impl App {
                     .unwrap_or(("anthropic", ""));
                 self.models.choices = crate::engine::models::model_choices(&cfg, provider, model);
                 self.models.provider = provider.into();
+                self.models.notice.clear();
                 self.models.query.clear();
                 self.models.selected = None;
                 self.models.custom_id.clear();
@@ -210,7 +224,9 @@ impl App {
                 ]
                 .spacing(layout::SM),
             );
-        content.into()
+        content
+            .push(text(&self.models.notice).size(style::CAPTION))
+            .into()
     }
 }
 #[cfg(test)]
@@ -223,5 +239,25 @@ mod tests {
         assert!(matches(&choice, "DAILY custom"));
         assert!(matches(&choice, "sonnet"));
         assert!(!matches(&choice, "daily missing"));
+    }
+}
+
+#[cfg(test)]
+mod favorite_tests {
+    use super::*;
+    #[test]
+    fn saved_favorites_refresh_the_open_picker() {
+        let cfg: crate::config::Config = serde_json::from_value(serde_json::json!({"quick_models": {"everyday": {"provider": "anthropic", "model": "test-model"}}})).unwrap();
+        let session = crate::session::Session::new("anthropic", "test-model", 1000, "");
+        let mut models = Models::default();
+        models.favorite_saved("everyday", &session, &cfg);
+        assert!(
+            models
+                .choices
+                .iter()
+                .any(|choice| choice.key.id == "test-model"
+                    && choice.aliases.iter().any(|alias| alias == "everyday"))
+        );
+        assert_eq!(models.notice, "Saved favorite: everyday");
     }
 }

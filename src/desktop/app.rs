@@ -265,7 +265,7 @@ impl App {
     }
 
     pub fn dispatch(&mut self, operation: Operation) -> Task<Message> {
-        if self.busy {
+        if self.busy || self.review.mutating {
             return Task::none();
         }
         let Some(worker) = self.worker.clone() else {
@@ -436,6 +436,13 @@ impl App {
                         }
                     }
                     Ok(snapshot) => {
+                        if let Some(Operation::SaveQuickModel { name, .. }) = &pending {
+                            self.models.favorite_saved(
+                                name,
+                                &snapshot.session,
+                                &crate::config::load().0,
+                            );
+                        }
                         self.live = LiveTurn::default();
                         if let Some(Operation::Delete(id)) = &pending {
                             self.deleted.insert(id.clone());
@@ -1016,7 +1023,7 @@ impl App {
             Message::Close(id) => {
                 self.remember_draft();
                 self.stop_running();
-                if self.busy {
+                if self.busy || self.review.mutating {
                     self.closing = Some(id);
                     self.status = "Waiting for the current operation before closing…".into();
                 } else {

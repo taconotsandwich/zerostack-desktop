@@ -23,7 +23,7 @@ impl App {
     /// Restarts the worker in `path`, on `session` when given, else on a new
     /// conversation.
     pub(super) fn open_project(&mut self, path: PathBuf, session: Option<String>) -> Task<Message> {
-        if self.busy {
+        if self.busy || self.review.mutating {
             return Task::none();
         }
         let path = match path.canonicalize() {

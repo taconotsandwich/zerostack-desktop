@@ -114,8 +114,18 @@ impl App {
                 return window::latest().and_then(|id| window::request_user_attention(id, None));
             }
             Event::OpenQueue(id, project) => {
+                if !self.can_switch() {
+                    return Task::none();
+                }
                 if self.session_by_id(&id).is_some() || self.running(&id).is_some() {
                     return self.switch_to(Some(id));
+                }
+                if crate::session::storage::load_session(&id)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                {
+                    return self.open_project(project.into(), Some(id));
                 }
                 self.error =
                     "The queued conversation could not be found. Its input is retained below."
