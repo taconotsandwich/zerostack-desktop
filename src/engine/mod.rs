@@ -37,6 +37,7 @@ pub mod models;
 #[allow(dead_code)]
 pub mod repository;
 pub(crate) mod resources;
+pub mod runs;
 pub(crate) mod runtime;
 pub(crate) mod shell;
 pub mod sink;
@@ -1074,6 +1075,59 @@ impl Engine {
     // ── main agent run ────────────────────────────────────────────────
 
     async fn run_agent_text(&mut self, text: &str) -> RunOutput {
+        let cancelled = self.cancel.0.subscribe();
+        let lease = if self.cli.no_session {
+            None
+        } else {
+            let directory = crate::session::storage::data_dir();
+            let session = self.session.id.to_string();
+            let workspace = std::path::PathBuf::from(self.session.working_dir.as_str());
+            match resources::spawn_blocking(move || {
+                runs::RunLease::start(&directory, &session, &workspace)
+            })
+            .await
+            {
+                Ok(Ok(lease)) => Some(lease),
+                Ok(Err(error)) => {
+                    return RunOutput::failed(format!("Could not record the run: {error}"));
+                }
+                Err(error) => {
+                    return RunOutput::failed(format!("Could not start run storage: {error}"));
+                }
+            }
+        };
+        let mut output = if cancelled.has_changed().unwrap_or(false) {
+            let mut output = RunOutput::agent(String::new(), TurnUsage::default());
+            output.cancelled = true;
+            output
+        } else {
+            self.run_agent_text_inner(text).await
+        };
+        if let Some(lease) = lease {
+            let state = if output.cancelled {
+                runs::RunState::Cancelled
+            } else if output.error.is_some() {
+                runs::RunState::Failed
+            } else {
+                runs::RunState::Completed
+            };
+            let error = output.error.clone();
+            let result = resources::spawn_blocking(move || lease.finish(state, error)).await;
+            let failure = match result {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e.to_string()),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(error) = failure {
+                output.error = Some(format!(
+                    "The run ended, but its completion could not be saved: {error}"
+                ));
+            }
+        }
+        output
+    }
+
+    async fn run_agent_text_inner(&mut self, text: &str) -> RunOutput {
         let mut sink = StringSink::new();
         self.sink_echo_user(text, &mut sink);
         match self.start_agent_run(text.to_string()).await {

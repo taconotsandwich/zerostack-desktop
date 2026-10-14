@@ -75,6 +75,12 @@ Standalone CLI bootstrap helpers retain a fallback resource context.
 
 ## Cancellation and shutdown
 
+Persisted engine prompts write a run record before execution and a terminal
+state afterward. `engine::runs::list` recovers abandoned records as
+`Interrupted` using OS file locks; a live run in another process is left
+alone. Dropping a prompt or crashing releases its lease. Recovery never
+replays prompts or filesystem effects. `--no-session` creates no run record.
+
 Tool entry points return futures. Each engine owns a `tool_concurrency`
 limit: one by default, or a positive integer from configuration. The typed
 `Engine::set_tool_concurrency(NonZeroUsize)` operation changes the limit for

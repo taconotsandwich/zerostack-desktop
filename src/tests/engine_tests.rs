@@ -816,3 +816,30 @@ async fn engine_subagent_configuration_is_independent() {
     );
     b.shutdown().await;
 }
+
+#[tokio::test]
+async fn persisted_prompts_record_terminal_run_state() {
+    let _guard = crate::tests::fake_model::run_print_guard::acquire();
+    isolate_data_dirs();
+    let model = fake_model::text_turns(vec![vec!["done"]]);
+    let mut cli = test_cli();
+    cli.no_session = false;
+    let session = test_session();
+    let id = session.id.to_string();
+    let mut engine = Engine::new(
+        cli,
+        Config::default(),
+        session,
+        test_context(),
+        test_client(),
+        None,
+        Sandbox::new(false, "bwrap"),
+    )
+    .with_agent(AnyAgent::Mock(rig::agent::AgentBuilder::new(model).build()));
+    let result = engine.run_prompt("hello".into()).await;
+    assert!(result.error.is_none());
+    let records = crate::engine::runs::list(&crate::session::storage::data_dir()).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].session_id, id);
+    assert_eq!(records[0].state, crate::engine::runs::RunState::Completed);
+}
