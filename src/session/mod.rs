@@ -425,6 +425,7 @@ impl Session {
             content: CompactString::new(transcript),
             estimated_tokens: 0,
             tool: None,
+            media: Vec::new(),
         });
     }
 

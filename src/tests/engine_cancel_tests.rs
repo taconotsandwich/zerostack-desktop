@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use rig::agent::AgentBuilder;
-use rig::tool::PortableTool as Tool;
+use rig::tool::Tool;
 use serde::Deserialize;
 
 use crate::agent::tools::ToolError;
@@ -38,7 +38,11 @@ impl Tool for StallTool {
         serde_json::json!({"type": "object", "properties": {}})
     }
 
-    async fn call(&self, _args: NoArgs) -> Result<String, ToolError> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        _args: NoArgs,
+    ) -> Result<String, ToolError> {
         std::future::pending().await
     }
 }
