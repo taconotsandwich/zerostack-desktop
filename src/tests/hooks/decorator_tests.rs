@@ -146,17 +146,22 @@ async fn simultaneous_hook_allows_belong_to_their_own_calls() {
     let permission = permission_restrictive();
     let permission_for_call = permission.clone();
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
-    let tool = DynamicTool::new("bash", "", serde_json::json!({}), move |_| {
-        let permission = permission_for_call.clone();
-        let barrier = barrier.clone();
-        Box::pin(async move {
-            barrier.wait().await;
-            crate::agent::tools::check_perm(&permission, &None, "bash", "echo hello")
-                .await
-                .map_err(|error| ToolExecutionError::other(error.to_string()))?;
-            Ok(ToolOutput::text("allowed"))
-        })
-    });
+    let tool = DynamicTool::new(
+        rig::message::ToolName::new("bash").expect("test tool name is non-empty"),
+        "",
+        serde_json::json!({}),
+        move |_| {
+            let permission = permission_for_call.clone();
+            let barrier = barrier.clone();
+            Box::pin(async move {
+                barrier.wait().await;
+                crate::agent::tools::check_perm(&permission, &None, "bash", "echo hello")
+                    .await
+                    .map_err(|error| ToolExecutionError::other(error.to_string()))?;
+                Ok(ToolOutput::text("allowed"))
+            })
+        },
+    );
     let tools = wrap_all(
         vec![tool],
         dispatcher_with(
@@ -167,8 +172,8 @@ async fn simultaneous_hook_allows_belong_to_their_own_calls() {
     );
     let (a, b) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         tokio::join!(
-            tools[0].execute(serde_json::json!({})),
-            tools[0].execute(serde_json::json!({}))
+            tools[0].run(serde_json::json!({})),
+            tools[0].run(serde_json::json!({}))
         )
     })
     .await
@@ -182,13 +187,18 @@ async fn cancelled_hook_allow_cannot_leak_into_the_next_call() {
     let permission = permission_restrictive();
     let started = Arc::new(tokio::sync::Notify::new());
     let signal = started.clone();
-    let tool = DynamicTool::new("bash", "", serde_json::json!({}), move |_| {
-        let signal = signal.clone();
-        Box::pin(async move {
-            signal.notify_one();
-            std::future::pending::<Result<ToolOutput, ToolExecutionError>>().await
-        })
-    });
+    let tool = DynamicTool::new(
+        rig::message::ToolName::new("bash").expect("test tool name is non-empty"),
+        "",
+        serde_json::json!({}),
+        move |_| {
+            let signal = signal.clone();
+            Box::pin(async move {
+                signal.notify_one();
+                std::future::pending::<Result<ToolOutput, ToolExecutionError>>().await
+            })
+        },
+    );
     let tools = wrap_all(
         vec![tool],
         dispatcher_with(
@@ -197,7 +207,7 @@ async fn cancelled_hook_allow_cannot_leak_into_the_next_call() {
         ),
         permission.clone(),
     );
-    let mut call = Box::pin(tools[0].execute(serde_json::json!({})));
+    let mut call = Box::pin(tools[0].run(serde_json::json!({})));
     tokio::select! {
         result = &mut call => panic!("tool should wait: {result:?}"),
         started = tokio::time::timeout(std::time::Duration::from_secs(5), started.notified()) => started.expect("tool started"),

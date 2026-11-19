@@ -134,7 +134,6 @@ impl AgentBuildCtx<'_> {
 }
 
 use crate::engine::turn::ExecutionState;
-use crate::session::MessageRole;
 use tokio::sync::mpsc;
 /// Result of a background agent prebuild.
 #[cfg(feature = "mcp")]
