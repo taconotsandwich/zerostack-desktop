@@ -9,7 +9,7 @@ use std::sync::{
 use std::time::Duration;
 
 use rig::agent::AgentBuilder;
-use rig::tool::PortableTool;
+use rig::tool::Tool;
 use serde::Deserialize;
 use tokio::sync::{Semaphore, mpsc};
 
@@ -34,7 +34,7 @@ struct Probe {
     peak: Arc<AtomicUsize>,
 }
 
-impl PortableTool for Probe {
+impl Tool for Probe {
     const NAME: &'static str = "probe";
     type Args = Args;
     type Output = String;
@@ -46,7 +46,11 @@ impl PortableTool for Probe {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type":"object", "properties":{"id":{"type":"integer"}}, "required":["id"]})
     }
-    async fn call(&self, args: Args) -> Result<String, ToolError> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        args: Args,
+    ) -> Result<String, ToolError> {
         struct Active<'a>(&'a Probe, usize);
         impl Drop for Active<'_> {
             fn drop(&mut self) {

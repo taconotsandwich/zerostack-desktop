@@ -751,11 +751,15 @@ async fn engines_keep_workspaces_and_tool_state_independent() {
         crate::config::EditSystem::Similarity
     );
     a.resources()
-        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_none()));
+        .sync(|| crate::agent::tools::set_deny_repeated_reads(true));
     b.resources()
-        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_none()));
+        .sync(|| crate::agent::tools::set_deny_repeated_reads(true));
     a.resources()
-        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10).is_some()));
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10, 0).is_none()));
+    b.resources()
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10, 0).is_none()));
+    a.resources()
+        .sync(|| assert!(crate::agent::tools::track_read("note.txt", 0, 10, 0).is_some()));
     a.shutdown().await;
     b.shutdown().await;
     std::fs::remove_dir_all(root).unwrap();

@@ -190,15 +190,15 @@ mod tests {
         let b_read = b.clone().sync(make_read);
         // Rig dispatches tools from its own worker tasks: no ambient scope here.
         let (a_result, b_result) = tokio::join!(
-            a_read.execute(serde_json::json!({"path":"note"})),
-            b_read.execute(serde_json::json!({"path":"note"})),
+            a_read.run(serde_json::json!({"path":"note"})),
+            b_read.run(serde_json::json!({"path":"note"})),
         );
         assert!(a_result.unwrap().render().contains("alpha"));
         assert!(b_result.unwrap().render().contains("beta"));
         let todos = a.clone().sync(|| {
             crate::agent::builder::dynamic_tool(crate::agent::tools::WriteTodoList::new(None, None))
         });
-        todos.execute(serde_json::json!({"todos":[{"content":"only a", "status":"pending", "priority":"high"}]})).await.unwrap();
+        todos.run(serde_json::json!({"todos":[{"content":"only a", "status":"pending", "priority":"high"}]})).await.unwrap();
         assert_eq!(a.todos.lock().unwrap().len(), 1);
         assert!(b.todos.lock().unwrap().is_empty());
         a.shutdown().await;

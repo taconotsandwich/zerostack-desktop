@@ -139,7 +139,11 @@ impl Tool for ObservedTool {
     fn parameters(&self) -> serde_json::Value {
         serde_json::json!({"type":"object","properties":{}})
     }
-    async fn call(&self, _: NoArgs) -> Result<String, ToolError> {
+    async fn call(
+        &self,
+        _context: &mut rig::tool::ToolContext,
+        _: NoArgs,
+    ) -> Result<String, ToolError> {
         struct Stopped(std::sync::Arc<tokio::sync::Notify>);
         impl Drop for Stopped {
             fn drop(&mut self) {
