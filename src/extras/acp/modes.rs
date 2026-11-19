@@ -1,7 +1,7 @@
 //! Permission modes as ACP session modes.
 
-use agent_client_protocol::Responder;
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::Responder;
+use agent_client_protocol::v1::schema::*;
 
 use super::AcpState;
 use crate::permission::SecurityMode;

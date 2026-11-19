@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
 
 fn invalid(message: String) -> agent_client_protocol::Error {
     agent_client_protocol::Error::invalid_params().data(serde_json::json!({ "message": message }))

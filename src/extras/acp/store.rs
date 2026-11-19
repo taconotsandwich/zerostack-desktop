@@ -1,7 +1,8 @@
 //! Sessions in the session store: load (with history replay), list, delete.
 
-use agent_client_protocol::schema::v1::*;
-use agent_client_protocol::{Client, ConnectionTo, Responder};
+use agent_client_protocol::Client;
+use agent_client_protocol::v1::schema::*;
+use agent_client_protocol::v1::{ConnectionTo, Responder};
 
 use super::commands::commands_update;
 use super::events::{send_update, text_chunk, tool_kind, tool_path};

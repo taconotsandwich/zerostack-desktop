@@ -1,6 +1,6 @@
 //! zerostack's `_meta` on ACP responses.
 
-use agent_client_protocol::schema::v1::Meta;
+use agent_client_protocol::v1::schema::Meta;
 
 /// What a client should show about a session it opened, as response
 /// `_meta`: `{"zerostack": {"notices": [...]}}`, when there is any.

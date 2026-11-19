@@ -2,7 +2,7 @@
 //! act on the session they are sent to. A prompt starting with `/`, `!` or
 //! `.` runs as a command; see [`Engine::run_string`](crate::engine::Engine::run_string).
 
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
 
 /// Name, description, and the hint for its input when it takes one.
 const COMMANDS: &[(&str, &str, Option<&str>)] = &[

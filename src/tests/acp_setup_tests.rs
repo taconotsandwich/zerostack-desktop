@@ -83,7 +83,7 @@ fn client_mcp_servers_join_the_configured_ones() {
         mcp_servers: Some(configured),
         ..Default::default()
     };
-    let client: Vec<agent_client_protocol::schema::v1::McpServer> = serde_json::from_value(json!([
+    let client: Vec<agent_client_protocol::v1::schema::McpServer> = serde_json::from_value(json!([
         {"name": "files", "command": "/bin/files-mcp", "args": ["--root", "/p"],
          "env": [{"name": "TOKEN", "value": "t"}]},
         {"type": "http", "name": "docs", "url": "https://client.example/mcp",

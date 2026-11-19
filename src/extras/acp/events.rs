@@ -2,8 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use agent_client_protocol::schema::v1::*;
-use agent_client_protocol::{Client, ConnectionTo};
+use agent_client_protocol::Client;
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::*;
 use compact_str::CompactString;
 
 use crate::agent::tools::{EditArgs, WriteArgs, edit_hunks::edit_hunks};

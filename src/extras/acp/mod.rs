@@ -170,7 +170,7 @@ impl AcpState {
         prepare: impl FnOnce(&mut Engine) -> anyhow::Result<()>,
     ) -> Result<(SessionId, Arc<AcpSession>, Vec<String>), agent_client_protocol::Error> {
         let internal =
-            |e: anyhow::Error| agent_client_protocol::util::internal_error(e.to_string());
+            |e: anyhow::Error| agent_client_protocol::Error::internal_error().data(e.to_string());
         let mut sessions = self.sessions.lock().await;
         let replaced = replacing.is_some_and(|id| sessions.contains_key(id));
         let enter = setup::folder_to_enter(cwd, sessions.len() - usize::from(replaced))?;
