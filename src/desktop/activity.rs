@@ -654,6 +654,7 @@ mod tests {
                 name: name.into(),
                 args,
             }),
+            media: Vec::new(),
         };
         let result = |call_id, name: &str, output: &str, saved: Option<&str>| SessionMessage {
             role: MessageRole::ToolResult,
@@ -665,6 +666,7 @@ mod tests {
                 truncated: saved.is_some(),
                 full_output_path: saved.map(Into::into),
             }),
+            media: Vec::new(),
         };
         let messages = [
             SessionMessage {
@@ -672,6 +674,7 @@ mod tests {
                 content: "go".into(),
                 estimated_tokens: 0,
                 tool: None,
+                media: Vec::new(),
             },
             call(0, "read", json!({"path": "/work/app/a.rs"})),
             call(1, "bash", json!({"command": "ls"})),

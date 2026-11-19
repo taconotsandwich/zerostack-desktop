@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use agent_client_protocol::schema::v1::SessionConfigOptionValue;
+use agent_client_protocol::v1::schema::SessionConfigOptionValue;
 
 use super::acp_client::{self, Conversation, Stopper};
 use super::worker::{Operation, Snapshot, UiSender};

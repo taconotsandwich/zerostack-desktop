@@ -42,6 +42,7 @@ mod tests {
             content: "test".into(),
             estimated_tokens: 0,
             tool: None,
+            media: Vec::new(),
         });
         let group = tool_group(&messages, 1).unwrap();
         assert_eq!(group.len(), 4);

@@ -6,10 +6,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::*;
+use agent_client_protocol::v1::schema::*;
+use agent_client_protocol::v1::{ConnectionTo, Responder};
 use agent_client_protocol::{
-    AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Responder, on_receive_notification,
-    on_receive_request,
+    AcpAgent, AcpAgentConfig, Agent, Client, on_receive_notification, on_receive_request,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -464,7 +464,7 @@ async fn connect(
     let updates = shared.clone();
     tokio::spawn(async move {
         let served = Client
-            .builder()
+            .v1()
             .on_receive_notification(
                 move |notification: SessionNotification, _cx| {
                     updates.update(notification.update);

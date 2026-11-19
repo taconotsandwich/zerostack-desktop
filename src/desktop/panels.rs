@@ -42,7 +42,7 @@ impl App {
                             .session
                             .pending_media
                             .iter()
-                            .map(|media| media.path()),
+                            .map(|media| media.path.as_path()),
                     ) {
                         let path = file.display().to_string();
                         content = content.push(

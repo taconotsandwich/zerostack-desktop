@@ -55,6 +55,7 @@ mod tests {
             content: "A **response** with `code`.\n\n- first\n- second".into(),
             estimated_tokens: 12,
             tool: None,
+            media: Vec::new(),
         }
     }
     #[test]

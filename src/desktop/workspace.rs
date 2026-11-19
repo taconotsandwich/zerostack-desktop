@@ -108,7 +108,7 @@ impl App {
                     .session
                     .pending_media
                     .iter()
-                    .map(|media| media.path()),
+                    .map(|media| media.path.as_path()),
             ) {
                 let label = path
                     .file_name()

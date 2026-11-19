@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["ai", "cli", "dev"]
 
 [features]
-desktop = ["dep:iced", "dep:rfd", "dep:arboard", "dep:image", "multimodal", "acp"]
+desktop = ["dep:iced", "dep:rfd", "dep:arboard", "dep:image", "multimodal", "acp", "agent-client-protocol/process"]
 default = ['git-worktree', 'mcp', 'subagents', 'archmd', 'status-signals', 'logging']
 status-signals = []
 loop = []
