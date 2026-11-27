@@ -101,8 +101,7 @@ pub fn dropdown<'a, M: Clone + 'a>(
         .on_press_maybe(on_press)
 }
 
-/// Bordered chip under the home composer: folder (with `Folder` icon) and
-/// branch (mono title). Ends with a chevron.
+/// Bordered chip under the home composer (the folder). Ends with a chevron.
 pub fn chip<'a, M: Clone + 'a>(
     leading: Option<Icon>,
     title: Text<'a>,

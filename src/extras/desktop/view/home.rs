@@ -38,12 +38,11 @@ pub(super) fn view(app: &App) -> Element<'_, Message> {
     )]
     .spacing(6)
     .align_y(Alignment::Center);
+    // zerostack reads the branch but never switches it, so the branch is
+    // shown as text, not as a chip that looks like it opens something.
     if let Some(branch) = &app.info.branch {
-        chips = chips.push(chip(
-            None,
-            mono(branch.as_str(), text::CAPTION, color::INK),
-            None,
-        ));
+        chips = chips
+            .push(container(mono(branch.as_str(), text::CAPTION, color::MUTED)).padding([0, 6]));
     }
     let chips = chips
         .push(space::horizontal())

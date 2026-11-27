@@ -34,8 +34,9 @@ the others.
 
 ## Screens
 
-- **Home**: the first prompt of a new session. The chips under the composer
-  show the folder and the git branch.
+- **Home**: the first prompt of a new session. Under the composer are the
+  folder chip and the git branch. zerostack reads the branch but never
+  switches it, so the branch is plain text.
 - **Session**: the transcript, with user messages, streamed markdown replies,
   "Thought for Ns" rows and one row per tool call. Click a finished row to see
   its output or the thinking text. The header shows the title, folder, branch,
