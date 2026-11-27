@@ -7,19 +7,20 @@ use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, button, column, container, markdown, row, rule, scrollable, space, stack,
 };
-use iced::{Alignment, Element, Length, Padding, border};
+use iced::{Alignment, Element, Length, Padding, Theme, border};
 
 use super::{composer, main_bar, permission};
 use crate::extras::desktop::app::{
-    App, Menu, Message, TRANSCRIPT, activity_summary, clip, folder_name, tool_detail, tool_verb,
-    tool_verb_running,
+    App, Menu, Message, Parsed, TRANSCRIPT, activity_summary, clip, folder_name, tool_detail,
+    tool_verb, tool_verb_running,
 };
 use crate::extras::desktop::icon::{self, Icon};
+use crate::extras::desktop::select::selectable;
 use crate::extras::desktop::style;
 use crate::extras::desktop::theme::{self, color, metric, text};
 use crate::extras::desktop::transcript::{Block, Row, Tool, ToolState, blocks};
 use crate::extras::desktop::widgets::{
-    Lead, activity, activity_text, code, context_ring, icon_button, label, mono, single_line,
+    Lead, activity, activity_text, code, context_ring, icon_button, label, mono, prose, single_line,
 };
 
 /// Tool output and notices show at most this much until opened elsewhere.
@@ -213,22 +214,24 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         Row::User(prompt) => side(
             app,
             at,
-            container(label(prompt.as_str(), text::BODY, color::INK))
-                .padding([10, 16])
-                .max_width(BUBBLE_WIDTH)
-                .style(style::bubble)
-                .into(),
+            selectable(
+                container(prose(prompt.as_str(), text::BODY, color::INK))
+                    .padding([10, 16])
+                    .max_width(BUBBLE_WIDTH)
+                    .style(style::bubble),
+            )
+            .into(),
             Alignment::End,
         ),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
-            Some(parsed) => container(
-                markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link),
+            Some(parsed) => selectable(
+                container(reply_markdown(parsed))
+                    .width(Length::Fill)
+                    .style(|_| container::Style {
+                        text_color: Some(color::BODY),
+                        ..container::Style::default()
+                    }),
             )
-            .width(Length::Fill)
-            .style(|_| container::Style {
-                text_color: Some(color::BODY),
-                ..container::Style::default()
-            })
             .into(),
             None => label(reply.as_str(), text::BODY, color::BODY).into(),
         },
@@ -311,22 +314,22 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
 /// facing the prompt's on the right.
 fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Message> {
     let body: Element<'a, Message> = match app.replies.get(at).and_then(Option::as_ref) {
-        Some(parsed) => {
-            markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link)
-        }
+        Some(parsed) => reply_markdown(parsed),
         None => label(reply, text::BODY, color::INK).into(),
     };
     side(
         app,
         at,
-        container(body)
-            .padding([10, 16])
-            .max_width(BUBBLE_WIDTH)
-            .style(|theme| container::Style {
-                text_color: Some(color::INK),
-                ..style::bubble(theme)
-            })
-            .into(),
+        selectable(
+            container(body)
+                .padding([10, 16])
+                .max_width(BUBBLE_WIDTH)
+                .style(|theme| container::Style {
+                    text_color: Some(color::INK),
+                    ..style::bubble(theme)
+                }),
+        )
+        .into(),
         Alignment::Start,
     )
 }
@@ -461,6 +464,86 @@ fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
     .padding(Padding::from(6).left(12))
     .style(style::queued)
     .into()
+}
+
+/// A reply's markdown, its text selectable.
+fn reply_markdown(parsed: &Parsed) -> Element<'_, Message> {
+    markdown::view_with(parsed.content.items(), markdown_settings(), &Prose)
+}
+
+/// Draws reply markdown with `iced_selection`'s selectable text in place
+/// of iced's. Quotes and tables keep iced's look and nest these.
+struct Prose;
+
+impl<'a> markdown::Viewer<'a, Message> for Prose {
+    fn on_link_click(url: markdown::Uri) -> Message {
+        Message::Link(url)
+    }
+
+    fn heading(
+        &self,
+        settings: markdown::Settings,
+        level: &'a markdown::HeadingLevel,
+        text: &'a markdown::Text,
+        index: usize,
+    ) -> Element<'a, Message> {
+        iced_selection::markdown::heading(settings, level, text, index, Message::Link)
+    }
+
+    fn paragraph(
+        &self,
+        settings: markdown::Settings,
+        text: &markdown::Text,
+    ) -> Element<'a, Message> {
+        iced_selection::markdown::paragraph(settings, text, Message::Link)
+    }
+
+    /// iced's code block, with selectable lines. `iced_selection`'s own
+    /// ignores the settings' code font.
+    fn code_block(
+        &self,
+        settings: markdown::Settings,
+        _language: Option<&'a str>,
+        _code: &'a str,
+        lines: &'a [markdown::Text],
+    ) -> Element<'a, Message> {
+        let lines = lines.iter().map(|line| {
+            iced_selection::rich_text(line.spans(settings.style))
+                .on_link_click(Message::Link)
+                .font(settings.style.code_block_font)
+                .size(settings.code_size)
+                .into()
+        });
+        container(
+            scrollable(container(Column::with_children(lines)).padding(settings.code_size))
+                .direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default()
+                        .width(settings.code_size / 2)
+                        .scroller_width(settings.code_size / 2),
+                )),
+        )
+        .width(Length::Fill)
+        .padding(settings.code_size / 4)
+        .class(<Theme as markdown::Catalog>::code_block())
+        .into()
+    }
+
+    fn unordered_list(
+        &self,
+        settings: markdown::Settings,
+        bullets: &'a [markdown::Bullet],
+    ) -> Element<'a, Message> {
+        iced_selection::markdown::unordered_list(self, settings, bullets)
+    }
+
+    fn ordered_list(
+        &self,
+        settings: markdown::Settings,
+        start: u64,
+        bullets: &'a [markdown::Bullet],
+    ) -> Element<'a, Message> {
+        iced_selection::markdown::ordered_list(self, settings, start, bullets)
+    }
 }
 
 /// Replies in the canvas type: Inter body, gold mono inline code.

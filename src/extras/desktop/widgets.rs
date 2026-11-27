@@ -26,6 +26,21 @@ pub fn label<'a>(content: impl IntoFragment<'a>, size: (f32, f32), color: Color)
         .color(color)
 }
 
+/// `label` that can be selected: message text.
+pub fn prose<'a>(
+    content: impl IntoFragment<'a>,
+    size: (f32, f32),
+    color: Color,
+) -> iced_selection::Text<'a> {
+    iced_selection::text(content)
+        .size(size.0)
+        .line_height(LineHeight::Absolute(size.1.into()))
+        .style(move |theme| iced_selection::text::Style {
+            color: Some(color),
+            ..iced_selection::text::default(theme)
+        })
+}
+
 /// JetBrains Mono at a canvas size.
 pub fn mono<'a>(content: impl IntoFragment<'a>, size: (f32, f32), color: Color) -> Text<'a> {
     label(content, size, color).font(theme::MONO)

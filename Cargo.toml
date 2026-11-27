@@ -41,6 +41,7 @@ rtk = []
 desktop = [
     "multithread",
     "dep:iced",
+    "dep:iced_selection",
     "dep:rfd",
     "dep:png",
     "dep:objc2",
@@ -102,6 +103,8 @@ iced = { version = "0.14", optional = true, features = [
     "tokio",
     "advanced",
 ] }
+# Selectable message text and markdown in the desktop transcript.
+iced_selection = { version = "0.5", optional = true, features = ["markdown"] }
 rfd = { version = "0.18", optional = true }
 # Decodes the desktop window icon; iced already builds it for its SVGs.
 png = { version = "0.17", optional = true }
