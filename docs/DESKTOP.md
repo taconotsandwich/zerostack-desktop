@@ -37,12 +37,15 @@ the others.
 - **Home**: the first prompt of a new session. Under the composer are the
   folder chip and the git branch. zerostack reads the branch but never
   switches it, so the branch is plain text.
-- **Session**: the transcript, with user messages and streamed markdown
-  replies. Back-to-back tool calls and thinking fold into one line, such as
-  "Ran 3 commands, read 2 files"; click it to list each call, and click a call
-  to see its output or the thinking text. The header shows the title, folder,
-  branch, how much of the context window is in use, and the session's cost.
-  The `…` menu renames the session or compacts its context.
+- **Session**: the transcript, read as a conversation: your prompts in
+  bubbles on the right, and zerostack's answer, the reply that ends a turn,
+  in a bubble on the left once the turn finishes. Replies stream as plain
+  markdown, and text between tool calls stays plain. Back-to-back tool calls
+  and thinking fold into one line, such as "Ran 3 commands, read 2 files";
+  click it to list each call, and click a call to see its output or the
+  thinking text. The header shows the title, folder, branch, how much of the
+  context window is in use, and the session's cost. The `…` menu renames the
+  session or compacts its context.
 - **Composer**: the toolbar's mode, provider and model menus. The provider
   menu runs `/provider <name>` for the built-in and custom providers. The
   model menu lists your `quick_models` (running `/models <name>`, which also

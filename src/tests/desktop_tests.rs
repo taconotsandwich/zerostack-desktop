@@ -1184,7 +1184,7 @@ mod layout {
             tool("edit"),
         ];
         assert_eq!(
-            blocks(&rows),
+            blocks(&rows, false),
             vec![
                 Block::Row(0),
                 Block::Activity(1..4),
@@ -1194,7 +1194,98 @@ mod layout {
                 Block::Activity(7..9),
             ]
         );
-        assert!(blocks(&[]).is_empty());
+        assert!(blocks(&[], false).is_empty());
+    }
+
+    fn reply(text: &str) -> Row {
+        Row::Reply(text.into())
+    }
+
+    #[test]
+    fn the_reply_after_the_last_tool_is_the_answer() {
+        let rows = vec![
+            Row::User("go".into()),
+            reply("checking"),
+            tool("bash"),
+            reply("done"),
+        ];
+        assert_eq!(
+            blocks(&rows, false),
+            vec![
+                Block::Row(0),
+                Block::Row(1),
+                Block::Activity(2..3),
+                Block::Answer(3),
+            ]
+        );
+        // A turn with no tools answers straight away; so does text before
+        // the first prompt.
+        let rows = vec![reply("hi"), Row::User("go".into()), reply("ok")];
+        assert_eq!(
+            blocks(&rows, false),
+            vec![Block::Answer(0), Block::Row(1), Block::Answer(2)]
+        );
+    }
+
+    #[test]
+    fn a_running_turn_has_no_answer_yet() {
+        let rows = vec![
+            Row::User("one".into()),
+            reply("first"),
+            Row::User("two".into()),
+            tool("bash"),
+            reply("streaming"),
+        ];
+        assert_eq!(
+            blocks(&rows, true),
+            vec![
+                Block::Row(0),
+                Block::Answer(1),
+                Block::Row(2),
+                Block::Activity(3..4),
+                Block::Row(4),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_turn_that_ends_on_a_tool_has_no_answer() {
+        let rows = vec![
+            Row::User("go".into()),
+            reply("checking"),
+            tool("bash"),
+            Row::User("again".into()),
+        ];
+        assert_eq!(
+            blocks(&rows, false),
+            vec![
+                Block::Row(0),
+                Block::Row(1),
+                Block::Activity(2..3),
+                Block::Row(3),
+            ]
+        );
+    }
+
+    #[test]
+    fn notices_and_errors_after_the_reply_keep_the_answer() {
+        let rows = vec![
+            Row::User("go".into()),
+            tool("read"),
+            reply("done"),
+            Row::Notice("renamed".into()),
+            Row::Error("failed".into()),
+        ];
+        assert_eq!(
+            blocks(&rows, false),
+            vec![
+                Block::Row(0),
+                Block::Activity(1..2),
+                Block::Answer(2),
+                Block::Row(3),
+                Block::Row(4),
+            ]
+        );
     }
 
     #[test]

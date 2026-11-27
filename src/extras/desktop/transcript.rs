@@ -48,12 +48,18 @@ impl Row {
 pub(crate) enum Block {
     /// A row on its own: a prompt, text, a summary, a notice, an error.
     Row(usize),
+    /// The reply that ends a finished turn, drawn as zerostack's side of
+    /// the conversation.
+    Answer(usize),
     /// Back-to-back tool calls and reasoning, under one summary line.
     Activity(Range<usize>),
 }
 
-/// `rows` grouped for drawing: each run of activity rows is one block.
-pub(crate) fn blocks(rows: &[Row]) -> Vec<Block> {
+/// `rows` grouped for drawing: each run of activity rows is one block, and
+/// each finished turn's answer is marked. `live` says the last turn is
+/// still running, so its text may yet turn out to be narration.
+pub(crate) fn blocks(rows: &[Row], live: bool) -> Vec<Block> {
+    let answers = answers(rows, live);
     let mut blocks = Vec::new();
     let mut at = 0;
     while at < rows.len() {
@@ -64,12 +70,35 @@ pub(crate) fn blocks(rows: &[Row]) -> Vec<Block> {
                 .map_or(rows.len(), |len| at + len);
             blocks.push(Block::Activity(at..end));
             at = end;
+        } else if answers.binary_search(&at).is_ok() {
+            blocks.push(Block::Answer(at));
+            at += 1;
         } else {
             blocks.push(Block::Row(at));
             at += 1;
         }
     }
     blocks
+}
+
+/// Each turn's last reply, when no tool call or reasoning follows it in
+/// that turn: text before a tool call is narration. A turn runs from one
+/// prompt to the next; the last one counts once it is no longer `live`.
+fn answers(rows: &[Row], live: bool) -> Vec<usize> {
+    let mut answers = Vec::new();
+    let mut last = None;
+    for (at, row) in rows.iter().enumerate() {
+        match row {
+            Row::User(_) => answers.extend(last.take()),
+            Row::Reply(_) => last = Some(at),
+            row if row.is_activity() => last = None,
+            _ => {}
+        }
+    }
+    if !live {
+        answers.extend(last);
+    }
+    answers
 }
 
 #[derive(Debug, Clone, PartialEq)]

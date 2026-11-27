@@ -27,6 +27,8 @@ const OUTPUT_LINES: usize = 40;
 const OUTPUT_CHARS: usize = 4_000;
 /// Longest call detail on an activity row.
 const DETAIL_CHARS: usize = 90;
+/// Widest a prompt or answer bubble gets, so the two sides read apart.
+const BUBBLE_WIDTH: f32 = metric::COLUMN_WIDTH * 0.8;
 
 pub(super) fn view(app: &App) -> Element<'_, Message> {
     let transcript = scrollable(
@@ -146,9 +148,15 @@ fn transcript(app: &App) -> Column<'_, Message> {
         .spacing(14)
         .width(Length::Fill)
         .max_width(metric::COLUMN_WIDTH);
-    for block in blocks(&app.transcript.rows) {
+    // A command after the turn (`/compress`) leaves its answer standing.
+    let live = app.busy && app.running.is_none();
+    for block in blocks(&app.transcript.rows, live) {
         rows = rows.push(match block {
             Block::Row(at) => row_view(app, at, &app.transcript.rows[at]),
+            Block::Answer(at) => match &app.transcript.rows[at] {
+                Row::Reply(reply) => answer_view(app, at, reply),
+                row => row_view(app, at, row),
+            },
             Block::Activity(range) => group_view(app, range),
         });
     }
@@ -205,7 +213,7 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         Row::User(prompt) => container(
             container(label(prompt.as_str(), text::BODY, color::INK))
                 .padding([10, 16])
-                .max_width(metric::COLUMN_WIDTH * 0.8)
+                .max_width(BUBBLE_WIDTH)
                 .style(style::bubble),
         )
         .width(Length::Fill)
@@ -213,7 +221,8 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         .into(),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
             Some(parsed) => container(
-                markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link),
+                markdown::view(parsed.content.items(), markdown_settings(color::BG2))
+                    .map(Message::Link),
             )
             .width(Length::Fill)
             .style(|_| container::Style {
@@ -296,6 +305,30 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         .spacing(6)
         .into(),
     }
+}
+
+/// zerostack's answer: the reply that ends a turn, in a bubble on the left,
+/// facing the prompt's on the right.
+fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Message> {
+    let body: Element<'a, Message> = match app.replies.get(at).and_then(Option::as_ref) {
+        // Inline code darker than the bubble, which is its usual fill.
+        Some(parsed) => {
+            markdown::view(parsed.content.items(), markdown_settings(color::BG1)).map(Message::Link)
+        }
+        None => label(reply, text::BODY, color::INK).into(),
+    };
+    container(
+        container(body)
+            .padding([10, 16])
+            .max_width(BUBBLE_WIDTH)
+            .style(|theme| container::Style {
+                text_color: Some(color::INK),
+                ..style::bubble(theme)
+            }),
+    )
+    .width(Length::Fill)
+    .align_x(Alignment::Start)
+    .into()
 }
 
 /// A tool call's line: its verb, then what it ran on.
@@ -410,13 +443,15 @@ fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
 }
 
 /// Replies in the canvas type: Inter body, gold mono inline code.
-fn markdown_settings() -> markdown::Settings {
+/// Reply markdown; `code_fill` is the inline code highlight, which must
+/// stand out from what the text sits on.
+fn markdown_settings(code_fill: iced::Color) -> markdown::Settings {
     let mut settings = markdown::Settings::with_text_size(
         text::BODY.0,
         markdown::Style {
             font: theme::SANS,
             inline_code_highlight: markdown::Highlight {
-                background: color::BG2.into(),
+                background: code_fill.into(),
                 border: border::rounded(5),
             },
             inline_code_padding: Padding::from([1, 5]),
