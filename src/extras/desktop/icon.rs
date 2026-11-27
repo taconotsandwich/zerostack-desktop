@@ -34,12 +34,10 @@ icons! {
     ChevronDown => "outline/chevron-down.svg",
     ChevronLeft => "outline/chevron-left.svg",
     ChevronRight => "outline/chevron-right.svg",
-    ClipboardDocument => "outline/clipboard-document.svg",
     Clock => "outline/clock.svg",
     Cog6Tooth => "outline/cog-6-tooth.svg",
     CommandLine => "outline/command-line.svg",
     EllipsisHorizontal => "outline/ellipsis-horizontal.svg",
-    EllipsisHorizontalCircle => "outline/ellipsis-horizontal-circle.svg",
     ExclamationCircle => "outline/exclamation-circle.svg",
     Folder => "outline/folder.svg",
     MagnifyingGlass => "outline/magnifying-glass.svg",
@@ -50,7 +48,6 @@ icons! {
     ShieldCheck => "outline/shield-check.svg",
     ShieldExclamation => "outline/shield-exclamation.svg",
     Stop => "solid/stop.svg",
-    XCircle => "outline/x-circle.svg",
     XMark => "outline/x-mark.svg",
 }
 

@@ -227,27 +227,15 @@ pub fn queued(_: &Theme) -> container::Style {
     }
 }
 
-/// Selected slash command row.
-pub fn highlight(_: &Theme) -> container::Style {
-    container::Style {
-        background: Some(color::SELECTED.into()),
-        border: rounded(metric::RADIUS_SM),
-        ..container::Style::default()
-    }
-}
-
-/// Filled circle: the unread dot.
-pub fn dot(fill: Color) -> impl Fn(&Theme) -> container::Style {
+/// Number badge on a permission option: accent edge on the chosen one.
+pub fn badge(selected: bool) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: Some(fill.into()),
-        border: rounded(f32::MAX),
+        border: border(
+            if selected { color::ACCENT } else { color::EDGE },
+            metric::RADIUS_XS,
+        ),
         ..container::Style::default()
     }
-}
-
-/// Added or removed diff line.
-pub fn diff_line(fill: Color) -> impl Fn(&Theme) -> container::Style {
-    move |_| container::Style::default().background(fill)
 }
 
 // ── Inputs ─────────────────────────────────────────────────────────────

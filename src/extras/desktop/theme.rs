@@ -35,8 +35,6 @@ pub mod color {
 
     /// Selection, focus and the running spinner.
     pub const ACCENT: Color = Color::from_rgb8(0x9F, 0xB2, 0xFF);
-    /// Text on accent backgrounds.
-    pub const ACCENT_INK: Color = Color::from_rgb8(0xC6, 0xD2, 0xFF);
     /// Accent wash behind the selected option.
     pub const ACCENT_BG: Color = Color::from_rgba8(0x9F, 0xB2, 0xFF, 0.14);
 
@@ -48,20 +46,11 @@ pub mod color {
     pub const DANGER: Color = Color::from_rgb8(0xF2, 0x94, 0x8B);
     /// Success and added lines.
     pub const ADD: Color = Color::from_rgb8(0xA6, 0xD0, 0x7A);
-    /// Wash behind added diff lines.
-    pub const ADD_BG: Color = Color::from_rgba8(0x7F, 0xB2, 0x4A, 0.14);
-    /// Wash behind removed diff lines.
-    pub const DEL_BG: Color = Color::from_rgba8(0xF2, 0x94, 0x8B, 0.12);
 
     /// Row hover wash.
     pub const HOVER: Color = Color::from_rgba8(0xED, 0xEA, 0xDE, 0.05);
     /// Selected row wash.
     pub const SELECTED: Color = Color::from_rgba8(0xED, 0xEA, 0xDE, 0.09);
-    /// The zerostack mark.
-    pub const LOGO_GREEN: Color = Color::from_rgb8(0x4A, 0x7A, 0x23);
-
-    /// Drop shadow under floating cards.
-    pub const SHADOW: Color = Color::from_rgba8(0, 0, 0, 0.35);
 }
 
 /// Canvas layout metrics, in logical pixels.
@@ -131,13 +120,9 @@ pub const MONO_MEDIUM: Font = Font {
     weight: Weight::Medium,
     ..MONO
 };
-/// JetBrains Mono at weight 700.
-pub const MONO_BOLD: Font = Font {
-    weight: Weight::Bold,
-    ..MONO
-};
 
-/// Font files loaded at launch, one per weight in use.
+/// Font files loaded at launch, one per weight in use (bold mono for
+/// strong text in replies' code).
 pub const FONT_FILES: [&[u8]; 6] = [
     include_bytes!("../../../assets/desktop/fonts/Inter-Regular.otf"),
     include_bytes!("../../../assets/desktop/fonts/Inter-Medium.otf"),

@@ -10,22 +10,14 @@
 //! during startup keep their reactor.
 
 pub(crate) mod app;
-// The views that use most of these land in the commits that follow.
-#[allow(dead_code)]
 pub(crate) mod commands;
-#[allow(dead_code)]
 pub(crate) mod controller;
-#[allow(dead_code)]
 pub(crate) mod icon;
-#[allow(dead_code)]
 pub(crate) mod settings;
-#[allow(dead_code)]
 mod style;
-#[allow(dead_code)]
 pub(crate) mod theme;
-#[allow(dead_code)]
 pub(crate) mod transcript;
-#[allow(dead_code)]
+mod view;
 mod widgets;
 
 use std::sync::OnceLock;
@@ -51,21 +43,43 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         .set(tokio::runtime::Handle::current())
         .map_err(|_| anyhow!("desktop runtime is already running"))?;
 
-    let boot = std::cell::RefCell::new(Some(app::App::new(startup)));
+    let folder = startup.session.working_dir.to_string();
+    let info = controller::session_info(&startup.session);
+    let link =
+        controller::Controller::from_startup(startup).spawn(tokio::runtime::Handle::current())?;
+
+    let boot = std::cell::RefCell::new(Some(app::App::new(folder, info, link)));
     let mut window = iced::application(
         move || boot.borrow_mut().take().expect("iced boots the app once"),
         app::App::update,
         app::App::view,
     )
     .title(app::App::title)
+    .subscription(app::App::subscription)
     .theme(theme::theme())
     .default_font(theme::SANS)
     .executor::<SharedRuntime>()
-    .window_size(WINDOW_SIZE);
+    .window(window_settings());
     for font in theme::FONT_FILES {
         window = window.font(font);
     }
     tokio::task::block_in_place(|| window.run()).map_err(|e| anyhow!("desktop window failed: {e}"))
+}
+
+/// The window at the canvas size. On macOS the title bar is hidden and the
+/// content runs under the traffic lights, like the canvas boards.
+fn window_settings() -> iced::window::Settings {
+    iced::window::Settings {
+        size: iced::Size::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
+        min_size: Some(iced::Size::new(720.0, 480.0)),
+        #[cfg(target_os = "macos")]
+        platform_specific: iced::window::settings::PlatformSpecific {
+            title_hidden: true,
+            titlebar_transparent: true,
+            fullsize_content_view: true,
+        },
+        ..iced::window::Settings::default()
+    }
 }
 
 /// iced executor that spawns on the startup runtime instead of building its

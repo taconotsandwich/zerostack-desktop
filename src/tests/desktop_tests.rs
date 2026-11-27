@@ -594,6 +594,89 @@ mod controller {
     }
 }
 
+mod helpers {
+    use std::path::Path;
+
+    use chrono::{TimeZone, Utc};
+
+    use crate::extras::desktop::app::{
+        clip, next_mode, relative_time, tilde, tool_detail, tool_verb, tool_verb_running, wrap,
+    };
+    use crate::permission::SecurityMode;
+
+    #[test]
+    fn wrap_cycles_both_ways() {
+        assert_eq!(wrap(0, -1, 3), 2);
+        assert_eq!(wrap(2, 1, 3), 0);
+        assert_eq!(wrap(1, 1, 3), 2);
+        assert_eq!(wrap(0, -4, 3), 2);
+    }
+
+    #[test]
+    fn shift_tab_never_lands_on_yolo() {
+        let mut mode = SecurityMode::Standard;
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            mode = next_mode(mode);
+            seen.push(mode);
+        }
+        assert_eq!(
+            seen,
+            [
+                SecurityMode::Guarded,
+                SecurityMode::Restrictive,
+                SecurityMode::ReadOnly,
+                SecurityMode::Standard,
+            ]
+        );
+        assert_eq!(next_mode(SecurityMode::Yolo), SecurityMode::Standard);
+        assert_eq!(next_mode(SecurityMode::PlanWrite), SecurityMode::Standard);
+    }
+
+    #[test]
+    fn tool_rows_read_as_verbs() {
+        assert_eq!(tool_verb("bash"), "Ran");
+        assert_eq!(tool_verb("edit"), "Edited");
+        assert_eq!(tool_verb_running("read"), "Reading");
+        assert_eq!(tool_verb("mcp_lookup"), "mcp_lookup");
+        assert_eq!(tool_detail("bash", "bash cargo test"), "cargo test");
+        assert_eq!(tool_detail("bash", "bashful"), "bashful");
+        assert_eq!(tool_detail("read", "src/main.rs"), "src/main.rs");
+    }
+
+    #[test]
+    fn home_shows_as_tilde() {
+        let home = Some(Path::new("/Users/me"));
+        assert_eq!(tilde("/Users/me/code/app", home), "~/code/app");
+        assert_eq!(tilde("/Users/me", home), "~");
+        assert_eq!(tilde("/Users/meow/app", home), "/Users/meow/app");
+        assert_eq!(tilde("/srv/app", None), "/srv/app");
+    }
+
+    #[test]
+    fn relative_time_steps_down_to_dates() {
+        // A Friday.
+        let now = Utc.with_ymd_and_hms(2026, 11, 27, 12, 0, 0).unwrap();
+        let at = |s: &str| relative_time(s, &now);
+        assert_eq!(at("2026-11-27T11:59:30Z"), "now");
+        assert_eq!(at("2026-11-27T11:55:00Z"), "5m");
+        assert_eq!(at("2026-11-27T09:00:00Z"), "3h");
+        assert_eq!(at("2026-11-25T12:00:00Z"), "Wed");
+        assert_eq!(at("2026-11-01T00:00:00Z"), "Nov 1");
+        assert_eq!(at("2025-03-02T00:00:00Z"), "Mar 2025");
+        assert_eq!(at("not a time"), "");
+    }
+
+    #[test]
+    fn clip_notes_what_it_leaves_out() {
+        assert_eq!(clip("a\nb", 5, 100), "a\nb");
+        assert_eq!(clip("a\nb\nc", 2, 100), "a\nb\n… 1 more line");
+        assert_eq!(clip("a\nb\nc\nd", 1, 100), "a\n… 3 more lines");
+        assert_eq!(clip("abcdef", 5, 3), "abc…");
+        assert_eq!(clip("é".repeat(4).as_str(), 5, 3), "é…");
+    }
+}
+
 mod commands {
     use crate::extras::desktop::commands::{all, matching};
 
@@ -760,5 +843,154 @@ mod settings {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+mod app {
+    use std::sync::Arc;
+
+    use iced::widget::text_editor::{Action, Edit};
+    use tokio::sync::mpsc;
+
+    use crate::extras::desktop::app::{App, Message, Shortcut};
+    use crate::extras::desktop::controller::{Ask, Command, Link, SessionInfo, Update};
+    use crate::permission::ask::UserDecision;
+
+    fn app() -> (App, mpsc::UnboundedReceiver<Command>) {
+        let (commands, command_rx) = mpsc::unbounded_channel();
+        let (_updates, updates) = mpsc::unbounded_channel();
+        let info = SessionInfo {
+            id: "s1".into(),
+            title: "New session".into(),
+            provider: "anthropic".into(),
+            model: "claude-sonnet-4-5".into(),
+            cost: 0.0,
+            context_used: 0.0,
+            branch: None,
+        };
+        let (app, _boot) = App::new("/p".into(), info, Link { commands, updates });
+        (app, command_rx)
+    }
+
+    fn sent(rx: &mut mpsc::UnboundedReceiver<Command>) -> Vec<Command> {
+        let mut out = Vec::new();
+        while let Ok(command) = rx.try_recv() {
+            out.push(command);
+        }
+        out
+    }
+
+    fn ask(app: &mut App) {
+        let _ = app.update(Message::Controller(Update::Ask(Ask {
+            tool: "bash".into(),
+            input: "cargo test".into(),
+            suggested: "cargo **".into(),
+        })));
+    }
+
+    fn type_into_composer(app: &mut App, text: &str) {
+        let _ = app.update(Message::Edit(Action::Edit(Edit::Paste(Arc::new(
+            text.to_string(),
+        )))));
+    }
+
+    #[test]
+    fn always_allow_answers_with_the_suggested_pattern() {
+        let (mut app, mut rx) = app();
+        ask(&mut app);
+        let _ = app.update(Message::Shortcut(Shortcut::Option(1)));
+        assert!(app.ask.is_none());
+        let commands = sent(&mut rx);
+        assert!(matches!(
+            commands.as_slice(),
+            [Command::Answer(UserDecision::AllowAlways(p))] if p == "cargo **"
+        ));
+    }
+
+    #[test]
+    fn arrows_wrap_and_enter_confirms() {
+        let (mut app, mut rx) = app();
+        ask(&mut app);
+        let _ = app.update(Message::AskMove(-1));
+        assert_eq!(app.ask.as_ref().map(|c| c.choice), Some(2));
+        let _ = app.update(Message::AskMove(1));
+        let _ = app.update(Message::Confirm);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Answer(UserDecision::AllowOnce)]
+        ));
+    }
+
+    #[test]
+    fn a_note_rejects_and_becomes_the_next_prompt() {
+        let (mut app, mut rx) = app();
+        ask(&mut app);
+        let _ = app.update(Message::Note(Action::Edit(Edit::Paste(Arc::new(
+            "use nextest".to_string(),
+        )))));
+        let _ = app.update(Message::Confirm);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Answer(UserDecision::Deny), Command::Send(note)] if note == "use nextest"
+        ));
+        assert!(app.note.text().trim().is_empty());
+    }
+
+    #[test]
+    fn escape_rejects_a_pending_ask() {
+        let (mut app, mut rx) = app();
+        ask(&mut app);
+        let _ = app.update(Message::Shortcut(Shortcut::Escape));
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Answer(UserDecision::Deny)]
+        ));
+    }
+
+    #[test]
+    fn submit_sends_the_trimmed_prompt_and_clears() {
+        let (mut app, mut rx) = app();
+        type_into_composer(&mut app, "  fix the build \n");
+        let _ = app.update(Message::Submit);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(text)] if text == "fix the build"
+        ));
+        assert!(app.composer.text().trim().is_empty());
+    }
+
+    #[test]
+    fn picking_a_command_with_an_argument_fills_the_composer() {
+        let (mut app, mut rx) = app();
+        type_into_composer(&mut app, "/rena");
+        assert_eq!(app.slash_matches().first().map(|e| e.name), Some("/rename"));
+        let _ = app.update(Message::SlashPick);
+        assert_eq!(app.composer.text().trim_end(), "/rename");
+        assert!(app.slash_matches().is_empty(), "the menu closes");
+        assert!(sent(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn picking_a_plain_command_runs_it() {
+        let (mut app, mut rx) = app();
+        type_into_composer(&mut app, "/cle");
+        let _ = app.update(Message::SlashPick);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(text)] if text == "/clear"
+        ));
+    }
+
+    #[test]
+    fn escape_closes_the_slash_menu_before_stopping() {
+        let (mut app, mut rx) = app();
+        let _ = app.update(Message::Controller(Update::Running("/compress".into())));
+        type_into_composer(&mut app, "/");
+        assert!(!app.slash_matches().is_empty());
+        let _ = app.update(Message::Escape);
+        assert!(app.slash_matches().is_empty());
+        assert!(sent(&mut rx).is_empty());
+        let _ = app.update(Message::Escape);
+        assert!(matches!(sent(&mut rx).as_slice(), [Command::Stop]));
     }
 }

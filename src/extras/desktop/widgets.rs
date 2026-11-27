@@ -8,7 +8,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 use iced::widget::canvas::{self, LineCap, Path, Stroke, path::Arc};
 use iced::widget::text::{IntoFragment, LineHeight, Wrapping};
-use iced::widget::{Button, Space, Text, button, canvas as draw, container, row, text};
+use iced::widget::{Button, Text, button, canvas as draw, container, row, text};
 use iced::{Alignment, Color, Element, Font, Length, Padding, Radians, Rectangle, Renderer, Theme};
 use iced::{Point, mouse};
 
@@ -172,8 +172,6 @@ pub enum Status {
     Running(Radians),
     /// Waiting on a permission answer.
     NeedsYou,
-    /// Finished while the user looked elsewhere.
-    Unread,
     /// Idle; shows when it last changed ("now", "2h", "Mon").
     Idle(String),
 }
@@ -209,7 +207,6 @@ fn status_slot<'a, M: 'a>(status: &Status) -> Element<'a, M> {
     match status {
         Status::Running(angle) => icon::spinner(16.0, color::ACCENT, *angle).into(),
         Status::NeedsYou => icon::icon(Icon::ExclamationCircle, 16.0, color::AMBER).into(),
-        Status::Unread => dot(color::ACCENT),
         Status::Idle(when) => hint(when.clone()).into(),
     }
 }
@@ -257,15 +254,6 @@ pub fn activity_text<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
 }
 
 // ── Indicators ─────────────────────────────────────────────────────────
-
-/// 8px filled circle: unread marker.
-pub fn dot<'a, M: 'a>(fill: Color) -> Element<'a, M> {
-    container(Space::new())
-        .width(8.0)
-        .height(8.0)
-        .style(style::dot(fill))
-        .into()
-}
 
 /// The ring's SVG geometry on the canvas: an 18-unit box drawn at 16px.
 const RING_BOX: f32 = 18.0;
