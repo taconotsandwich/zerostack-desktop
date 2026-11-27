@@ -284,6 +284,18 @@ pub fn field(_: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
+/// The note field on a quote chip: bare text on the chip.
+pub fn note(_: &Theme, _: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: Background::Color(Color::TRANSPARENT),
+        border: Border::default(),
+        icon: color::MUTED,
+        placeholder: color::FAINT,
+        value: color::INK,
+        selection: color::ACCENT_BG,
+    }
+}
+
 // ── Lines and scrolling ────────────────────────────────────────────────
 
 /// Hairline divider.

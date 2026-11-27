@@ -360,17 +360,17 @@ fn pickable<'a>(
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     let pill = app
-        .quote
+        .pick
         .as_ref()
-        .filter(|quote| quote.row == at)
-        .map(|quote| add_to_reply(&quote.text));
+        .filter(|pick| pick.row == at)
+        .map(|pick| add_to_reply(&pick.text));
     selectable(content)
         .on_pick(move |text| Message::Picked(at, text))
         .pill(pill)
         .into()
 }
 
-/// The pill that quotes `selection` into the composer.
+/// The pill that adds `selection` to the composer as a quote chip.
 fn add_to_reply<'a>(selection: &str) -> Element<'a, Message> {
     button(
         row![

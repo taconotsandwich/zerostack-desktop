@@ -985,7 +985,8 @@ async fn next_job(job: &mut Option<Job>) -> JobDone {
     }
 }
 
-fn is_command(text: &str) -> bool {
+/// Whether `text` runs as a command rather than starting a turn.
+pub(crate) fn is_command(text: &str) -> bool {
     text.starts_with(['/', '.', '!'])
 }
 

@@ -51,14 +51,20 @@ the others.
   thinking text. Message text can be selected (drag, or double-click for a
   word and triple-click for a line) and copied with ⌘C; a selection stays
   within one paragraph or code line. Letting go of a selection floats an
-  **Add to reply** pill over it, which quotes the selection into the
-  composer as a reply block, under anything already typed; quote several
-  in a row to answer each in turn. The button under each bubble copies
-  all of its text: a prompt as you sent it, an answer as its markdown. The
-  header shows the title, folder, branch, how much of the context window is
-  in use, and the session's cost. The `…` menu renames the session or
-  compacts its context.
-- **Composer**: the toolbar's mode, provider and model menus. The provider
+  **Add to reply** pill over it, which adds the selection to the composer
+  as a quote chip (see Composer). Once sent, the prompt's bubble shows each
+  quote with its note under it, then your text. The button under each
+  bubble copies all of its text: a prompt as you sent it, an answer as its
+  markdown. The header shows the title, folder, branch, how much of the
+  context window is in use, and the session's cost. The `…` menu renames
+  the session or compacts its context.
+- **Composer**: quote chips above the text, one per selection added with
+  **Add to reply**, each showing the quote's first line, a remove button
+  and an optional note. Sending puts each quote ahead of your text as a
+  reply block with its note under it, so zerostack reads plain prompt
+  text; chips can be sent with no text of their own. A command (`/`, `!`
+  or `.`) runs on its own and leaves the chips for the next prompt. Under
+  the text are the toolbar's mode, provider and model menus. The provider
   menu runs `/provider <name>` for the built-in and custom providers. The
   model menu lists your `quick_models` (running `/models <name>`, which also
   switches the provider) and then the current provider's models from the
@@ -129,7 +135,7 @@ Everything lives in `src/extras/desktop/` and only that module imports iced.
 | `app.rs` | App state, messages and `update`: the only place the controller and the views meet |
 | `view/` | Stateless view functions: sidebar, home, session, composer, permission card, settings |
 | `widgets.rs`, `style.rs`, `theme.rs`, `icon.rs` | Shared widgets, styles, the palette and metrics, Heroicons |
-| `select.rs` | The wrapper around selectable message text (`iced_selection`): reports the selection and floats the Add to reply pill |
+| `select.rs` | The wrapper around selectable message text (`iced_selection`): reports the selection and floats the Add to reply pill that makes a quote chip |
 | `commands.rs`, `settings.rs` | The command menu entries, and the Providers page data and config edits |
 
 Fonts (Inter, JetBrains Mono, SIL OFL), icons (Heroicons, MIT) and the app

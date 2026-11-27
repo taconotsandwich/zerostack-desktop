@@ -16,7 +16,7 @@ use iced::{Element, Event, Radians, Subscription, Task, event, mouse, window};
 use tokio::sync::mpsc;
 
 use super::commands;
-use super::controller::{Ask, Command, Link, SessionEntry, SessionInfo, Update};
+use super::controller::{Ask, Command, Link, SessionEntry, SessionInfo, Update, is_command};
 use super::settings::{self, Providers};
 use super::transcript::{Row, Transcript};
 use super::view;
@@ -118,7 +118,9 @@ pub(crate) struct App {
     /// The row whose text was just copied: its button shows a check.
     pub copied: Option<usize>,
     /// The selection the "Add to reply" pill would quote.
-    pub quote: Option<Quote>,
+    pub pick: Option<Pick>,
+    /// Quotes waiting to go with the next prompt, shown as chips.
+    pub quotes: Vec<Quote>,
     // ── inputs ──
     pub composer: text_editor::Content,
     pub composer_focused: bool,
@@ -205,8 +207,12 @@ pub(crate) enum Message {
     CopyFaded(usize),
     /// A row's text selection, or `None` once it is gone.
     Picked(usize, Option<String>),
-    /// Quote the selection into the composer, as a reply block.
+    /// Add the selection to the next prompt, as a quote chip.
     Quote(String),
+    /// A quote chip's note, by chip.
+    QuoteNote(usize, String),
+    /// Drop a quote chip.
+    Unquote(usize),
     // permission card
     Note(Action),
     AskMove(isize),
@@ -246,7 +252,8 @@ impl App {
             expanded: HashSet::new(),
             open_groups: HashSet::new(),
             copied: None,
-            quote: None,
+            pick: None,
+            quotes: Vec::new(),
             composer: text_editor::Content::new(),
             composer_focused: true,
             note: text_editor::Content::new(),
@@ -486,17 +493,29 @@ impl App {
                     self.copied = None;
                 }
             }
-            Message::Picked(row, Some(text)) => self.quote = Some(Quote { row, text }),
+            Message::Picked(row, Some(text)) => self.pick = Some(Pick { row, text }),
             Message::Picked(row, None) => {
-                if self.quote.as_ref().is_some_and(|quote| quote.row == row) {
-                    self.quote = None;
+                if self.pick.as_ref().is_some_and(|pick| pick.row == row) {
+                    self.pick = None;
                 }
             }
             Message::Quote(text) => {
-                let draft = quoted(&self.composer.text(), &text);
-                self.set_composer(&draft);
-                self.quote = None;
+                self.quotes.push(Quote {
+                    text,
+                    note: String::new(),
+                });
+                self.pick = None;
                 return self.focus_composer();
+            }
+            Message::QuoteNote(at, note) => {
+                if let Some(quote) = self.quotes.get_mut(at) {
+                    quote.note = note;
+                }
+            }
+            Message::Unquote(at) => {
+                if at < self.quotes.len() {
+                    self.quotes.remove(at);
+                }
             }
             Message::Note(action) => self.note.perform(action),
             Message::AskMove(step) => {
@@ -582,7 +601,8 @@ impl App {
                 self.expanded.clear();
                 self.open_groups.clear();
                 self.copied = None;
-                self.quote = None;
+                self.pick = None;
+                self.quotes.clear();
                 task = latest();
             }
             Update::Started(prompt) => {
@@ -679,13 +699,24 @@ impl App {
         Task::none()
     }
 
+    /// Send the composer's text, after the quote chips. A command runs on
+    /// its own and leaves the chips for the next prompt.
     fn submit(&mut self) -> Task<Message> {
         let text = self.composer.text();
         let text = text.trim();
-        if text.is_empty() {
+        let command = is_command(text);
+        let prompt = if command {
+            text.to_string()
+        } else {
+            reply_prompt(&self.quotes, text)
+        };
+        if prompt.is_empty() {
             return Task::none();
         }
-        self.send(Command::Send(text.to_string()));
+        if !command {
+            self.quotes.clear();
+        }
+        self.send(Command::Send(prompt));
         self.composer = text_editor::Content::new();
         self.slash = 0;
         self.slash_closed = false;
@@ -960,30 +991,45 @@ pub(crate) fn hard_breaks(prompt: &str) -> String {
 
 /// A selection the "Add to reply" pill would quote, and its row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Quote {
+pub(crate) struct Pick {
     pub row: usize,
     pub text: String,
 }
 
-/// `draft` with `selection` quoted under it as a reply block, the way
-/// Claude desktop quotes one, and a blank line to write the reply under.
-pub(crate) fn quoted(draft: &str, selection: &str) -> String {
-    let mut text = String::new();
-    let draft = draft.trim_end();
-    if !draft.is_empty() {
-        text.push_str(draft);
-        text.push_str("\n\n");
-    }
-    text.push_str(REPLY_MARKER);
-    for line in selection.trim_end().trim_start_matches('\n').lines() {
-        text.push_str("\n> ");
-        text.push_str(line);
-    }
-    text.push_str("\n\n");
-    text
+/// A quote chip: a selection to answer in the next prompt, and an
+/// optional note on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Quote {
+    pub text: String,
+    pub note: String,
 }
 
-/// A piece of a prompt as its bubble draws it.
+/// The prompt `quotes` and `text` make: each quote as a reply block, the
+/// way Claude desktop quotes a selection, with its note under it, then the
+/// typed text. Blank lines keep the parts apart, so a note never runs on
+/// into the quote above it.
+pub(crate) fn reply_prompt(quotes: &[Quote], text: &str) -> String {
+    let mut parts = Vec::new();
+    for quote in quotes {
+        let mut block = String::from(REPLY_MARKER);
+        for line in quote.text.trim_end().trim_start_matches('\n').lines() {
+            block.push_str("\n> ");
+            block.push_str(line);
+        }
+        parts.push(block);
+        let note = quote.note.trim();
+        if !note.is_empty() {
+            parts.push(note.to_string());
+        }
+    }
+    let text = text.trim();
+    if !text.is_empty() {
+        parts.push(text.to_string());
+    }
+    parts.join("\n\n")
+}
+
+/// A piece of a prompt: its own text, or a selection it quotes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PromptPart {
     Text(String),

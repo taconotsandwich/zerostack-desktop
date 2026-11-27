@@ -7,7 +7,7 @@ use iced::keyboard::key::Named;
 use iced::widget::text::LineHeight;
 use iced::widget::text_editor::{Binding, KeyPress, Status};
 use iced::widget::{
-    Column, Text, button, column, container, row, rule, scrollable, space, text_editor,
+    Column, Text, button, column, container, row, rule, scrollable, space, text_editor, text_input,
 };
 use iced::{Alignment, Element, Length, Padding};
 
@@ -17,7 +17,9 @@ use crate::extras::desktop::icon::{self, Icon};
 use crate::extras::desktop::settings;
 use crate::extras::desktop::style;
 use crate::extras::desktop::theme::{self, color, text};
-use crate::extras::desktop::widgets::{dropdown, hint, icon_button, label, mono, round_button};
+use crate::extras::desktop::widgets::{
+    dropdown, hint, icon_button, label, mono, round_button, single_line,
+};
 use crate::permission::SecurityMode;
 
 /// The slash menu shows this many rows around the selection.
@@ -46,7 +48,7 @@ pub(super) fn view(app: &App, home: bool) -> Element<'_, Message> {
         .max_height(240.0)
         .style(style::editor);
 
-    let empty = app.composer.text().trim().is_empty();
+    let empty = app.composer.text().trim().is_empty() && app.quotes.is_empty();
     let action = if busy && empty {
         round_button(Icon::Stop, color::INK, Some(Message::Stop))
     } else {
@@ -90,7 +92,11 @@ pub(super) fn view(app: &App, home: bool) -> Element<'_, Message> {
     let toolbar = toolbar.push(action);
 
     let (top, left, gap) = if home { (16, 18, 14) } else { (14, 16, 8) };
-    container(column![editor, toolbar].spacing(gap))
+    let mut body = Column::new().spacing(gap);
+    if !app.quotes.is_empty() {
+        body = body.push(quotes(app));
+    }
+    container(body.push(editor).push(toolbar))
         .padding(Padding {
             top: top as f32,
             right: 10.0,
@@ -100,6 +106,41 @@ pub(super) fn view(app: &App, home: bool) -> Element<'_, Message> {
         .width(Length::Fill)
         .style(style::composer(app.composer_focused))
         .into()
+}
+
+/// The quote chips waiting to go with the next prompt: the quote's first
+/// line, a remove button, and a note that is sent under the quote. Enter
+/// in a note sends, as it does in the editor.
+fn quotes(app: &App) -> Element<'_, Message> {
+    let chips = app.quotes.iter().enumerate().map(|(at, quote)| {
+        let first = quote
+            .text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .trim();
+        let head = row![
+            icon::icon(Icon::ArrowUturnLeft, 14.0, color::MUTED),
+            single_line(label(first, text::SMALL, color::MUTED)),
+            icon_button(Icon::XMark, 14.0, 22.0, Message::Unquote(at)),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let note = text_input("Add a note…", &quote.note)
+            .on_input(move |note| Message::QuoteNote(at, note))
+            .on_submit(Message::Submit)
+            .font(theme::SANS)
+            .size(text::SMALL.0)
+            .line_height(LineHeight::Absolute(text::SMALL.1.into()))
+            // Under the quote's text, past the icon.
+            .padding(Padding::ZERO.left(22))
+            .style(style::note);
+        container(column![head, note].spacing(2))
+            .padding(Padding::from([6, 10]).right(6))
+            .style(style::well)
+            .into()
+    });
+    Column::with_children(chips).spacing(6).into()
 }
 
 /// Enter sends and Shift+Enter breaks the line; the open menu takes the

@@ -964,7 +964,7 @@ mod app {
     use iced::widget::text_editor::{Action, Edit};
     use tokio::sync::mpsc;
 
-    use crate::extras::desktop::app::{App, Menu, Message, Quote, Shortcut};
+    use crate::extras::desktop::app::{App, Menu, Message, Pick, Quote, Shortcut};
     use crate::extras::desktop::controller::{Ask, Command, Link, SessionInfo, Update};
     use crate::permission::ask::UserDecision;
 
@@ -1198,51 +1198,119 @@ mod app {
         assert!(matches!(items, [Item::Quote(_), Item::Paragraph(_)]));
     }
 
+    fn quote(text: &str, note: &str) -> Quote {
+        Quote {
+            text: text.into(),
+            note: note.into(),
+        }
+    }
+
     #[test]
-    fn a_picked_selection_is_quoted_into_the_composer() {
+    fn a_picked_selection_becomes_a_quote_chip() {
         let (mut app, _rx) = app();
         type_into_composer(&mut app, "why?");
         let _ = app.update(Message::Picked(2, Some("All green.".into())));
         assert_eq!(
-            app.quote,
-            Some(Quote {
+            app.pick,
+            Some(Pick {
                 row: 2,
                 text: "All green.".into()
             })
         );
         // Another row's selection going away leaves this one.
         let _ = app.update(Message::Picked(5, None));
-        assert!(app.quote.is_some());
+        assert!(app.pick.is_some());
 
         let _ = app.update(Message::Quote("All green.".into()));
-        assert_eq!(
-            app.composer.text().trim_end(),
-            "why?\n\n<!-- reply -->\n> All green."
-        );
-        assert_eq!(app.quote, None);
+        assert_eq!(app.quotes, [quote("All green.", "")]);
+        assert_eq!(app.pick, None);
+        // The draft is left as it was.
+        assert_eq!(app.composer.text().trim_end(), "why?");
     }
 
     #[test]
-    fn a_selection_is_dropped_when_it_goes_or_the_session_loads() {
+    fn a_quote_chip_takes_a_note_and_can_be_dropped() {
+        let (mut app, _rx) = app();
+        let _ = app.update(Message::Quote("one".into()));
+        let _ = app.update(Message::Quote("two".into()));
+        let _ = app.update(Message::QuoteNote(1, "and this".into()));
+        assert_eq!(app.quotes, [quote("one", ""), quote("two", "and this")]);
+
+        let _ = app.update(Message::Unquote(0));
+        assert_eq!(app.quotes, [quote("two", "and this")]);
+        // A chip that is gone is ignored.
+        let _ = app.update(Message::Unquote(4));
+        let _ = app.update(Message::QuoteNote(4, "lost".into()));
+        assert_eq!(app.quotes, [quote("two", "and this")]);
+    }
+
+    #[test]
+    fn quote_chips_are_sent_ahead_of_the_text() {
+        let (mut app, mut rx) = app();
+        let _ = app.update(Message::Quote("All green.".into()));
+        let _ = app.update(Message::QuoteNote(0, "really?".into()));
+        type_into_composer(&mut app, "ship it");
+        let _ = app.update(Message::Submit);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(prompt)]
+                if prompt == "<!-- reply -->\n> All green.\n\nreally?\n\nship it"
+        ));
+        assert!(app.quotes.is_empty());
+        assert!(app.composer.text().trim().is_empty());
+    }
+
+    #[test]
+    fn quote_chips_can_be_sent_without_text() {
+        let (mut app, mut rx) = app();
+        let _ = app.update(Message::Submit);
+        assert!(sent(&mut rx).is_empty());
+
+        let _ = app.update(Message::Quote("All green.".into()));
+        let _ = app.update(Message::Submit);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(prompt)] if prompt == "<!-- reply -->\n> All green."
+        ));
+        assert!(app.quotes.is_empty());
+    }
+
+    #[test]
+    fn a_command_runs_alone_and_keeps_the_quote_chips() {
+        let (mut app, mut rx) = app();
+        let _ = app.update(Message::Quote("All green.".into()));
+        type_into_composer(&mut app, "/compress");
+        let _ = app.update(Message::Submit);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(command)] if command == "/compress"
+        ));
+        assert_eq!(app.quotes, [quote("All green.", "")]);
+    }
+
+    #[test]
+    fn a_selection_and_the_chips_are_dropped_when_the_session_loads() {
         use crate::extras::desktop::controller::Snapshot;
         use crate::extras::desktop::transcript::Transcript;
 
         let (mut app, _rx) = app();
         let _ = app.update(Message::Picked(2, Some("one".into())));
         let _ = app.update(Message::Picked(2, None));
-        assert_eq!(app.quote, None);
+        assert_eq!(app.pick, None);
 
         // A later selection replaces the earlier one, on any row.
         let _ = app.update(Message::Picked(2, Some("one".into())));
         let _ = app.update(Message::Picked(4, Some("two".into())));
-        assert_eq!(app.quote.as_ref().map(|quote| quote.row), Some(4));
+        assert_eq!(app.pick.as_ref().map(|pick| pick.row), Some(4));
 
+        let _ = app.update(Message::Quote("two".into()));
         let snapshot = Snapshot {
             info: app.info.clone(),
             transcript: Transcript::default(),
         };
         let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
-        assert_eq!(app.quote, None);
+        assert_eq!(app.pick, None);
+        assert!(app.quotes.is_empty());
     }
 }
 
@@ -1306,7 +1374,8 @@ mod layout {
     use std::time::{Duration, Instant};
 
     use crate::extras::desktop::app::{
-        PromptPart, activity_summary, copy_text, hard_breaks, prompt_parts, prompt_summary, quoted,
+        PromptPart, Quote, activity_summary, copy_text, hard_breaks, prompt_parts, prompt_summary,
+        reply_prompt,
     };
     use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
 
@@ -1594,34 +1663,48 @@ mod layout {
         );
     }
 
-    #[test]
-    fn a_quote_into_an_empty_draft_is_the_block_alone() {
-        assert_eq!(
-            quoted("", "Ran 3 commands"),
-            "<!-- reply -->\n> Ran 3 commands\n\n"
-        );
+    fn chip(text: &str, note: &str) -> Quote {
+        Quote {
+            text: text.into(),
+            note: note.into(),
+        }
     }
 
     #[test]
-    fn a_quote_goes_under_the_draft() {
+    fn a_quote_alone_is_the_block_alone() {
+        assert_eq!(
+            reply_prompt(&[chip("Ran 3 commands", "  ")], "  "),
+            "<!-- reply -->\n> Ran 3 commands"
+        );
+        assert_eq!(reply_prompt(&[], " why? "), "why?");
+    }
+
+    #[test]
+    fn a_quote_keeps_its_blank_lines_and_its_note_goes_under_it() {
         // Blank lines inside the selection stay, as `> `; the ones around
-        // it, and the draft's trailing ones, go.
+        // it go.
         assert_eq!(
-            quoted("why?\n\n", "\nline one\n\nline three\n"),
-            "why?\n\n<!-- reply -->\n> line one\n> \n> line three\n\n"
+            reply_prompt(&[chip("\nline one\n\nline three\n", " this ")], "why?"),
+            "<!-- reply -->\n> line one\n> \n> line three\n\nthis\n\nwhy?"
         );
     }
 
     #[test]
-    fn quotes_stack_and_read_back_as_quotes() {
-        let twice = quoted(&quoted("", "one"), "two\nthree");
-        assert_eq!(
-            twice,
-            "<!-- reply -->\n> one\n\n<!-- reply -->\n> two\n> three\n\n"
+    fn quotes_and_notes_read_back_in_order() {
+        let prompt = reply_prompt(
+            &[chip("one", "first"), chip("two\nthree", "second")],
+            "about both",
         );
         assert_eq!(
-            prompt_parts(&format!("{twice}about both")),
-            vec![quote("one"), quote("two\nthree"), text("about both")]
+            prompt_parts(&prompt),
+            vec![
+                quote("one"),
+                text("first"),
+                quote("two\nthree"),
+                // The last note and the text read as one: both are the
+                // reply's own words.
+                text("second\n\nabout both"),
+            ]
         );
     }
 }
