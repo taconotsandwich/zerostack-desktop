@@ -48,7 +48,10 @@ the others.
   click it to list each call, and click a call to see its output or the
   thinking text. Message text can be selected (drag, or double-click for a
   word and triple-click for a line) and copied with ⌘C; a selection stays
-  within one paragraph or code line. The button under each bubble copies
+  within one paragraph or code line. Letting go of a selection floats an
+  **Add to reply** pill over it, which quotes the selection into the
+  composer as a reply block, under anything already typed; quote several
+  in a row to answer each in turn. The button under each bubble copies
   all of its text: a prompt as you sent it, an answer as its markdown. The
   header shows the title, folder, branch, how much of the context window is
   in use, and the session's cost. The `…` menu renames the session or
@@ -124,7 +127,7 @@ Everything lives in `src/extras/desktop/` and only that module imports iced.
 | `app.rs` | App state, messages and `update`: the only place the controller and the views meet |
 | `view/` | Stateless view functions: sidebar, home, session, composer, permission card, settings |
 | `widgets.rs`, `style.rs`, `theme.rs`, `icon.rs` | Shared widgets, styles, the palette and metrics, Heroicons |
-| `select.rs` | The wrapper around selectable message text (`iced_selection`) |
+| `select.rs` | The wrapper around selectable message text (`iced_selection`): reports the selection and floats the Add to reply pill |
 | `commands.rs`, `settings.rs` | The command menu entries, and the Providers page data and config edits |
 
 Fonts (Inter, JetBrains Mono, SIL OFL), icons (Heroicons, MIT) and the app

@@ -214,25 +214,27 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         Row::User(prompt) => side(
             app,
             at,
-            selectable(
+            pickable(
+                app,
+                at,
                 container(prompt_view(prompt))
                     .padding([10, 16])
                     .max_width(BUBBLE_WIDTH)
                     .style(style::bubble),
-            )
-            .into(),
+            ),
             Alignment::End,
         ),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
-            Some(parsed) => selectable(
+            Some(parsed) => pickable(
+                app,
+                at,
                 container(reply_markdown(parsed))
                     .width(Length::Fill)
                     .style(|_| container::Style {
                         text_color: Some(color::BODY),
                         ..container::Style::default()
                     }),
-            )
-            .into(),
+            ),
             None => label(reply.as_str(), text::BODY, color::BODY).into(),
         },
         Row::Thought(thought) => {
@@ -335,7 +337,9 @@ fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Messa
     side(
         app,
         at,
-        selectable(
+        pickable(
+            app,
+            at,
             container(body)
                 .padding([10, 16])
                 .max_width(BUBBLE_WIDTH)
@@ -343,10 +347,43 @@ fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Messa
                     text_color: Some(color::INK),
                     ..style::bubble(theme)
                 }),
-        )
-        .into(),
+        ),
         Alignment::Start,
     )
+}
+
+/// Row `at`'s message text, selectable. While it holds the selection the
+/// app would quote, the "Add to reply" pill floats over it.
+fn pickable<'a>(
+    app: &App,
+    at: usize,
+    content: impl Into<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let pill = app
+        .quote
+        .as_ref()
+        .filter(|quote| quote.row == at)
+        .map(|quote| add_to_reply(&quote.text));
+    selectable(content)
+        .on_pick(move |text| Message::Picked(at, text))
+        .pill(pill)
+        .into()
+}
+
+/// The pill that quotes `selection` into the composer.
+fn add_to_reply<'a>(selection: &str) -> Element<'a, Message> {
+    button(
+        row![
+            icon::icon(Icon::ArrowUturnLeft, 14.0, color::INK),
+            label("Add to reply", text::SMALL, color::INK),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding([5, 12])
+    .style(style::pill)
+    .on_press(Message::Quote(selection.to_string()))
+    .into()
 }
 
 /// One side of the conversation: the bubble for row `at` against `edge`,

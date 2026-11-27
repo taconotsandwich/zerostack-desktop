@@ -74,6 +74,22 @@ pub fn outline(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Floating pill over a selected text: "Add to reply". Raised a step
+/// above the page and the bubbles both, its edge lighting on hover.
+pub fn pill(_: &Theme, status: button::Status) -> button::Style {
+    let edge = match status {
+        button::Status::Hovered | button::Status::Pressed => color::FAINT,
+        _ => color::EDGE,
+    };
+    button::Style {
+        background: Some(color::EDGE.into()),
+        text_color: color::INK,
+        border: border(edge, metric::RADIUS_PILL),
+        shadow: shadow(0.35, 4.0, 12.0),
+        ..button::Style::default()
+    }
+}
+
 /// Bordered select field: default provider and model.
 pub fn select(_: &Theme, status: button::Status) -> button::Style {
     button::Style {

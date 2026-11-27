@@ -28,6 +28,7 @@ macro_rules! icons {
 
 icons! {
     ArrowPath => "outline/arrow-path.svg",
+    ArrowUturnLeft => "outline/arrow-uturn-left.svg",
     ArrowUp => "outline/arrow-up.svg",
     Check => "outline/check.svg",
     CheckCircle => "outline/check-circle.svg",

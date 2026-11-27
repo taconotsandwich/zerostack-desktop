@@ -964,7 +964,7 @@ mod app {
     use iced::widget::text_editor::{Action, Edit};
     use tokio::sync::mpsc;
 
-    use crate::extras::desktop::app::{App, Menu, Message, Shortcut};
+    use crate::extras::desktop::app::{App, Menu, Message, Quote, Shortcut};
     use crate::extras::desktop::controller::{Ask, Command, Link, SessionInfo, Update};
     use crate::permission::ask::UserDecision;
 
@@ -1171,12 +1171,117 @@ mod app {
         let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
         assert_eq!(app.copied, None);
     }
+
+    #[test]
+    fn a_picked_selection_is_quoted_into_the_composer() {
+        let (mut app, _rx) = app();
+        type_into_composer(&mut app, "why?");
+        let _ = app.update(Message::Picked(2, Some("All green.".into())));
+        assert_eq!(
+            app.quote,
+            Some(Quote {
+                row: 2,
+                text: "All green.".into()
+            })
+        );
+        // Another row's selection going away leaves this one.
+        let _ = app.update(Message::Picked(5, None));
+        assert!(app.quote.is_some());
+
+        let _ = app.update(Message::Quote("All green.".into()));
+        assert_eq!(
+            app.composer.text().trim_end(),
+            "why?\n\n<!-- reply -->\n> All green."
+        );
+        assert_eq!(app.quote, None);
+    }
+
+    #[test]
+    fn a_selection_is_dropped_when_it_goes_or_the_session_loads() {
+        use crate::extras::desktop::controller::Snapshot;
+        use crate::extras::desktop::transcript::Transcript;
+
+        let (mut app, _rx) = app();
+        let _ = app.update(Message::Picked(2, Some("one".into())));
+        let _ = app.update(Message::Picked(2, None));
+        assert_eq!(app.quote, None);
+
+        // A later selection replaces the earlier one, on any row.
+        let _ = app.update(Message::Picked(2, Some("one".into())));
+        let _ = app.update(Message::Picked(4, Some("two".into())));
+        assert_eq!(app.quote.as_ref().map(|quote| quote.row), Some(4));
+
+        let snapshot = Snapshot {
+            info: app.info.clone(),
+            transcript: Transcript::default(),
+        };
+        let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
+        assert_eq!(app.quote, None);
+    }
+}
+
+mod select {
+    use iced::Vector;
+
+    use crate::extras::desktop::select::{Picked, settle};
+
+    #[test]
+    fn a_new_selection_is_reported_where_the_mouse_let_go() {
+        let mut picked = None;
+        let at = Vector::new(40.0, 12.0);
+        assert_eq!(
+            settle(&mut picked, Some("word".into()), Some(at)),
+            Some(Some("word".into()))
+        );
+        assert_eq!(
+            picked,
+            Some(Picked {
+                text: "word".into(),
+                at
+            })
+        );
+    }
+
+    #[test]
+    fn an_unchanged_selection_is_not_reported_again() {
+        let at = Vector::new(40.0, 12.0);
+        let mut picked = Some(Picked {
+            text: "word".into(),
+            at,
+        });
+        assert_eq!(settle(&mut picked, Some("word".into()), None), None);
+        // A key that grows it reports the new text; the pill stays put.
+        assert_eq!(
+            settle(&mut picked, Some("word and".into()), None),
+            Some(Some("word and".into()))
+        );
+        assert_eq!(
+            picked,
+            Some(Picked {
+                text: "word and".into(),
+                at
+            })
+        );
+    }
+
+    #[test]
+    fn a_cleared_selection_is_reported_once() {
+        let mut picked = Some(Picked {
+            text: "word".into(),
+            at: Vector::ZERO,
+        });
+        assert_eq!(settle(&mut picked, None, None), Some(None));
+        assert_eq!(picked, None);
+        assert_eq!(settle(&mut picked, None, None), None);
+    }
 }
 
 mod layout {
     use std::time::{Duration, Instant};
 
-    use crate::extras::desktop::app::{PromptPart, activity_summary, copy_text, prompt_parts};
+    use crate::extras::desktop::app::{
+        PromptPart, activity_summary, copy_text, prompt_parts, quoted,
+    };
     use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
 
     fn tool(name: &str) -> Row {
@@ -1429,6 +1534,37 @@ mod layout {
         assert_eq!(
             prompt_parts("<!-- reply -->\n>\n> \n\nok"),
             vec![text("ok")]
+        );
+    }
+
+    #[test]
+    fn a_quote_into_an_empty_draft_is_the_block_alone() {
+        assert_eq!(
+            quoted("", "Ran 3 commands"),
+            "<!-- reply -->\n> Ran 3 commands\n\n"
+        );
+    }
+
+    #[test]
+    fn a_quote_goes_under_the_draft() {
+        // Blank lines inside the selection stay, as `> `; the ones around
+        // it, and the draft's trailing ones, go.
+        assert_eq!(
+            quoted("why?\n\n", "\nline one\n\nline three\n"),
+            "why?\n\n<!-- reply -->\n> line one\n> \n> line three\n\n"
+        );
+    }
+
+    #[test]
+    fn quotes_stack_and_read_back_as_quotes() {
+        let twice = quoted(&quoted("", "one"), "two\nthree");
+        assert_eq!(
+            twice,
+            "<!-- reply -->\n> one\n\n<!-- reply -->\n> two\n> three\n\n"
+        );
+        assert_eq!(
+            prompt_parts(&format!("{twice}about both")),
+            vec![quote("one"), quote("two\nthree"), text("about both")]
         );
     }
 }

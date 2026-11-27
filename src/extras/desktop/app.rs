@@ -110,6 +110,8 @@ pub(crate) struct App {
     pub open_groups: HashSet<usize>,
     /// The row whose text was just copied: its button shows a check.
     pub copied: Option<usize>,
+    /// The selection the "Add to reply" pill would quote.
+    pub quote: Option<Quote>,
     // ── inputs ──
     pub composer: text_editor::Content,
     pub composer_focused: bool,
@@ -194,6 +196,10 @@ pub(crate) enum Message {
     Copy(usize),
     /// The copied check has shown long enough.
     CopyFaded(usize),
+    /// A row's text selection, or `None` once it is gone.
+    Picked(usize, Option<String>),
+    /// Quote the selection into the composer, as a reply block.
+    Quote(String),
     // permission card
     Note(Action),
     AskMove(isize),
@@ -233,6 +239,7 @@ impl App {
             expanded: HashSet::new(),
             open_groups: HashSet::new(),
             copied: None,
+            quote: None,
             composer: text_editor::Content::new(),
             composer_focused: true,
             note: text_editor::Content::new(),
@@ -472,6 +479,18 @@ impl App {
                     self.copied = None;
                 }
             }
+            Message::Picked(row, Some(text)) => self.quote = Some(Quote { row, text }),
+            Message::Picked(row, None) => {
+                if self.quote.as_ref().is_some_and(|quote| quote.row == row) {
+                    self.quote = None;
+                }
+            }
+            Message::Quote(text) => {
+                let draft = quoted(&self.composer.text(), &text);
+                self.set_composer(&draft);
+                self.quote = None;
+                return self.focus_composer();
+            }
             Message::Note(action) => self.note.perform(action),
             Message::AskMove(step) => {
                 if let Some(card) = &mut self.ask {
@@ -556,6 +575,7 @@ impl App {
                 self.expanded.clear();
                 self.open_groups.clear();
                 self.copied = None;
+                self.quote = None;
                 task = latest();
             }
             Update::Started(prompt) => {
@@ -882,6 +902,31 @@ pub(crate) fn copy_text(row: &Row) -> Option<&str> {
 /// The line Claude desktop starts a quoted selection with; the quote's
 /// `>` lines follow it.
 const REPLY_MARKER: &str = "<!-- reply -->";
+
+/// A selection the "Add to reply" pill would quote, and its row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Quote {
+    pub row: usize,
+    pub text: String,
+}
+
+/// `draft` with `selection` quoted under it as a reply block, the way
+/// Claude desktop quotes one, and a blank line to write the reply under.
+pub(crate) fn quoted(draft: &str, selection: &str) -> String {
+    let mut text = String::new();
+    let draft = draft.trim_end();
+    if !draft.is_empty() {
+        text.push_str(draft);
+        text.push_str("\n\n");
+    }
+    text.push_str(REPLY_MARKER);
+    for line in selection.trim_end().trim_start_matches('\n').lines() {
+        text.push_str("\n> ");
+        text.push_str(line);
+    }
+    text.push_str("\n\n");
+    text
+}
 
 /// A piece of a prompt as its bubble draws it.
 #[derive(Debug, Clone, PartialEq, Eq)]

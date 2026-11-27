@@ -13,7 +13,7 @@ pub(crate) mod app;
 pub(crate) mod commands;
 pub(crate) mod controller;
 pub(crate) mod icon;
-mod select;
+pub(crate) mod select;
 pub(crate) mod settings;
 mod style;
 pub(crate) mod theme;
