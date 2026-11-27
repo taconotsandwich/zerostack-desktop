@@ -138,6 +138,14 @@ pub fn option(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Styl
     }
 }
 
+/// Clickable row with no chrome: activity rows that toggle their details.
+pub fn bare(_: &Theme, _: button::Status) -> button::Style {
+    button::Style {
+        text_color: color::MUTED,
+        ..button::Style::default()
+    }
+}
+
 // ── Containers ─────────────────────────────────────────────────────────
 
 /// Sidebar and settings nav column.
@@ -224,6 +232,15 @@ pub fn highlight(_: &Theme) -> container::Style {
     container::Style {
         background: Some(color::SELECTED.into()),
         border: rounded(metric::RADIUS_SM),
+        ..container::Style::default()
+    }
+}
+
+/// Filled circle: the unread dot.
+pub fn dot(fill: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(fill.into()),
+        border: rounded(f32::MAX),
         ..container::Style::default()
     }
 }

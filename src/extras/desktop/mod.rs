@@ -17,6 +17,8 @@ pub(crate) mod icon;
 mod style;
 #[allow(dead_code)]
 pub(crate) mod theme;
+#[allow(dead_code)]
+mod widgets;
 
 use std::sync::OnceLock;
 
