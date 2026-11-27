@@ -499,3 +499,36 @@ mod controller {
         )));
     }
 }
+
+mod commands {
+    use crate::extras::desktop::commands::{all, matching};
+
+    #[test]
+    fn menu_lists_every_command_once_in_order() {
+        let names: Vec<&str> = all().iter().map(|e| e.name).collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted);
+        assert!(names.iter().all(|n| n.starts_with('/')));
+    }
+
+    #[test]
+    fn matching_follows_the_first_word() {
+        assert_eq!(matching("/").len(), all().len());
+        let names: Vec<&str> = matching("/re").iter().map(|e| e.name).collect();
+        assert!(names.contains(&"/rename"));
+        assert!(names.iter().all(|n| n.starts_with("/re")));
+        assert!(matching("/rename now").is_empty());
+        assert!(matching("hello").is_empty());
+        assert!(matching("/zzz").is_empty());
+    }
+
+    #[test]
+    fn required_arguments_fill_the_composer() {
+        let find = |name: &str| *all().iter().find(|e| e.name == name).unwrap();
+        assert!(find("/rename").needs_arg());
+        assert!(!find("/model").needs_arg());
+        assert!(!find("/clear").needs_arg());
+    }
+}
