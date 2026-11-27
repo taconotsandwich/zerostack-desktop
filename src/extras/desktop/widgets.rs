@@ -41,9 +41,14 @@ pub fn hint<'a>(content: impl IntoFragment<'a>) -> Text<'a> {
     label(content, theme::text::CAPTION, color::MUTED)
 }
 
-/// One line that clips instead of wrapping (titles, paths).
-fn single_line(text: Text<'_>) -> Text<'_> {
-    text.wrapping(Wrapping::None).width(Length::Fill)
+/// One line that fills its slot and clips at its end instead of wrapping
+/// (titles, paths). iced draws text past its bounds, so the clip is what
+/// keeps a long line off the widgets after it.
+pub fn single_line<'a, M: 'a>(text: Text<'a>) -> Element<'a, M> {
+    container(text.wrapping(Wrapping::None))
+        .width(Length::Fill)
+        .clip(true)
+        .into()
 }
 
 // ── Buttons ────────────────────────────────────────────────────────────

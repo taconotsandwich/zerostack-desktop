@@ -16,7 +16,7 @@ use crate::extras::desktop::style;
 use crate::extras::desktop::theme::{self, color, metric, text};
 use crate::extras::desktop::transcript::{Row, ToolState};
 use crate::extras::desktop::widgets::{
-    Lead, activity, activity_text, code, context_ring, icon_button, label, mono,
+    Lead, activity, activity_text, code, context_ring, icon_button, label, mono, single_line,
 };
 
 /// Tool output and notices show at most this much until opened elsewhere.
@@ -340,9 +340,7 @@ fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
         row![
             icon::icon(Icon::Clock, 16.0, color::MUTED),
             label("Queued", text::SMALL, color::MUTED),
-            label(first, text::SMALL, color::BODY)
-                .wrapping(Wrapping::None)
-                .width(Length::Fill),
+            single_line(label(first, text::SMALL, color::BODY)),
             icon_button(Icon::Pencil, 16.0, 28.0, Message::EditQueued(at)),
             icon_button(Icon::XMark, 16.0, 28.0, Message::Unqueue(at)),
         ]
