@@ -18,6 +18,8 @@ pub(crate) mod controller;
 #[allow(dead_code)]
 pub(crate) mod icon;
 #[allow(dead_code)]
+pub(crate) mod settings;
+#[allow(dead_code)]
 mod style;
 #[allow(dead_code)]
 pub(crate) mod theme;

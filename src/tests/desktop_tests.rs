@@ -532,3 +532,139 @@ mod commands {
         assert!(!find("/clear").needs_arg());
     }
 }
+
+mod settings {
+    use std::collections::HashMap;
+
+    use crate::auth::ProviderKind;
+    use crate::config::Config;
+    use crate::extras::desktop::settings::{KeySource, edit_config_file, key_source, providers};
+
+    fn keys(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn environment_wins_over_config() {
+        let var = ProviderKind::Anthropic.env_var();
+        let saved = keys(&[("anthropic", "saved")]);
+        let set = |name: &str| (name == var).then(|| "from-env".to_string());
+        assert_eq!(
+            key_source(ProviderKind::Anthropic, Some(&saved), set),
+            KeySource::Env(var)
+        );
+        assert_eq!(
+            key_source(ProviderKind::Anthropic, Some(&saved), |_| None),
+            KeySource::Config
+        );
+        // An empty variable counts as unset.
+        let empty = |_: &str| Some(String::new());
+        assert_eq!(
+            key_source(ProviderKind::Anthropic, Some(&saved), empty),
+            KeySource::Config
+        );
+    }
+
+    #[test]
+    fn keyless_providers_have_their_own_status() {
+        let none = |_: &str| None;
+        assert_eq!(
+            key_source(ProviderKind::Ollama, None, none),
+            KeySource::NotNeeded
+        );
+        assert_eq!(
+            key_source(ProviderKind::OpencodeZen, None, none),
+            KeySource::Public(ProviderKind::OpencodeZen.env_var())
+        );
+        assert_eq!(
+            key_source(ProviderKind::OpenAI, None, none),
+            KeySource::Missing(ProviderKind::OpenAI.env_var())
+        );
+    }
+
+    #[test]
+    fn providers_page_reads_config_defaults() {
+        let cfg = Config {
+            provider: Some("gemini".into()),
+            model: Some("gemini-pro".into()),
+            api_keys: Some(keys(&[("openai", "k")])),
+            ..Config::default()
+        };
+        let page = providers(&cfg, |_| None);
+        assert_eq!(page.rows.len(), 7);
+        let openai = page.rows.iter().find(|r| r.slug == "openai").unwrap();
+        assert_eq!(openai.source, KeySource::Config);
+        assert_eq!(page.default_provider, "gemini");
+        assert_eq!(page.default_model, "gemini-pro");
+        assert!(page.choices.iter().any(|c| c == "anthropic"));
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "zerostack-desktop-config-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn config_edits_keep_other_settings() {
+        let dir = temp_dir("toml");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "max_tokens = 1234\n").unwrap();
+        edit_config_file(&path, |cfg| cfg.provider = Some("openai".into())).unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.max_tokens, Some(1234));
+        assert_eq!(cfg.provider.as_deref(), Some("openai"));
+        assert!(!path.with_extension("desktop.tmp").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_edits_keep_yaml_files_yaml() {
+        let dir = temp_dir("yaml");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "max_tokens: 99\n").unwrap();
+        edit_config_file(&path, |cfg| cfg.model = Some("m".into())).unwrap();
+        let cfg: Config =
+            serde_yaml_ng::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.max_tokens, Some(99));
+        assert_eq!(cfg.model.as_deref(), Some("m"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_edits_create_a_missing_file() {
+        let dir = temp_dir("missing");
+        let path = dir.join("nested").join("config.toml");
+        edit_config_file(&path, |cfg| {
+            cfg.api_keys = Some(keys(&[("anthropic", "k")]));
+        })
+        .unwrap();
+        let cfg: Config = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            cfg.api_keys.unwrap().get("anthropic").map(String::as_str),
+            Some("k")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_edits_keep_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("perms");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        edit_config_file(&path, |cfg| cfg.model = Some("m".into())).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
