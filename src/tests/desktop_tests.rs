@@ -715,7 +715,10 @@ mod settings {
 
     use crate::auth::ProviderKind;
     use crate::config::Config;
-    use crate::extras::desktop::settings::{KeySource, edit_config_file, key_source, providers};
+    use crate::extras::desktop::settings::{
+        KeySource, edit_config_file, key_source, models, providers,
+    };
+    use crate::provider::is_agent_model;
 
     fn keys(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs
@@ -777,6 +780,71 @@ mod settings {
         assert_eq!(page.default_provider, "gemini");
         assert_eq!(page.default_model, "gemini-pro");
         assert!(page.choices.iter().any(|c| c == "anthropic"));
+    }
+
+    #[test]
+    fn providers_page_lists_custom_providers_and_quick_models() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [custom_providers.work]
+            provider_type = "openai"
+            base_url = "https://llm.example.com/v1"
+
+            [custom_providers.opencode-go]
+            provider_type = "openai"
+            base_url = "https://gateway.example.com/v1"
+
+            [quick_models.zeta]
+            provider = "openai"
+            model = "gpt-5"
+
+            [quick_models.alpha]
+            provider = "work"
+            model = "local-7b"
+            "#,
+        )
+        .unwrap();
+        let page = providers(&cfg, |_| None);
+        let builtins = page.rows.len();
+        // Built-ins first, then custom providers; a shadowed built-in once.
+        assert_eq!(page.choices.len(), builtins + 1);
+        assert_eq!(page.choices.last().map(|c| c.as_str()), Some("work"));
+        let shadowed = page.choices.iter().filter(|c| *c == "opencode-go").count();
+        assert_eq!(shadowed, 1);
+        assert!(page.is_custom("work"));
+        assert!(page.is_custom("opencode-go"));
+        assert!(!page.is_custom("openai"));
+        let quick: Vec<_> = page
+            .quick
+            .iter()
+            .map(|q| (q.name.as_str(), q.provider.as_str(), q.model.as_str()))
+            .collect();
+        assert_eq!(
+            quick,
+            [("alpha", "work", "local-7b"), ("zeta", "openai", "gpt-5")]
+        );
+    }
+
+    #[test]
+    fn model_lists_keep_catalog_agent_models() {
+        let catalog = crate::models_catalog::catalog_entries("openai").unwrap();
+        let ids = models("openai", false);
+        assert!(!ids.is_empty());
+        assert_eq!(
+            ids.len(),
+            catalog.iter().filter(|entry| is_agent_model(entry)).count()
+        );
+        for id in &ids {
+            let entry = catalog.iter().find(|entry| entry.id == *id).unwrap();
+            assert!(is_agent_model(entry), "{id} is not an agent model");
+        }
+    }
+
+    #[test]
+    fn custom_and_unlisted_providers_have_no_model_list() {
+        assert!(models("openai", true).is_empty());
+        assert!(models("ollama", false).is_empty());
+        assert!(models("work", false).is_empty());
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -852,7 +920,7 @@ mod app {
     use iced::widget::text_editor::{Action, Edit};
     use tokio::sync::mpsc;
 
-    use crate::extras::desktop::app::{App, Message, Shortcut};
+    use crate::extras::desktop::app::{App, Menu, Message, Shortcut};
     use crate::extras::desktop::controller::{Ask, Command, Link, SessionInfo, Update};
     use crate::permission::ask::UserDecision;
 
@@ -979,6 +1047,27 @@ mod app {
             sent(&mut rx).as_slice(),
             [Command::Send(text)] if text == "/clear"
         ));
+    }
+
+    #[test]
+    fn picking_a_provider_runs_the_provider_command() {
+        let (mut app, mut rx) = app();
+        let _ = app.update(Message::Menu(Menu::Provider));
+        assert_eq!(app.menu, Some(Menu::Provider));
+        let _ = app.update(Message::RunCommand("/provider openai".into()));
+        assert_eq!(app.menu, None);
+        assert!(matches!(
+            sent(&mut rx).as_slice(),
+            [Command::Send(text)] if text == "/provider openai"
+        ));
+    }
+
+    #[test]
+    fn opening_a_menu_twice_closes_it() {
+        let (mut app, _rx) = app();
+        let _ = app.update(Message::Menu(Menu::Model));
+        let _ = app.update(Message::Menu(Menu::Model));
+        assert_eq!(app.menu, None);
     }
 
     #[test]

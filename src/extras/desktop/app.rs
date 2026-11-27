@@ -46,6 +46,9 @@ pub(crate) enum Page {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Menu {
     Mode,
+    /// The providers `/provider` switches to.
+    Provider,
+    /// The quick models and the provider's models `/models` switches to.
     Model,
     /// The session header's "…" menu.
     Header,
@@ -170,6 +173,8 @@ pub(crate) enum Message {
     Menu(Menu),
     SetMode(SecurityMode),
     SetModel(CompactString),
+    /// A slash command picked from a menu, run as if typed.
+    RunCommand(String),
     Attach,
     Attached(Option<PathBuf>),
     Unqueue(usize),
@@ -380,6 +385,11 @@ impl App {
                 self.send(Command::SetModel(model));
                 return self.focus_composer();
             }
+            Message::RunCommand(command) => {
+                self.menu = None;
+                self.send(Command::Send(command));
+                return self.focus_composer();
+            }
             Message::Attach => {
                 let start = self.folder.clone();
                 return Task::perform(
@@ -474,7 +484,11 @@ impl App {
             Message::DefaultProvider(provider) => {
                 self.form.select = None;
                 let current = self.providers.as_ref().map(|p| p.default_model.clone());
-                let model = settings::models(&provider)
+                let custom = self
+                    .providers
+                    .as_ref()
+                    .is_some_and(|p| p.is_custom(&provider));
+                let model = settings::models(&provider, custom)
                     .first()
                     .map(|m| CompactString::new(m))
                     .or(current)

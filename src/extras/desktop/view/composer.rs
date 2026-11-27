@@ -1,11 +1,14 @@
 //! The composer pill and the menus that open from it: slash commands,
-//! permission mode and model.
+//! permission mode, provider and model. The provider and model menus offer
+//! what the TUI's `/provider` and `/models` pickers do.
 
 use iced::keyboard::Key;
 use iced::keyboard::key::Named;
 use iced::widget::text::LineHeight;
 use iced::widget::text_editor::{Binding, KeyPress, Status};
-use iced::widget::{Column, button, column, container, row, rule, scrollable, space, text_editor};
+use iced::widget::{
+    Column, Text, button, column, container, row, rule, scrollable, space, text_editor,
+};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::extras::desktop::app::{App, COMPOSER, MODES, Menu, Message, mode_about, mode_label};
@@ -72,11 +75,18 @@ pub(super) fn view(app: &App, home: bool) -> Element<'_, Message> {
             Some(Message::Menu(Menu::Mode)),
         ));
     }
-    let toolbar = toolbar.push(space::horizontal()).push(dropdown(
-        None,
-        app.info.model.as_str(),
-        Some(Message::Menu(Menu::Model)),
-    ));
+    let toolbar = toolbar
+        .push(space::horizontal())
+        .push(dropdown(
+            None,
+            app.info.provider.as_str(),
+            Some(Message::Menu(Menu::Provider)),
+        ))
+        .push(dropdown(
+            None,
+            app.info.model.as_str(),
+            Some(Message::Menu(Menu::Model)),
+        ));
     let toolbar = toolbar.push(action);
 
     let (top, left, gap) = if home { (16, 18, 14) } else { (14, 16, 8) };
@@ -132,6 +142,7 @@ pub(super) fn menu(app: &App) -> Option<Element<'_, Message>> {
     }
     match app.menu? {
         Menu::Mode => Some(mode_menu(app.mode)),
+        Menu::Provider => Some(provider_menu(app)),
         Menu::Model => Some(model_menu(app)),
         Menu::Header => None,
     }
@@ -193,7 +204,7 @@ fn mode_menu<'a>(current: Option<SecurityMode>) -> Element<'a, Message> {
     let rows = MODES.iter().map(|&mode| {
         option(
             mode_label(mode),
-            Some(mode_about(mode)),
+            Some(hint(mode_about(mode))),
             current == Some(mode),
             Message::SetMode(mode),
         )
@@ -201,14 +212,52 @@ fn mode_menu<'a>(current: Option<SecurityMode>) -> Element<'a, Message> {
     panel(column![heading("Permission mode")].extend(rows).spacing(1))
 }
 
+/// `/provider`'s choices: built-ins, then custom providers. Picking one
+/// runs `/provider <name>`, which also moves to its default model.
+fn provider_menu(app: &App) -> Element<'_, Message> {
+    let current = app.info.provider.as_str();
+    let rows = app
+        .providers
+        .iter()
+        .flat_map(|providers| providers.choices.iter())
+        .map(|name| {
+            option(
+                name.as_str(),
+                None,
+                name == current,
+                Message::RunCommand(format!("/provider {name}")),
+            )
+        });
+    panel(column![heading("Provider")].extend(rows).spacing(1))
+}
+
+/// `/models`'s two groups: the quick models, which switch provider and
+/// model together (`/models <name>`), then the current provider's models.
 fn model_menu(app: &App) -> Element<'_, Message> {
-    let models = settings::models(&app.info.provider);
+    let provider = app.info.provider.as_str();
     let mut list = column![].spacing(1);
+    let quick = app.providers.iter().flat_map(|p| p.quick.iter());
+    for (at, q) in quick.enumerate() {
+        if at == 0 {
+            list = list.push(heading("Quick models"));
+        }
+        list = list.push(option(
+            q.name.as_str(),
+            Some(hint(format!("{} / {}", q.provider, q.model))),
+            q.provider == provider && q.model == app.info.model,
+            Message::RunCommand(format!("/models {}", q.name)),
+        ));
+    }
+    list = list.push(heading(provider));
+    let custom = app
+        .providers
+        .as_ref()
+        .is_some_and(|p| p.is_custom(provider));
+    let models = settings::models(provider, custom);
     if models.is_empty() {
         list = list.push(
             container(hint(format!(
-                "No catalog for {}. Type /model <name> to switch.",
-                app.info.provider
+                "No model list for {provider}. Type /models <id> to switch."
             )))
             .padding([6, 10]),
         );
@@ -221,13 +270,9 @@ fn model_menu(app: &App) -> Element<'_, Message> {
             Message::SetModel(model.into()),
         ));
     }
-    panel(
-        column![
-            heading("Model"),
-            container(scrollable(list).style(style::scroller)).max_height(300.0),
-        ]
-        .spacing(1),
-    )
+    panel(column![
+        container(scrollable(list).style(style::scroller)).max_height(340.0)
+    ])
 }
 
 fn heading<'a>(title: &'a str) -> Element<'a, Message> {
@@ -241,13 +286,13 @@ fn heading<'a>(title: &'a str) -> Element<'a, Message> {
 /// A menu choice with a check on the current one.
 fn option<'a>(
     title: &'a str,
-    about: Option<&'a str>,
+    about: Option<Text<'a>>,
     current: bool,
     on_press: Message,
 ) -> Element<'a, Message> {
     let mut text_column = column![label(title, text::UI, color::INK)];
     if let Some(about) = about {
-        text_column = text_column.push(hint(about));
+        text_column = text_column.push(about);
     }
     let mut content = row![text_column.width(Length::Fill)]
         .spacing(12)

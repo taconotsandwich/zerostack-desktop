@@ -1,5 +1,5 @@
-//! What the Providers settings page shows, and the config file edits it
-//! saves.
+//! What the Providers settings page and the composer's provider and model
+//! menus show, and the config file edits the page saves.
 //!
 //! Key status follows `AuthResolver`'s order (environment, then
 //! `api_keys` in the config file, then the keyless fallbacks), so the page
@@ -18,6 +18,7 @@ use compact_str::CompactString;
 use crate::auth::ProviderKind;
 use crate::cli::Cli;
 use crate::config::Config;
+use crate::provider::{ModelEntry, is_agent_model};
 
 /// The built-in providers, in the order the page lists them.
 pub(crate) const PROVIDERS: [ProviderKind; 7] = [
@@ -91,17 +92,36 @@ pub(crate) struct ProviderRow {
     pub source: KeySource,
 }
 
-/// Everything the Providers page shows.
+/// A `quick_models` entry, which `/models <name>` switches to.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct QuickModel {
+    pub name: CompactString,
+    pub provider: CompactString,
+    pub model: CompactString,
+}
+
+/// Everything the Providers page and the provider and model menus show.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Providers {
     pub rows: Vec<ProviderRow>,
     /// What a new session starts on (`Cli::resolve_provider` with no flags).
     pub default_provider: CompactString,
     pub default_model: CompactString,
-    /// The default-provider choices: built-ins, then custom providers.
+    /// Every provider `/provider` takes: built-ins, then custom providers.
     pub choices: Vec<CompactString>,
+    /// The custom providers among `choices`. A custom provider shadows a
+    /// built-in of the same name.
+    pub custom: Vec<CompactString>,
+    /// The quick models, by name, as `/models` lists them.
+    pub quick: Vec<QuickModel>,
     /// The config file saves go to.
     pub config_path: String,
+}
+
+impl Providers {
+    pub(crate) fn is_custom(&self, provider: &str) -> bool {
+        self.custom.iter().any(|name| name == provider)
+    }
 }
 
 pub(crate) fn providers(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> Providers {
@@ -119,27 +139,57 @@ pub(crate) fn providers(cfg: &Config, env: impl Fn(&str) -> Option<String>) -> P
         .map(CompactString::from)
         .collect();
     custom.sort();
-    let choices = PROVIDERS
+    let mut choices: Vec<CompactString> = PROVIDERS
         .iter()
         .map(|kind| CompactString::new(kind.slug()))
-        .chain(custom)
         .collect();
+    for name in &custom {
+        // `/provider <name>` picks the custom provider either way, so a
+        // shadowed built-in is listed once.
+        if !choices.contains(name) {
+            choices.push(name.clone());
+        }
+    }
+    let mut quick: Vec<QuickModel> = crate::config::quick_models_map_ref(cfg)
+        .iter()
+        .map(|(name, q)| QuickModel {
+            name: CompactString::new(name),
+            provider: q.provider.clone(),
+            model: q.model.clone(),
+        })
+        .collect();
+    quick.sort_by(|a, b| a.name.cmp(&b.name));
     let defaults = Cli::default();
     Providers {
         rows,
         default_provider: defaults.resolve_provider(cfg),
         default_model: defaults.resolve_model(cfg),
         choices,
+        custom,
+        quick,
         config_path: crate::config::config_file_path().display().to_string(),
     }
 }
 
-/// The catalog model ids for `provider`, empty for providers the catalog
-/// does not bake (custom gateways, Ollama).
-pub(crate) fn models(provider: &str) -> Vec<&'static str> {
-    crate::models_catalog::catalog_entries(provider)
-        .map(|entries| entries.iter().map(|e| e.id.as_str()).collect())
-        .unwrap_or_default()
+/// The model ids the TUI's `/models` picker offers for `provider` without a
+/// network call: the baked catalog, agent models only. Custom gateways and
+/// providers the catalog does not bake (Ollama) list theirs over the network
+/// in the TUI, so they get none here.
+pub(crate) fn models(provider: &str, custom: bool) -> Vec<&'static str> {
+    let Some(entries) = crate::models_catalog::catalog_entries(provider).filter(|_| !custom) else {
+        return Vec::new();
+    };
+    let mut kept: Vec<ModelEntry> = entries
+        .iter()
+        .filter(|entry| is_agent_model(entry))
+        .cloned()
+        .collect();
+    crate::provider::filter_minimax_choices(provider, None, &mut kept);
+    entries
+        .iter()
+        .filter(|entry| kept.iter().any(|k| k.id == entry.id))
+        .map(|entry| entry.id.as_str())
+        .collect()
 }
 
 /// Save `key` as `api_keys.<slug>` in the config file.

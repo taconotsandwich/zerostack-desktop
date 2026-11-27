@@ -158,11 +158,14 @@ fn defaults<'a>(app: &'a App, providers: &'a Providers) -> Element<'a, Message> 
             )
         })),
         Select::Model => {
-            let models = settings::models(&providers.default_provider);
+            let models = settings::models(
+                &providers.default_provider,
+                providers.is_custom(&providers.default_provider),
+            );
             if models.is_empty() {
                 container(label(
                     format!(
-                        "No catalog for {}. Type /model <name> in a session.",
+                        "No model list for {}. Type /models <id> in a session.",
                         providers.default_provider
                     ),
                     text::SMALL,

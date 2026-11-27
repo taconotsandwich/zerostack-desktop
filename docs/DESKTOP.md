@@ -41,6 +41,13 @@ the others.
   its output or the thinking text. The header shows the title, folder, branch,
   how much of the context window is in use, and the session's cost. The `…`
   menu renames the session or compacts its context.
+- **Composer**: the toolbar's mode, provider and model menus. The provider
+  menu runs `/provider <name>` for the built-in and custom providers. The
+  model menu lists your `quick_models` (running `/models <name>`, which also
+  switches the provider) and then the current provider's models from the
+  bundled catalog, agent models only, as the TUI's `/models` picker does.
+  Custom providers and Ollama list their models over the network in the TUI,
+  so the window shows none for them: type `/models <id>` instead.
 - **Permission card**: replaces the composer when a tool call needs an answer.
   *Allow once*, *Always allow* (saves the suggested pattern for this session,
   as the TUI does) or *Reject*. Typing a note rejects the call and sends the
