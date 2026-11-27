@@ -1173,6 +1173,32 @@ mod app {
     }
 
     #[test]
+    fn prompts_and_replies_are_parsed_as_markdown() {
+        use iced::widget::markdown::Item;
+
+        let (mut app, _rx) = app();
+        let prompt = "<!-- reply -->\n> All green.\n\nwhy?";
+        let _ = app.update(Message::Controller(Update::Started(prompt.into())));
+        let _ = app.update(Message::Controller(Update::Event(
+            crate::event::AgentEvent::ToolCall {
+                call_id: "c1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({ "command": "ls" }),
+            },
+        )));
+        let _ = app.update(Message::Controller(Update::Event(
+            crate::event::AgentEvent::Token("**Done**".into()),
+        )));
+
+        assert_eq!(app.markdown.len(), app.transcript.rows.len());
+        let kinds: Vec<bool> = app.markdown.iter().map(Option::is_some).collect();
+        assert_eq!(kinds, [true, false, true]);
+        // The marker is hidden and the quoted lines read as a quote.
+        let items = app.markdown[0].as_ref().unwrap().content.items();
+        assert!(matches!(items, [Item::Quote(_), Item::Paragraph(_)]));
+    }
+
+    #[test]
     fn a_picked_selection_is_quoted_into_the_composer() {
         let (mut app, _rx) = app();
         type_into_composer(&mut app, "why?");
@@ -1280,9 +1306,40 @@ mod layout {
     use std::time::{Duration, Instant};
 
     use crate::extras::desktop::app::{
-        PromptPart, activity_summary, copy_text, prompt_parts, quoted,
+        PromptPart, activity_summary, copy_text, hard_breaks, prompt_parts, prompt_summary, quoted,
     };
     use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
+
+    #[test]
+    fn a_prompt_keeps_its_line_breaks() {
+        assert_eq!(hard_breaks("one\ntwo\n\nthree"), "one  \ntwo\n\nthree\n");
+        // Quoted lines stay one per line.
+        assert_eq!(
+            hard_breaks("<!-- reply -->\n> a\n> b"),
+            "<!-- reply -->  \n> a  \n> b\n"
+        );
+    }
+
+    #[test]
+    fn a_queued_prompt_shows_its_text_before_its_quotes() {
+        assert_eq!(prompt_summary("fix it\nplease"), "fix it");
+        assert_eq!(
+            prompt_summary("<!-- reply -->\n> All green.\n\nwhy?"),
+            "why?"
+        );
+        assert_eq!(
+            prompt_summary("<!-- reply -->\n> All green.\n"),
+            "All green."
+        );
+    }
+
+    #[test]
+    fn fenced_code_keeps_its_lines_as_they_are() {
+        assert_eq!(
+            hard_breaks("run\n```\nls\npwd\n```\ndone"),
+            "run  \n```\nls\npwd\n```\ndone\n"
+        );
+    }
 
     fn tool(name: &str) -> Row {
         Row::Tool(Tool {

@@ -12,8 +12,8 @@ use iced::{Alignment, Element, Length, Padding, Theme, border};
 
 use super::{composer, main_bar, permission};
 use crate::extras::desktop::app::{
-    App, Menu, Message, Parsed, PromptPart, TRANSCRIPT, activity_summary, clip, folder_name,
-    prompt_parts, tool_detail, tool_verb, tool_verb_running,
+    App, Menu, Message, Parsed, TRANSCRIPT, activity_summary, clip, folder_name, prompt_summary,
+    tool_detail, tool_verb, tool_verb_running,
 };
 use crate::extras::desktop::icon::{self, Icon};
 use crate::extras::desktop::select::selectable;
@@ -21,7 +21,7 @@ use crate::extras::desktop::style;
 use crate::extras::desktop::theme::{self, color, metric, text};
 use crate::extras::desktop::transcript::{Block, Row, Tool, ToolState, blocks};
 use crate::extras::desktop::widgets::{
-    Lead, activity, activity_text, code, context_ring, icon_button, label, mono, prose, single_line,
+    Lead, activity, activity_text, code, context_ring, icon_button, label, mono, single_line,
 };
 
 /// Tool output and notices show at most this much until opened elsewhere.
@@ -221,28 +221,28 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
             pickable(
                 app,
                 at,
-                container(prompt_view(prompt))
+                container(row_markdown(app, at, prompt))
                     .padding([10, 16])
                     .max_width(BUBBLE_WIDTH)
-                    .style(style::bubble),
+                    .style(|theme| container::Style {
+                        text_color: Some(color::INK),
+                        ..style::bubble(theme)
+                    }),
             ),
             Alignment::End,
         ))
         .padding(Padding::ZERO.top(if at > 0 { TURN_GAP } else { 0.0 }))
         .into(),
-        Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
-            Some(parsed) => pickable(
-                app,
-                at,
-                container(markdown_view(parsed))
-                    .width(Length::Fill)
-                    .style(|_| container::Style {
-                        text_color: Some(color::BODY),
-                        ..container::Style::default()
-                    }),
-            ),
-            None => label(reply.as_str(), text::BODY, color::BODY).into(),
-        },
+        Row::Reply(reply) => pickable(
+            app,
+            at,
+            container(row_markdown(app, at, reply))
+                .width(Length::Fill)
+                .style(|_| container::Style {
+                    text_color: Some(color::BODY),
+                    ..container::Style::default()
+                }),
+        ),
         Row::Thought(thought) => {
             let (lead, title) = match thought.elapsed {
                 Some(took) => (
@@ -318,28 +318,22 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
     }
 }
 
-/// A prompt's text, with its reply blocks drawn as quotes: a bar and muted
-/// text, the `<!-- reply -->` marker hidden.
-fn prompt_view(prompt: &str) -> Element<'_, Message> {
-    let parts = prompt_parts(prompt).into_iter().map(|part| match part {
-        PromptPart::Text(body) => prose(body, text::BODY, color::INK).into(),
-        PromptPart::Quote(quote) => row![
-            rule::vertical(2).style(style::quote_bar),
-            prose(quote, text::SMALL, color::MUTED),
-        ]
-        .spacing(10)
-        .into(),
-    });
-    Column::with_children(parts).spacing(8).into()
+/// Row `at`'s markdown, or its raw text until it is parsed. Text takes
+/// its color from the container around it.
+fn row_markdown<'a>(app: &'a App, at: usize, raw: &'a str) -> Element<'a, Message> {
+    match app.markdown.get(at).and_then(Option::as_ref) {
+        Some(parsed) => markdown_view(parsed),
+        None => iced::widget::text(raw)
+            .size(text::BODY.0)
+            .line_height(LineHeight::Absolute(text::BODY.1.into()))
+            .into(),
+    }
 }
 
 /// zerostack's answer: the reply that ends a turn, in a bubble on the left,
 /// facing the prompt's on the right.
 fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Message> {
-    let body: Element<'a, Message> = match app.replies.get(at).and_then(Option::as_ref) {
-        Some(parsed) => markdown_view(parsed),
-        None => label(reply, text::BODY, color::INK).into(),
-    };
+    let body = row_markdown(app, at, reply);
     side(
         app,
         at,
@@ -507,7 +501,7 @@ fn bottom(app: &App) -> Element<'_, Message> {
 }
 
 fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
-    let first = prompt.lines().next().unwrap_or_default();
+    let first = prompt_summary(prompt);
     container(
         row![
             icon::icon(Icon::Clock, 16.0, color::MUTED),

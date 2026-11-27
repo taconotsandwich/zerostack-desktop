@@ -73,6 +73,13 @@ pub(crate) struct Parsed {
     pub content: markdown::Content,
 }
 
+impl Parsed {
+    fn new(source: String) -> Self {
+        let content = markdown::Content::parse(&source);
+        Self { source, content }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct SettingsForm {
     /// The provider slug whose key field is open.
@@ -102,8 +109,8 @@ pub(crate) struct App {
     pub ask: Option<AskCard>,
     // ── transcript ──
     pub transcript: Transcript,
-    /// Parsed replies, by row; `None` for other rows.
-    pub replies: Vec<Option<Parsed>>,
+    /// Parsed prompts and replies, by row; `None` for other rows.
+    pub markdown: Vec<Option<Parsed>>,
     /// Rows whose details are open.
     pub expanded: HashSet<usize>,
     /// Activity groups that are open, by their first row.
@@ -235,7 +242,7 @@ impl App {
             queue: Vec::new(),
             ask: None,
             transcript: Transcript::default(),
-            replies: Vec::new(),
+            markdown: Vec::new(),
             expanded: HashSet::new(),
             open_groups: HashSet::new(),
             copied: None,
@@ -571,7 +578,7 @@ impl App {
             Update::Loaded(snapshot) => {
                 self.info = snapshot.info;
                 self.transcript = snapshot.transcript;
-                self.replies.clear();
+                self.markdown.clear();
                 self.expanded.clear();
                 self.open_groups.clear();
                 self.copied = None;
@@ -619,7 +626,7 @@ impl App {
                 self.form.error = None;
             }
         }
-        self.sync_replies();
+        self.sync_markdown();
         task
     }
 
@@ -736,30 +743,31 @@ impl App {
         operation::focus(COMPOSER)
     }
 
-    /// Keep the parsed replies in step with the rows: rows only change at
-    /// the tail, and a streaming reply only grows, so most updates parse
-    /// just the new text.
-    fn sync_replies(&mut self) {
+    /// Keep the parsed prompts and replies in step with the rows: rows only
+    /// change at the tail, and a streaming reply only grows, so most updates
+    /// parse just the new text. Each entry's `source` is exactly the text
+    /// its content was parsed from.
+    fn sync_markdown(&mut self) {
         let rows = &self.transcript.rows;
-        self.replies.truncate(rows.len());
-        self.replies.resize_with(rows.len(), || None);
-        for (row, parsed) in rows.iter().zip(self.replies.iter_mut()) {
-            let Row::Reply(text) = row else {
-                *parsed = None;
-                continue;
-            };
-            match parsed {
-                Some(p) if p.source == *text => {}
-                Some(p) if text.starts_with(p.source.as_str()) => {
-                    p.content.push_str(&text[p.source.len()..]);
-                    p.source.clone_from(text);
+        self.markdown.truncate(rows.len());
+        self.markdown.resize_with(rows.len(), || None);
+        for (row, parsed) in rows.iter().zip(self.markdown.iter_mut()) {
+            match row {
+                Row::Reply(text) => match parsed {
+                    Some(p) if p.source == *text => {}
+                    Some(p) if text.starts_with(p.source.as_str()) => {
+                        p.content.push_str(&text[p.source.len()..]);
+                        p.source.clone_from(text);
+                    }
+                    _ => *parsed = Some(Parsed::new(text.clone())),
+                },
+                Row::User(prompt) => {
+                    let text = hard_breaks(prompt);
+                    if parsed.as_ref().is_none_or(|p| p.source != text) {
+                        *parsed = Some(Parsed::new(text));
+                    }
                 }
-                _ => {
-                    *parsed = Some(Parsed {
-                        source: text.clone(),
-                        content: markdown::Content::parse(text),
-                    });
-                }
+                _ => *parsed = None,
             }
         }
     }
@@ -902,6 +910,53 @@ pub(crate) fn copy_text(row: &Row) -> Option<&str> {
 /// The line Claude desktop starts a quoted selection with; the quote's
 /// `>` lines follow it.
 const REPLY_MARKER: &str = "<!-- reply -->";
+
+/// The line a queued prompt shows: its first line of text, else the first
+/// line it quotes. Never the `<!-- reply -->` marker.
+pub(crate) fn prompt_summary(prompt: &str) -> String {
+    let parts = prompt_parts(prompt);
+    let text = parts.iter().find_map(|part| match part {
+        PromptPart::Text(text) => Some(text),
+        PromptPart::Quote(_) => None,
+    });
+    let quote = || {
+        parts.iter().find_map(|part| match part {
+            PromptPart::Quote(quote) => Some(quote),
+            PromptPart::Text(_) => None,
+        })
+    };
+    text.or_else(quote)
+        .and_then(|body| body.lines().find(|line| !line.trim().is_empty()))
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+/// `prompt` with its line breaks kept as markdown hard breaks: a typed
+/// prompt means its newlines, which markdown would join into spaces.
+/// Fenced code keeps its lines as they are.
+pub(crate) fn hard_breaks(prompt: &str) -> String {
+    let lines: Vec<&str> = prompt.lines().collect();
+    let mut text = String::with_capacity(prompt.len() + 2 * lines.len());
+    let mut fenced = false;
+    for (at, line) in lines.iter().enumerate() {
+        let fence = {
+            let line = line.trim_start();
+            line.starts_with("```") || line.starts_with("~~~")
+        };
+        fenced ^= fence;
+        text.push_str(line);
+        let runs_on = !line.trim().is_empty()
+            && lines
+                .get(at + 1)
+                .is_some_and(|next| !next.trim().is_empty());
+        if runs_on && !fenced && !fence {
+            text.push_str("  ");
+        }
+        text.push('\n');
+    }
+    text
+}
 
 /// A selection the "Add to reply" pill would quote, and its row.
 #[derive(Debug, Clone, PartialEq, Eq)]
