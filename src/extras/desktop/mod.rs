@@ -12,11 +12,15 @@
 pub(crate) mod app;
 // The views that use most of these land in the commits that follow.
 #[allow(dead_code)]
+pub(crate) mod controller;
+#[allow(dead_code)]
 pub(crate) mod icon;
 #[allow(dead_code)]
 mod style;
 #[allow(dead_code)]
 pub(crate) mod theme;
+#[allow(dead_code)]
+pub(crate) mod transcript;
 #[allow(dead_code)]
 mod widgets;
 
