@@ -224,24 +224,31 @@ pub enum Lead {
     Running(Radians),
 }
 
-/// Transcript activity row ("Thought for 6s", "Edited src/x.rs +2 −1"):
-/// a lead glyph then `parts` in muted small text. Clickable when `on_press`
-/// toggles its details.
+/// Transcript activity row ("Thought for 6s", "Ran 3 commands, read 2
+/// files"): `parts` in muted small text, as in Claude desktop. A spinner
+/// leads while it runs; a chevron follows when `on_press` toggles its
+/// details.
 pub fn activity<'a, M: Clone + 'a>(
     lead: Lead,
     parts: impl IntoIterator<Item = Element<'a, M>>,
     on_press: Option<M>,
 ) -> Element<'a, M> {
-    let glyph: Element<'a, M> = match lead {
-        Lead::Collapsed => icon::icon(Icon::ChevronRight, 14.0, color::MUTED).into(),
-        Lead::Expanded => icon::icon(Icon::ChevronDown, 14.0, color::MUTED).into(),
-        Lead::Running(angle) => icon::spinner(14.0, color::ACCENT, angle).into(),
-    };
-    let content = row![glyph]
-        .extend(parts)
+    let mut content = row![]
         .spacing(6)
         .align_y(Alignment::Center)
         .height(metric::ACTIVITY_HEIGHT);
+    if let Lead::Running(angle) = lead {
+        content = content.push(icon::spinner(14.0, color::ACCENT, angle));
+    }
+    content = content.extend(parts);
+    let chevron = match lead {
+        Lead::Collapsed => Some(Icon::ChevronRight),
+        Lead::Expanded => Some(Icon::ChevronDown),
+        Lead::Running(_) => None,
+    };
+    if let Some(chevron) = chevron.filter(|_| on_press.is_some()) {
+        content = content.push(icon::icon(chevron, 12.0, color::MUTED));
+    }
     match on_press {
         Some(message) => button(content)
             .padding(0)

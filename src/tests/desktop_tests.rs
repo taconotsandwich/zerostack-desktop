@@ -1126,4 +1126,115 @@ mod app {
         let _ = app.update(Message::Escape);
         assert!(matches!(sent(&mut rx).as_slice(), [Command::Stop]));
     }
+
+    #[test]
+    fn activity_groups_open_and_reset_on_load() {
+        use crate::extras::desktop::controller::Snapshot;
+        use crate::extras::desktop::transcript::Transcript;
+
+        let (mut app, _rx) = app();
+        let _ = app.update(Message::ToggleGroup(3));
+        assert!(app.open_groups.contains(&3));
+        let _ = app.update(Message::ToggleGroup(3));
+        assert!(app.open_groups.is_empty());
+        let _ = app.update(Message::ToggleGroup(5));
+        let snapshot = Snapshot {
+            info: app.info.clone(),
+            transcript: Transcript::default(),
+        };
+        let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
+        assert!(app.open_groups.is_empty());
+    }
+}
+
+mod layout {
+    use std::time::{Duration, Instant};
+
+    use crate::extras::desktop::app::activity_summary;
+    use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
+
+    fn tool(name: &str) -> Row {
+        Row::Tool(Tool {
+            call: Call::Unrecorded,
+            name: name.into(),
+            summary: format!("{name} x"),
+            state: ToolState::Done(String::new()),
+        })
+    }
+
+    fn thought(secs: u64) -> Row {
+        Row::Thought(Thought {
+            text: "hm".into(),
+            started: Instant::now(),
+            elapsed: Some(Duration::from_secs(secs)),
+        })
+    }
+
+    #[test]
+    fn activity_rows_group_until_text() {
+        let rows = vec![
+            Row::User("go".into()),
+            thought(2),
+            tool("bash"),
+            Row::Subagent("read a".into()),
+            Row::Reply("checking".into()),
+            tool("read"),
+            Row::Notice("note".into()),
+            tool("edit"),
+            tool("edit"),
+        ];
+        assert_eq!(
+            blocks(&rows),
+            vec![
+                Block::Row(0),
+                Block::Activity(1..4),
+                Block::Row(4),
+                Block::Activity(5..6),
+                Block::Row(6),
+                Block::Activity(7..9),
+            ]
+        );
+        assert!(blocks(&[]).is_empty());
+    }
+
+    #[test]
+    fn activity_summary_counts_tools_in_first_use_order() {
+        let rows = [
+            tool("bash"),
+            tool("read"),
+            tool("bash"),
+            tool("grep"),
+            tool("find_files"),
+            tool("edit"),
+            tool("bash"),
+        ];
+        assert_eq!(
+            activity_summary(&rows),
+            "Ran 3 commands, read 1 file, searched for 2 patterns, edited 1 file"
+        );
+        assert_eq!(
+            activity_summary(&[tool("mcp_lookup"), tool("mcp_lookup"), tool("todo_write")]),
+            "Used mcp_lookup 2 times, updated todos"
+        );
+        assert_eq!(
+            activity_summary(&[tool("list_dir"), tool(""), tool("")]),
+            "Listed 1 folder, used 2 tools"
+        );
+    }
+
+    #[test]
+    fn activity_summary_without_tools_sums_thinking() {
+        assert_eq!(
+            activity_summary(&[thought(2), thought(3)]),
+            "Thought for 5s"
+        );
+        assert_eq!(activity_summary(&[thought(0)]), "Thought for 1s");
+        let subagent = || Row::Subagent("read a".into());
+        // Subagent calls show when the group opens; the task names them.
+        assert_eq!(
+            activity_summary(&[tool("task"), subagent(), subagent()]),
+            "Delegated 1 task"
+        );
+        assert_eq!(activity_summary(&[subagent(), subagent()]), "Used 2 tools");
+    }
 }

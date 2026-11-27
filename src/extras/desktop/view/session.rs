@@ -1,6 +1,8 @@
 //! The open session: header, transcript, queued prompts and the composer
 //! (or the permission card while a tool waits).
 
+use std::ops::Range;
+
 use iced::widget::text::Wrapping;
 use iced::widget::{
     Column, button, column, container, markdown, row, rule, scrollable, space, stack,
@@ -9,12 +11,13 @@ use iced::{Alignment, Element, Length, Padding, border};
 
 use super::{composer, main_bar, permission};
 use crate::extras::desktop::app::{
-    App, Menu, Message, TRANSCRIPT, clip, folder_name, tool_detail, tool_verb, tool_verb_running,
+    App, Menu, Message, TRANSCRIPT, activity_summary, clip, folder_name, tool_detail, tool_verb,
+    tool_verb_running,
 };
 use crate::extras::desktop::icon::{self, Icon};
 use crate::extras::desktop::style;
 use crate::extras::desktop::theme::{self, color, metric, text};
-use crate::extras::desktop::transcript::{Row, ToolState};
+use crate::extras::desktop::transcript::{Block, Row, Tool, ToolState, blocks};
 use crate::extras::desktop::widgets::{
     Lead, activity, activity_text, code, context_ring, icon_button, label, mono, single_line,
 };
@@ -143,8 +146,11 @@ fn transcript(app: &App) -> Column<'_, Message> {
         .spacing(14)
         .width(Length::Fill)
         .max_width(metric::COLUMN_WIDTH);
-    for (at, entry) in app.transcript.rows.iter().enumerate() {
-        rows = rows.push(row_view(app, at, entry));
+    for block in blocks(&app.transcript.rows) {
+        rows = rows.push(match block {
+            Block::Row(at) => row_view(app, at, &app.transcript.rows[at]),
+            Block::Activity(range) => group_view(app, range),
+        });
     }
 
     let angle = app.angle();
@@ -238,21 +244,12 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
             }
         }
         Row::Tool(tool) => {
-            let running = tool.state == ToolState::Running;
-            let (lead, verb) = if running {
-                (Lead::Running(app.angle()), tool_verb_running(&tool.name))
+            let lead = if tool.state == ToolState::Running {
+                Lead::Running(app.angle())
             } else {
-                (toggle_lead, tool_verb(&tool.name))
+                toggle_lead
             };
-            let detail = tool_detail(&tool.name, &tool.summary);
-            let detail = detail.lines().next().unwrap_or_default();
-            let mut parts: Vec<Element<'a, Message>> = vec![activity_text(verb).into()];
-            if !detail.is_empty() {
-                parts.push(code(crate::extras::truncate_cjk(detail, DETAIL_CHARS, "…")).into());
-            }
-            if tool.state == ToolState::Interrupted {
-                parts.push(label("interrupted", text::CAPTION, color::FAINT).into());
-            }
+            let parts = tool_parts(tool);
             let output = match &tool.state {
                 ToolState::Done(output) if !output.trim().is_empty() => Some(output),
                 _ => None,
@@ -299,6 +296,66 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         .spacing(6)
         .into(),
     }
+}
+
+/// A tool call's line: its verb, then what it ran on.
+fn tool_parts(tool: &Tool) -> Vec<Element<'_, Message>> {
+    let verb = if tool.state == ToolState::Running {
+        tool_verb_running(&tool.name)
+    } else {
+        tool_verb(&tool.name)
+    };
+    let detail = tool_detail(&tool.name, &tool.summary);
+    let detail = detail.lines().next().unwrap_or_default();
+    let mut parts: Vec<Element<'_, Message>> = vec![activity_text(verb).into()];
+    if !detail.is_empty() {
+        parts.push(code(crate::extras::truncate_cjk(detail, DETAIL_CHARS, "…")).into());
+    }
+    if tool.state == ToolState::Interrupted {
+        parts.push(label("interrupted", text::CAPTION, color::FAINT).into());
+    }
+    parts
+}
+
+/// Back-to-back tool calls and reasoning. One row draws as itself; more
+/// fold under a summary line that opens to the rows. A closed group whose
+/// last row is still going shows that row's line with the spinner.
+fn group_view(app: &App, range: Range<usize>) -> Element<'_, Message> {
+    let first = range.start;
+    let rows = &app.transcript.rows[range];
+    if let [row] = rows {
+        return row_view(app, first, row);
+    }
+    let open = app.open_groups.contains(&first);
+    let toggle = Some(Message::ToggleGroup(first));
+    let live = match rows.last() {
+        Some(Row::Tool(tool)) if tool.state == ToolState::Running => Some(tool_parts(tool)),
+        Some(Row::Thought(thought)) if thought.elapsed.is_none() => {
+            Some(vec![activity_text("Thinking…").into()])
+        }
+        _ => None,
+    };
+    let head = match live {
+        Some(parts) if !open => activity(Lead::Running(app.angle()), parts, toggle),
+        _ => {
+            let lead = if open {
+                Lead::Expanded
+            } else {
+                Lead::Collapsed
+            };
+            activity(lead, [activity_text(activity_summary(rows)).into()], toggle)
+        }
+    };
+    if !open {
+        return head;
+    }
+    let body = rows
+        .iter()
+        .enumerate()
+        .fold(column![].spacing(6), |body, (at, row)| {
+            body.push(row_view(app, first + at, row))
+        });
+    details(head, body.into())
 }
 
 /// An activity row with its details open under it.

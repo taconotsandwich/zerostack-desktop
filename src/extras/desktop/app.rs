@@ -106,6 +106,8 @@ pub(crate) struct App {
     pub replies: Vec<Option<Parsed>>,
     /// Rows whose details are open.
     pub expanded: HashSet<usize>,
+    /// Activity groups that are open, by their first row.
+    pub open_groups: HashSet<usize>,
     // ── inputs ──
     pub composer: text_editor::Content,
     pub composer_focused: bool,
@@ -185,6 +187,7 @@ pub(crate) enum Message {
     Compact,
     // transcript
     Toggle(usize),
+    ToggleGroup(usize),
     // permission card
     Note(Action),
     AskMove(isize),
@@ -222,6 +225,7 @@ impl App {
             transcript: Transcript::default(),
             replies: Vec::new(),
             expanded: HashSet::new(),
+            open_groups: HashSet::new(),
             composer: text_editor::Content::new(),
             composer_focused: true,
             note: text_editor::Content::new(),
@@ -437,6 +441,11 @@ impl App {
                     self.expanded.insert(row);
                 }
             }
+            Message::ToggleGroup(first) => {
+                if !self.open_groups.remove(&first) {
+                    self.open_groups.insert(first);
+                }
+            }
             Message::Note(action) => self.note.perform(action),
             Message::AskMove(step) => {
                 if let Some(card) = &mut self.ask {
@@ -519,6 +528,7 @@ impl App {
                 self.transcript = snapshot.transcript;
                 self.replies.clear();
                 self.expanded.clear();
+                self.open_groups.clear();
                 task = latest();
             }
             Update::Started(prompt) => {
@@ -842,6 +852,69 @@ pub(crate) fn tool_verb(name: &str) -> &str {
         "bash" => "Ran",
         "task" => "Delegated",
         other => other,
+    }
+}
+
+/// The line a folded group of rows shows: "Ran 3 commands, read 2 files",
+/// phrases in the order the tools were first used. A group without tool
+/// calls sums its thinking ("Thought for 9s").
+pub(crate) fn activity_summary(rows: &[Row]) -> String {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for row in rows {
+        let Row::Tool(tool) = row else { continue };
+        // Both take a pattern: one says where, the other what.
+        let key = match tool.name.as_str() {
+            "find_files" => "grep",
+            name => name,
+        };
+        match counts.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((key, 1)),
+        }
+    }
+    let line = if counts.is_empty() {
+        let mut thought = None;
+        for row in rows {
+            if let Row::Thought(t) = row {
+                *thought.get_or_insert(0) += t.elapsed.map_or(0, |took| took.as_secs());
+            }
+        }
+        match thought {
+            Some(secs) => format!("thought for {}s", secs.max(1)),
+            None => tool_phrase("", rows.len()),
+        }
+    } else {
+        let phrases: Vec<String> = counts
+            .iter()
+            .map(|&(name, count)| tool_phrase(name, count))
+            .collect();
+        phrases.join(", ")
+    };
+    let mut chars = line.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// `count` calls of the tool `name`, lowercase ("ran 2 commands").
+fn tool_phrase(name: &str, count: usize) -> String {
+    let counted = |verb: &str, one: &str, many: &str| {
+        format!("{verb} {count} {}", if count == 1 { one } else { many })
+    };
+    match name {
+        "bash" => counted("ran", "command", "commands"),
+        "read" => counted("read", "file", "files"),
+        "write" => counted("wrote", "file", "files"),
+        "edit" => counted("edited", "file", "files"),
+        "list_dir" => counted("listed", "folder", "folders"),
+        "grep" => counted("searched for", "pattern", "patterns"),
+        "task" => counted("delegated", "task", "tasks"),
+        "todo_write" => "updated todos".to_string(),
+        // Calls saved before tool records, and subagent calls: no name.
+        "" => counted("used", "tool", "tools"),
+        other if count == 1 => format!("used {other}"),
+        other => format!("used {other} {count} times"),
     }
 }
 

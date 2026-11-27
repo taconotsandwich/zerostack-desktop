@@ -5,6 +5,7 @@
 //! session (what gets saved); this folds them into what the window shows,
 //! which also keeps live-only detail such as reasoning and its duration.
 
+use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use compact_str::CompactString;
@@ -33,6 +34,42 @@ pub(crate) enum Row {
     Notice(String),
     /// A failed turn or command.
     Error(String),
+}
+
+impl Row {
+    /// Tool calls and reasoning: what folds into an activity group.
+    pub(crate) fn is_activity(&self) -> bool {
+        matches!(self, Row::Tool(_) | Row::Thought(_) | Row::Subagent(_))
+    }
+}
+
+/// How the session view lays the rows out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Block {
+    /// A row on its own: a prompt, text, a summary, a notice, an error.
+    Row(usize),
+    /// Back-to-back tool calls and reasoning, under one summary line.
+    Activity(Range<usize>),
+}
+
+/// `rows` grouped for drawing: each run of activity rows is one block.
+pub(crate) fn blocks(rows: &[Row]) -> Vec<Block> {
+    let mut blocks = Vec::new();
+    let mut at = 0;
+    while at < rows.len() {
+        if rows[at].is_activity() {
+            let end = rows[at..]
+                .iter()
+                .position(|row| !row.is_activity())
+                .map_or(rows.len(), |len| at + len);
+            blocks.push(Block::Activity(at..end));
+            at = end;
+        } else {
+            blocks.push(Block::Row(at));
+            at += 1;
+        }
+    }
+    blocks
 }
 
 #[derive(Debug, Clone, PartialEq)]
