@@ -3,9 +3,10 @@
 
 use std::ops::Range;
 
-use iced::widget::text::Wrapping;
+use iced::alignment::Horizontal;
+use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
-    Column, button, column, container, markdown, row, rule, scrollable, space, stack,
+    Column, button, checkbox, column, container, markdown, row, rule, scrollable, space, stack,
 };
 use iced::{Alignment, Element, Length, Padding, Theme, border};
 
@@ -30,6 +31,8 @@ const OUTPUT_CHARS: usize = 4_000;
 const DETAIL_CHARS: usize = 90;
 /// Widest a prompt or answer bubble gets, so the two sides read apart.
 const BUBBLE_WIDTH: f32 = metric::COLUMN_WIDTH * 0.8;
+/// Extra room above a prompt, on top of the transcript's row spacing.
+const TURN_GAP: f32 = 10.0;
 
 pub(super) fn view(app: &App) -> Element<'_, Message> {
     let transcript = scrollable(
@@ -211,7 +214,8 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         Lead::Collapsed
     };
     match entry {
-        Row::User(prompt) => side(
+        // A prompt starts a turn: more room above it than inside a turn.
+        Row::User(prompt) => container(side(
             app,
             at,
             pickable(
@@ -223,12 +227,14 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
                     .style(style::bubble),
             ),
             Alignment::End,
-        ),
+        ))
+        .padding(Padding::ZERO.top(if at > 0 { TURN_GAP } else { 0.0 }))
+        .into(),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
             Some(parsed) => pickable(
                 app,
                 at,
-                container(reply_markdown(parsed))
+                container(markdown_view(parsed))
                     .width(Length::Fill)
                     .style(|_| container::Style {
                         text_color: Some(color::BODY),
@@ -331,7 +337,7 @@ fn prompt_view(prompt: &str) -> Element<'_, Message> {
 /// facing the prompt's on the right.
 fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Message> {
     let body: Element<'a, Message> = match app.replies.get(at).and_then(Option::as_ref) {
-        Some(parsed) => reply_markdown(parsed),
+        Some(parsed) => markdown_view(parsed),
         None => label(reply, text::BODY, color::INK).into(),
     };
     side(
@@ -518,14 +524,49 @@ fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
     .into()
 }
 
-/// A reply's markdown, its text selectable.
-fn reply_markdown(parsed: &Parsed) -> Element<'_, Message> {
-    markdown::view_with(parsed.content.items(), markdown_settings(), &Prose)
+/// Markdown in the canvas type, its text selectable.
+fn markdown_view(parsed: &Parsed) -> Element<'_, Message> {
+    markdown::view_with(
+        parsed.content.items(),
+        markdown_settings(),
+        &Prose { text: text::BODY },
+    )
 }
 
-/// Draws reply markdown with `iced_selection`'s selectable text in place
-/// of iced's. Quotes and tables keep iced's look and nest these.
-struct Prose;
+/// Draws markdown with `iced_selection`'s selectable text in place of
+/// iced's, every block on the canvas line height so it keeps the rhythm of
+/// the rest of the window. Tables keep iced's look and nest these.
+struct Prose {
+    /// Body font size and line height.
+    text: (f32, f32),
+}
+
+impl Prose {
+    fn line(&self) -> LineHeight {
+        LineHeight::Absolute(self.text.1.into())
+    }
+
+    /// List rows, each marker on its item's first line.
+    fn list<'a>(
+        &self,
+        settings: markdown::Settings,
+        bullets: &'a [markdown::Bullet],
+        marker: impl Fn(usize, &'a markdown::Bullet) -> Element<'a, Message>,
+    ) -> Element<'a, Message> {
+        let nested = markdown::Settings {
+            spacing: settings.spacing * 0.5,
+            ..settings
+        };
+        Column::with_children(bullets.iter().enumerate().map(|(at, bullet)| {
+            let (markdown::Bullet::Point { items } | markdown::Bullet::Task { items, .. }) = bullet;
+            row![marker(at, bullet), markdown::view_with(items, nested, self)]
+                .spacing(8)
+                .into()
+        }))
+        .spacing(settings.spacing * 0.5)
+        .into()
+    }
+}
 
 impl<'a> markdown::Viewer<'a, Message> for Prose {
     fn on_link_click(url: markdown::Uri) -> Message {
@@ -539,7 +580,35 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         text: &'a markdown::Text,
         index: usize,
     ) -> Element<'a, Message> {
-        iced_selection::markdown::heading(settings, level, text, index, Message::Link)
+        let size = match level {
+            markdown::HeadingLevel::H1 => settings.h1_size,
+            markdown::HeadingLevel::H2 => settings.h2_size,
+            markdown::HeadingLevel::H3 => settings.h3_size,
+            markdown::HeadingLevel::H4 => settings.h4_size,
+            markdown::HeadingLevel::H5 => settings.h5_size,
+            markdown::HeadingLevel::H6 => settings.h6_size,
+        };
+        let style = markdown::Style {
+            font: theme::SANS_SEMIBOLD,
+            ..settings.style
+        };
+        let top = if index > 0 {
+            settings.spacing.0 / 2.0
+        } else {
+            0.0
+        };
+        container(
+            iced_selection::rich_text(text.spans(style))
+                .on_link_click(Message::Link)
+                .size(size)
+                .line_height(LineHeight::Relative(1.35)),
+        )
+        .padding(Padding::ZERO.top(top))
+        .style(|_| container::Style {
+            text_color: Some(color::INK),
+            ..container::Style::default()
+        })
+        .into()
     }
 
     fn paragraph(
@@ -547,7 +616,11 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         settings: markdown::Settings,
         text: &markdown::Text,
     ) -> Element<'a, Message> {
-        iced_selection::markdown::paragraph(settings, text, Message::Link)
+        iced_selection::rich_text(text.spans(settings.style))
+            .on_link_click(Message::Link)
+            .size(settings.text_size)
+            .line_height(self.line())
+            .into()
     }
 
     /// iced's code block, with selectable lines. `iced_selection`'s own
@@ -564,6 +637,7 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
                 .on_link_click(Message::Link)
                 .font(settings.style.code_block_font)
                 .size(settings.code_size)
+                .line_height(LineHeight::Absolute(text::CODE.1.into()))
                 .into()
         });
         container(
@@ -585,7 +659,18 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         settings: markdown::Settings,
         bullets: &'a [markdown::Bullet],
     ) -> Element<'a, Message> {
-        iced_selection::markdown::unordered_list(self, settings, bullets)
+        let list = self.list(settings, bullets, |_, bullet| match bullet {
+            markdown::Bullet::Point { .. } => iced::widget::text("•")
+                .size(settings.text_size)
+                .line_height(self.line())
+                .into(),
+            markdown::Bullet::Task { done, .. } => {
+                container(checkbox(*done).size(settings.text_size))
+                    .center_y(self.text.1)
+                    .into()
+            }
+        });
+        container(list).padding(Padding::ZERO.left(4)).into()
     }
 
     fn ordered_list(
@@ -594,7 +679,45 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         start: u64,
         bullets: &'a [markdown::Bullet],
     ) -> Element<'a, Message> {
-        iced_selection::markdown::ordered_list(self, settings, start, bullets)
+        let digits = ((start + bullets.len() as u64).max(1) as f32)
+            .log10()
+            .ceil();
+        let width = settings.text_size * ((digits / 2.0).ceil() + 1.0);
+        self.list(settings, bullets, |at, _| {
+            iced::widget::text!("{}.", start + at as u64)
+                .size(settings.text_size)
+                .line_height(self.line())
+                .align_x(Horizontal::Right)
+                .width(width)
+                .into()
+        })
+    }
+
+    /// A bar and muted, smaller text: the look of a quoted selection.
+    fn quote(
+        &self,
+        settings: markdown::Settings,
+        contents: &'a [markdown::Item],
+    ) -> Element<'a, Message> {
+        let settings = markdown::Settings {
+            text_size: text::SMALL.0.into(),
+            ..settings
+        };
+        row![
+            rule::vertical(2).style(style::quote_bar),
+            container(markdown::view_with(
+                contents,
+                settings,
+                &Prose { text: text::SMALL },
+            ))
+            .style(|_| container::Style {
+                text_color: Some(color::MUTED),
+                ..container::Style::default()
+            }),
+        ]
+        .spacing(10)
+        .height(Length::Shrink)
+        .into()
     }
 }
 
