@@ -10,6 +10,13 @@
 //! during startup keep their reactor.
 
 pub(crate) mod app;
+// The views that use most of these land in the commits that follow.
+#[allow(dead_code)]
+pub(crate) mod icon;
+#[allow(dead_code)]
+mod style;
+#[allow(dead_code)]
+pub(crate) mod theme;
 
 use std::sync::OnceLock;
 
@@ -35,14 +42,19 @@ pub fn run(startup: Startup) -> anyhow::Result<()> {
         .map_err(|_| anyhow!("desktop runtime is already running"))?;
 
     let boot = std::cell::RefCell::new(Some(app::App::new(startup)));
-    let window = iced::application(
+    let mut window = iced::application(
         move || boot.borrow_mut().take().expect("iced boots the app once"),
         app::App::update,
         app::App::view,
     )
     .title(app::App::title)
+    .theme(theme::theme())
+    .default_font(theme::SANS)
     .executor::<SharedRuntime>()
     .window_size(WINDOW_SIZE);
+    for font in theme::FONT_FILES {
+        window = window.font(font);
+    }
     tokio::task::block_in_place(|| window.run()).map_err(|e| anyhow!("desktop window failed: {e}"))
 }
 
