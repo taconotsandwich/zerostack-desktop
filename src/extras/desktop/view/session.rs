@@ -221,8 +221,7 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         .into(),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
             Some(parsed) => container(
-                markdown::view(parsed.content.items(), markdown_settings(color::BG2))
-                    .map(Message::Link),
+                markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link),
             )
             .width(Length::Fill)
             .style(|_| container::Style {
@@ -311,9 +310,8 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
 /// facing the prompt's on the right.
 fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Message> {
     let body: Element<'a, Message> = match app.replies.get(at).and_then(Option::as_ref) {
-        // Inline code darker than the bubble, which is its usual fill.
         Some(parsed) => {
-            markdown::view(parsed.content.items(), markdown_settings(color::BG1)).map(Message::Link)
+            markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link)
         }
         None => label(reply, text::BODY, color::INK).into(),
     };
@@ -443,15 +441,13 @@ fn queued(at: usize, prompt: &str) -> Element<'_, Message> {
 }
 
 /// Replies in the canvas type: Inter body, gold mono inline code.
-/// Reply markdown; `code_fill` is the inline code highlight, which must
-/// stand out from what the text sits on.
-fn markdown_settings(code_fill: iced::Color) -> markdown::Settings {
+fn markdown_settings() -> markdown::Settings {
     let mut settings = markdown::Settings::with_text_size(
         text::BODY.0,
         markdown::Style {
             font: theme::SANS,
             inline_code_highlight: markdown::Highlight {
-                background: code_fill.into(),
+                background: color::CODE_FILL.into(),
                 border: border::rounded(5),
             },
             inline_code_padding: Padding::from([1, 5]),

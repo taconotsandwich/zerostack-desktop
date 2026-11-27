@@ -40,6 +40,9 @@ pub mod color {
 
     /// Inline code and commands.
     pub const GOLD: Color = Color::from_rgb8(0xD8, 0xC6, 0x90);
+    /// Inline code highlight: an ink wash, so it reads a step lighter than
+    /// whatever it sits on, the page or a bubble.
+    pub const CODE_FILL: Color = Color::from_rgba8(0xED, 0xEA, 0xDE, 0.10);
     /// Waiting on the user.
     pub const AMBER: Color = Color::from_rgb8(0xF0, 0xA3, 0x5E);
     /// Errors, rejections and removed lines.
