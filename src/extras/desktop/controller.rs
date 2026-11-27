@@ -9,6 +9,8 @@
 //!   `Engine::run_string` on a copy of the session, which is copied back
 //!   when the command ends.
 //! - Stop mirrors the TUI: abort the runner, kill sandboxed children.
+//! - `/reasoning`, the mode and model menus and the settings page act on
+//!   the actor's own state: the engine's copies would be lost with it.
 //!
 //! The process has one ask channel, so a window runs one turn at a time;
 //! prompts sent meanwhile queue like they do in the TUI.
@@ -25,6 +27,7 @@ use compact_str::CompactString;
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 
+use super::settings::{self, Providers};
 use super::transcript::Transcript;
 use crate::agent::runner::{self, AgentRunner};
 use crate::cli::Cli;
@@ -32,6 +35,7 @@ use crate::config::{self, Config};
 use crate::context::ContextFiles;
 use crate::engine::{Engine, RunKind, RunOutput};
 use crate::event::AgentEvent;
+use crate::permission::SecurityMode;
 use crate::permission::ask::{AskReceiver, AskRequest, AskSender, UserDecision};
 use crate::permission::checker::PermCheck;
 use crate::provider::{AnyAgent, AnyClient};
@@ -61,6 +65,22 @@ pub(crate) enum Command {
     New,
     /// Reload the sidebar's session list.
     Refresh,
+    /// Drop a queued prompt by position.
+    Unqueue(usize),
+    /// Switch the permission mode. Takes effect mid-turn, like `/mode`.
+    SetMode(SecurityMode),
+    /// Switch the open session to a model of its provider.
+    SetModel(CompactString),
+    /// Save an API key as `api_keys.<provider>` in the config file.
+    SaveKey {
+        provider: CompactString,
+        key: String,
+    },
+    /// Save the provider and model new sessions start on.
+    SaveDefaults {
+        provider: CompactString,
+        model: CompactString,
+    },
 }
 
 /// What the controller tells the window.
@@ -70,6 +90,8 @@ pub(crate) enum Update {
     Loaded(Snapshot),
     /// A prompt started a turn; its events follow.
     Started(String),
+    /// A command started (`/compress`, `/init`); `Finished` ends it.
+    Running(String),
     Event(AgentEvent),
     /// Prompts waiting for the running turn, oldest first.
     Queue(Vec<String>),
@@ -83,6 +105,12 @@ pub(crate) enum Update {
     Finished(SessionInfo),
     /// Saved sessions in this folder, newest first.
     Sessions(Vec<SessionEntry>),
+    /// The open session's facts changed outside a turn (model switch).
+    Info(SessionInfo),
+    /// The permission mode; `None` when the permission system is off.
+    Mode(Option<SecurityMode>),
+    /// Key status and defaults for the settings page.
+    Providers(Providers),
 }
 
 #[derive(Debug, Clone)]
@@ -222,7 +250,11 @@ struct Turn {
 }
 
 /// A command running in an `Engine` over a copy of the session.
-type Job = Pin<Box<dyn Future<Output = (Engine, anyhow::Result<RunOutput>)>>>;
+type Job = Pin<Box<dyn Future<Output = JobDone>>>;
+
+/// A finished command: its engine (holding the session copy), its input
+/// and what it printed.
+type JobDone = (Engine, String, anyhow::Result<RunOutput>);
 
 struct PendingAsk {
     tool: CompactString,
@@ -275,6 +307,8 @@ impl Actor {
     ) {
         self.send(Update::Loaded(self.snapshot()));
         self.send_sessions();
+        self.send_mode();
+        self.send_providers();
         if let Some(prompt) = first_prompt {
             self.start_turn(prompt).await;
         }
@@ -297,8 +331,8 @@ impl Actor {
                         None => asks = None,
                     }
                 }
-                (engine, result) = next_job(&mut self.job), if self.job.is_some() => {
-                    self.job_done(engine, result).await;
+                (engine, input, result) = next_job(&mut self.job), if self.job.is_some() => {
+                    self.job_done(engine, &input, result).await;
                 }
             }
         }
@@ -323,6 +357,16 @@ impl Actor {
                 self.switch(fresh);
             }
             Command::Refresh => self.send_sessions(),
+            Command::Unqueue(at) => {
+                if at < self.queued.len() {
+                    self.queued.remove(at);
+                    self.send_queue();
+                }
+            }
+            Command::SetMode(mode) => self.set_mode(mode),
+            Command::SetModel(model) => self.set_model(model).await,
+            Command::SaveKey { provider, key } => self.save_key(&provider, key),
+            Command::SaveDefaults { provider, model } => self.save_defaults(&provider, &model),
         }
     }
 
@@ -358,6 +402,7 @@ impl Actor {
                 self.send(Update::Failed(BUSY.into()));
             }
             SubmitAction::RejectWhileRunning => {}
+            SubmitAction::Run if is_reasoning_toggle(&text) => self.toggle_reasoning(),
             SubmitAction::Run if is_command(&text) => self.run_command(text).await,
             SubmitAction::Run => self.start_turn(text).await,
         }
@@ -621,6 +666,7 @@ impl Actor {
     /// The engine gets this window's agent, so asks during command turns
     /// (`/init`, `/review`) reach the window too.
     async fn run_command(&mut self, input: String) {
+        self.send(Update::Running(input.clone()));
         let agent = self.agent().await;
         let mut engine = Engine::new(
             self.ws.cli.clone(),
@@ -634,11 +680,27 @@ impl Actor {
         .with_agent(agent);
         self.job = Some(Box::pin(async move {
             let result = engine.run_string(&input).await;
-            (engine, result)
+            (engine, input, result)
         }));
     }
 
-    async fn job_done(&mut self, engine: Engine, result: anyhow::Result<RunOutput>) {
+    /// The window's own `/reasoning`: the engine's flag is private and dies
+    /// with the engine, so the actor keeps it.
+    fn toggle_reasoning(&mut self) {
+        self.reasoning_enabled = !self.reasoning_enabled;
+        self.apply_reasoning();
+        self.agent = None;
+        let state = if self.reasoning_enabled { "on" } else { "off" };
+        self.send(Update::Notice(format!("reasoning: {state}")));
+    }
+
+    fn apply_reasoning(&mut self) {
+        self.session.reasoning_enabled = self.reasoning_enabled;
+        self.session.overhead_tokens =
+            crate::agent::builder::estimate_overhead(&self.ws.context, self.reasoning_enabled);
+    }
+
+    async fn job_done(&mut self, engine: Engine, input: &str, result: anyhow::Result<RunOutput>) {
         self.job = None;
         let mut session = engine.session().clone();
         // Asks answered while the command ran were saved on our copy.
@@ -653,25 +715,144 @@ impl Actor {
         }
         self.ws.context = engine.context().clone();
         let provider_changed = session.provider != self.session.provider;
+        // The window keeps its rows (notices, reasoning) unless the command
+        // changed the conversation itself.
+        let reload = session.id != self.session.id
+            || session.messages.len() != self.session.messages.len()
+            || session.messages.last().map(|m| &m.content)
+                != self.session.messages.last().map(|m| &m.content);
         self.session = session;
+        self.apply_reasoning();
         self.session.refresh_git_branch();
         if provider_changed {
             self.recreate_client();
         }
-        // Commands can switch model, provider or reasoning: rebuild lazily.
+        // Commands can switch model or provider: rebuild lazily.
         self.agent = None;
-        self.send(Update::Loaded(self.snapshot()));
+        if reload {
+            self.send(Update::Loaded(self.snapshot()));
+        }
         match result {
-            Ok(out) if out.kind == RunKind::Command && !out.text.trim().is_empty() => {
-                self.send(Update::Notice(out.text));
+            Ok(out) if out.kind == RunKind::Command => {
+                let text = without_echo(input, &out.text);
+                if !text.trim().is_empty() {
+                    self.send(Update::Notice(text.trim_end().to_string()));
+                }
             }
             Ok(_) => {}
             Err(e) => self.send(Update::Failed(e.to_string())),
         }
         save(&self.ws.cli, &self.session);
+        // `/mode` changes the checker the window shares.
+        self.send_mode();
         self.send(Update::Finished(self.info()));
         self.send_sessions();
         self.next_queued().await;
+    }
+
+    // ── menus and settings ────────────────────────────────────────────
+
+    /// The checker is shared with every agent build, so a running turn's
+    /// next tool call already sees the new mode.
+    fn set_mode(&mut self, mode: SecurityMode) {
+        if let Some(permission) = &self.ws.permission {
+            permission
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_mode(mode);
+        }
+        self.send_mode();
+    }
+
+    /// Mirrors the TUI's `apply_model`: context window and prices follow
+    /// the model; the agent rebuilds on the next prompt.
+    async fn set_model(&mut self, model: CompactString) {
+        if self.refuse_while_busy() || model == self.session.model {
+            return;
+        }
+        let provider = self.session.provider.clone();
+        let quick_models = config::quick_models_map(&self.ws.cfg);
+        self.session.model = model.clone();
+        self.session
+            .update_context_window(self.ws.cfg.resolve_context_window(
+                &provider,
+                &model,
+                &quick_models,
+            ));
+        let custom = self.ws.cfg.custom_providers_map();
+        if let Some((input, output)) = Config::catalog_input_output_cost(&provider, &model) {
+            self.session.input_token_cost = input;
+            self.session.output_token_cost = output;
+        } else if (provider == "openrouter" || custom.contains_key(provider.as_str()))
+            && let Ok(prices) = crate::provider::fetch_live_model_info(
+                &provider,
+                self.ws.cli.api_key.as_deref(),
+                &custom,
+                self.ws.cfg.api_keys.as_ref(),
+            )
+            .await
+            && let Some(info) = prices.get(model.as_str())
+        {
+            self.session.input_token_cost = info.input_cost;
+            self.session.output_token_cost = info.output_cost;
+            if self.ws.cfg.context_window.is_none()
+                && Config::catalog_context_window(&provider, &model).is_none()
+                && let Some(window) = info.context_length
+            {
+                self.session.update_context_window(window);
+            }
+        }
+        self.agent = None;
+        save(&self.ws.cli, &self.session);
+        self.send(Update::Info(self.info()));
+    }
+
+    fn save_key(&mut self, provider: &str, key: String) {
+        let key = key.trim().to_string();
+        if key.is_empty() {
+            return;
+        }
+        if let Err(e) = settings::save_api_key(provider, &key) {
+            self.send(Update::Failed(format!("cannot save key: {e}")));
+            return;
+        }
+        self.ws
+            .cfg
+            .api_keys
+            .get_or_insert_with(Default::default)
+            .insert(provider.to_string(), key);
+        // The open session picks the key up on its next prompt.
+        if provider == self.session.provider && !self.busy() {
+            self.recreate_client();
+            self.agent = None;
+        }
+        self.send_providers();
+    }
+
+    fn save_defaults(&mut self, provider: &str, model: &str) {
+        if let Err(e) = settings::save_defaults(provider, model) {
+            self.send(Update::Failed(format!("cannot save defaults: {e}")));
+            return;
+        }
+        self.ws.cfg.provider = Some(CompactString::new(provider));
+        self.ws.cfg.model = Some(CompactString::new(model));
+        self.send_providers();
+    }
+
+    fn send_mode(&self) {
+        let mode = self
+            .ws
+            .permission
+            .as_ref()
+            .map(|p| p.lock().unwrap_or_else(|e| e.into_inner()).mode());
+        self.send(Update::Mode(mode));
+    }
+
+    fn send_providers(&self) {
+        self.send(Update::Providers(settings::providers(
+            &self.ws.cfg,
+            |var| std::env::var(var).ok(),
+        )));
     }
 
     // ── sessions ──────────────────────────────────────────────────────
@@ -797,7 +978,7 @@ async fn next_ask(asks: &mut Option<AskReceiver>) -> Option<AskRequest> {
     }
 }
 
-async fn next_job(job: &mut Option<Job>) -> (Engine, anyhow::Result<RunOutput>) {
+async fn next_job(job: &mut Option<Job>) -> JobDone {
     match job {
         Some(job) => job.await,
         None => std::future::pending().await,
@@ -806,6 +987,28 @@ async fn next_job(job: &mut Option<Job>) -> (Engine, anyhow::Result<RunOutput>) 
 
 fn is_command(text: &str) -> bool {
     text.starts_with(['/', '.', '!'])
+}
+
+fn is_reasoning_toggle(text: &str) -> bool {
+    matches!(text.trim(), "/reasoning" | "/thinking")
+}
+
+/// A command's output without the `> input` lines the engine echoes first
+/// (`Engine::sink_echo_user`); the window already shows what was sent.
+pub(crate) fn without_echo<'a>(input: &str, text: &'a str) -> &'a str {
+    let mut rest = text;
+    for line in input.trim().lines() {
+        let Some(after) = rest
+            .strip_prefix("> ")
+            .and_then(|r| r.strip_prefix(line))
+            .and_then(|r| r.strip_prefix('\n').or(r.is_empty().then_some(r)))
+        else {
+            return text;
+        };
+        rest = after;
+    }
+    // The blank line after the echo.
+    rest.strip_prefix('\n').unwrap_or(rest)
 }
 
 fn save(cli: &Cli, session: &Session) {

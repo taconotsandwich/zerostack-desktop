@@ -248,9 +248,11 @@ mod controller {
     use crate::config::Config;
     use crate::extras::desktop::controller::{
         Command, Controller, Link, Update, Workspace, fresh_session, session_info, session_title,
-        sessions_in,
+        sessions_in, without_echo,
     };
     use crate::extras::desktop::transcript::Row;
+    use crate::permission::SecurityMode;
+    use crate::permission::checker::{PermCheck, PermissionChecker};
     use crate::provider::AnyAgent;
     use crate::sandbox::Sandbox;
     use crate::session::{MessageRole, Session};
@@ -335,6 +337,10 @@ mod controller {
     }
 
     fn start(turns: Vec<Vec<&str>>) -> Link {
+        start_with(turns, None)
+    }
+
+    fn start_with(turns: Vec<Vec<&str>>, permission: Option<PermCheck>) -> Link {
         isolate_data_dirs();
         let cli = Cli {
             api_key: Some("test-key".to_string()),
@@ -352,7 +358,7 @@ mod controller {
                 None,
             )
             .expect("test client"),
-            permission: None,
+            permission,
             ask_tx: None,
             sandbox: Sandbox::new(false, "bwrap"),
             #[cfg(feature = "mcp")]
@@ -466,13 +472,10 @@ mod controller {
             .send(Command::Send("/rename Fix the build".into()))
             .unwrap();
         let updates = until_finished(&mut link).await;
-        let reloaded = updates.iter().rev().find_map(|u| match u {
-            Update::Loaded(snapshot) => Some(snapshot),
-            _ => None,
-        });
-        assert_eq!(
-            reloaded.map(|s| s.info.title.as_str()),
-            Some("Fix the build")
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, Update::Running(c) if c == "/rename Fix the build"))
         );
         let Some(Update::Finished(info)) = updates.last() else {
             unreachable!()
@@ -497,6 +500,97 @@ mod controller {
             u,
             Update::Loaded(s) if s.transcript.rows.iter().any(|r| matches!(r, Row::User(_)))
         )));
+    }
+
+    #[test]
+    fn command_output_drops_the_echo() {
+        assert_eq!(without_echo("/help", "> /help\n\nCommands:"), "Commands:");
+        assert_eq!(without_echo("a\nb", "> a\n> b\n\nout"), "out");
+        assert_eq!(without_echo("/help", "no echo here"), "no echo here");
+        assert_eq!(without_echo("/x", "> /x"), "");
+        assert_eq!(without_echo("/x", "> /y\nout"), "> /y\nout");
+    }
+
+    /// Updates up to the first one `pick` accepts.
+    async fn until<T>(link: &mut Link, mut pick: impl FnMut(&Update) -> Option<T>) -> T {
+        loop {
+            if let Some(found) = pick(&next(link).await) {
+                return found;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mode_changes_reach_the_shared_checker() {
+        let _guard = run_print_guard::acquire();
+        let checker = std::sync::Arc::new(std::sync::Mutex::new(PermissionChecker::new(
+            &Default::default(),
+            SecurityMode::Standard,
+            None,
+            None,
+        )));
+        let mut link = start_with(vec![], Some(checker.clone()));
+        let first = until(&mut link, |u| match u {
+            Update::Mode(mode) => Some(*mode),
+            _ => None,
+        })
+        .await;
+        assert_eq!(first, Some(SecurityMode::Standard));
+
+        link.commands
+            .send(Command::SetMode(SecurityMode::Guarded))
+            .unwrap();
+        let next_mode = until(&mut link, |u| match u {
+            Update::Mode(mode) => Some(*mode),
+            _ => None,
+        })
+        .await;
+        assert_eq!(next_mode, Some(SecurityMode::Guarded));
+        assert_eq!(
+            checker.lock().unwrap().mode(),
+            SecurityMode::Guarded,
+            "the window and its agents share one checker"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unqueue_drops_a_waiting_prompt() {
+        let _guard = run_print_guard::acquire();
+        let mut link = start(vec![vec!["one"], vec!["three"]]);
+        for prompt in ["first", "second", "third"] {
+            link.commands.send(Command::Send(prompt.into())).unwrap();
+        }
+        link.commands.send(Command::Unqueue(0)).unwrap();
+
+        let mut updates = until_finished(&mut link).await;
+        assert!(
+            updates
+                .iter()
+                .any(|u| matches!(u, Update::Queue(q) if q == &["third".to_string()]))
+        );
+        updates.extend(until_finished(&mut link).await);
+        assert_eq!(started(&updates), ["first", "third"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reasoning_toggles_in_the_window() {
+        let _guard = run_print_guard::acquire();
+        let mut link = start(vec![]);
+        let notice = |u: &Update| match u {
+            Update::Notice(text) => Some(text.clone()),
+            _ => None,
+        };
+        link.commands
+            .send(Command::Send("/reasoning".into()))
+            .unwrap();
+        let first = until(&mut link, notice).await;
+        link.commands
+            .send(Command::Send("/thinking".into()))
+            .unwrap();
+        let second = until(&mut link, notice).await;
+        let mut both = [first.as_str(), second.as_str()];
+        both.sort_unstable();
+        assert_eq!(both, ["reasoning: off", "reasoning: on"]);
     }
 }
 
