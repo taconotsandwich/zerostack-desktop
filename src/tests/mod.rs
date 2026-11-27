@@ -28,6 +28,8 @@ mod context_tests;
 mod convert_history_tests;
 #[cfg(test)]
 mod crc_tests;
+#[cfg(all(test, feature = "desktop"))]
+mod desktop_tests;
 #[cfg(test)]
 mod edit_tests;
 #[cfg(test)]

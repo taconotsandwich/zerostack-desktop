@@ -237,6 +237,13 @@ pub struct Cli {
     )]
     pub acp_enabled: bool,
 
+    #[cfg(feature = "desktop")]
+    #[arg(
+        long = "desktop",
+        help = "Open the desktop window in the current folder"
+    )]
+    pub desktop: bool,
+
     #[cfg(feature = "acp")]
     #[arg(long = "acp-host", help = "ACP TCP bind host [default: stdio mode]")]
     pub acp_host: Option<String>,

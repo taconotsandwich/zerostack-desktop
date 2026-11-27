@@ -132,5 +132,9 @@ async fn run() -> anyhow::Result<()> {
     let phase_start = std::time::Instant::now();
     startup.resolve_prompts().await?;
     tracing::debug!("startup: resolve_prompts took {:?}", phase_start.elapsed());
+    #[cfg(feature = "desktop")]
+    if startup.cli.desktop {
+        return extras::desktop::run(startup);
+    }
     startup.dispatch().await
 }

@@ -36,6 +36,9 @@ advisor = []
 hooks = []
 lsp = ["dep:lsp-types"]
 rtk = []
+# Native desktop window (`zerostack --desktop`). The window blocks the main
+# thread, so agent turns need the multi-thread runtime's workers.
+desktop = ["multithread", "dep:iced", "dep:rfd"]
 
 [dependencies]
 rig = { version = "0.46" }
@@ -84,6 +87,14 @@ lsp-types = { version = "0.97", optional = true }
 mimalloc = { version = "0.1", default-features = false }
 base64 = { version = "0.23", optional = true }
 lopdf = { version = "0.47", optional = true }
+iced = { version = "0.14", optional = true, features = [
+    "svg",
+    "markdown",
+    "canvas",
+    "tokio",
+    "advanced",
+] }
+rfd = { version = "0.18", optional = true }
 
 [dev-dependencies]
 # Adds rig-core's `test_utils` module (scripted `CompletionModel` test
