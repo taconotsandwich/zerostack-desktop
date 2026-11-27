@@ -152,6 +152,8 @@ pub(crate) enum Message {
     /// The window came to the front: another window or the TUI may have
     /// saved sessions here meanwhile.
     Focused,
+    /// The window is on screen.
+    Opened,
     NewSession,
     Open(CompactString),
     ToggleSidebar,
@@ -302,6 +304,7 @@ impl App {
                 }
             }
             Message::Focused => self.send(Command::Refresh),
+            Message::Opened => super::show_dock_icon(),
             Message::NewSession => {
                 self.send(Command::New);
                 self.screen = Screen::Chat;
@@ -725,6 +728,7 @@ const REJECT: usize = 2;
 fn input_event(event: Event, status: event::Status, _: window::Id) -> Option<Message> {
     match event {
         Event::Window(window::Event::Focused) => Some(Message::Focused),
+        Event::Window(window::Event::Opened { .. }) => Some(Message::Opened),
         Event::Mouse(mouse::Event::ButtonPressed(_)) => {
             Some(Message::Clicked(status == event::Status::Ignored))
         }

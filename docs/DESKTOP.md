@@ -115,5 +115,6 @@ Everything lives in `src/extras/desktop/` and only that module imports iced.
 | `widgets.rs`, `style.rs`, `theme.rs`, `icon.rs` | Shared widgets, styles, the palette and metrics, Heroicons |
 | `commands.rs`, `settings.rs` | The command menu entries, and the Providers page data and config edits |
 
-Fonts (Inter, JetBrains Mono, SIL OFL) and icons (Heroicons, MIT) are in
-`assets/desktop/` with their licenses.
+Fonts (Inter, JetBrains Mono, SIL OFL), icons (Heroicons, MIT) and the app
+icon (`icon.png`) are in `assets/desktop/` with their licenses. The app icon
+is the window icon on Linux and Windows and the Dock icon on macOS.

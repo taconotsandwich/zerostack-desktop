@@ -38,7 +38,15 @@ lsp = ["dep:lsp-types"]
 rtk = []
 # Native desktop window (`zerostack --desktop`). The window blocks the main
 # thread, so agent turns need the multi-thread runtime's workers.
-desktop = ["multithread", "dep:iced", "dep:rfd"]
+desktop = [
+    "multithread",
+    "dep:iced",
+    "dep:rfd",
+    "dep:png",
+    "dep:objc2",
+    "dep:objc2-app-kit",
+    "dep:objc2-foundation",
+]
 
 [dependencies]
 rig = { version = "0.46" }
@@ -95,6 +103,23 @@ iced = { version = "0.14", optional = true, features = [
     "advanced",
 ] }
 rfd = { version = "0.18", optional = true }
+# Decodes the desktop window icon; iced already builds it for its SVGs.
+png = { version = "0.17", optional = true }
+
+# The desktop app's Dock icon. winit ignores window icons on macOS, so the
+# icon is set on NSApplication; rfd already builds these crates.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSImage",
+    "NSResponder",
+] }
+objc2-foundation = { version = "0.3", optional = true, default-features = false, features = [
+    "std",
+    "NSData",
+] }
 
 [dev-dependencies]
 # Adds rig-core's `test_utils` module (scripted `CompletionModel` test

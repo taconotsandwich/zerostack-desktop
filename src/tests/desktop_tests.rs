@@ -43,6 +43,15 @@ fn fonts_are_opentype() {
     }
 }
 
+#[test]
+fn app_icon_decodes_to_rgba() {
+    use crate::extras::desktop::{APP_ICON, decode_rgba};
+    let (rgba, width, height) = decode_rgba(APP_ICON).expect("icon is an RGBA PNG");
+    assert_eq!((width, height), (512, 512));
+    assert_eq!(rgba.len(), 512 * 512 * 4);
+    assert!(decode_rgba(b"not a png").is_none());
+}
+
 // ── Transcript ─────────────────────────────────────────────────────────
 
 mod transcript {

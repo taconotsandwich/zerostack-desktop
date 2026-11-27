@@ -29,6 +29,9 @@ use crate::startup::Startup;
 /// Logical window size at launch, matching the design canvas boards.
 const WINDOW_SIZE: (f32, f32) = (1280.0, 800.0);
 
+/// The app icon: the canvas mark on the macOS icon grid, 512px RGBA.
+pub(crate) const APP_ICON: &[u8] = include_bytes!("../../../assets/desktop/icon.png");
+
 /// Handle to the startup runtime. iced builds its executor through
 /// `Executor::new()`, which takes no arguments, so the handle is parked here.
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
@@ -72,6 +75,9 @@ fn window_settings() -> iced::window::Settings {
     iced::window::Settings {
         size: iced::Size::new(WINDOW_SIZE.0, WINDOW_SIZE.1),
         min_size: Some(iced::Size::new(720.0, 480.0)),
+        icon: decode_rgba(APP_ICON).and_then(|(rgba, width, height)| {
+            iced::window::icon::from_rgba(rgba, width, height).ok()
+        }),
         #[cfg(target_os = "macos")]
         platform_specific: iced::window::settings::PlatformSpecific {
             title_hidden: true,
@@ -79,6 +85,43 @@ fn window_settings() -> iced::window::Settings {
             fullsize_content_view: true,
         },
         ..iced::window::Settings::default()
+    }
+}
+
+/// Decode an 8-bit RGBA PNG into its pixels, width and height.
+pub(crate) fn decode_rgba(bytes: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let mut reader = png::Decoder::new(bytes).read_info().ok()?;
+    let mut pixels = vec![0; reader.output_buffer_size()];
+    let frame = reader.next_frame(&mut pixels).ok()?;
+    if frame.color_type != png::ColorType::Rgba || frame.bit_depth != png::BitDepth::Eight {
+        return None;
+    }
+    pixels.truncate(frame.buffer_size());
+    Some((pixels, frame.width, frame.height))
+}
+
+/// Show the app icon in the Dock. winit ignores window icons on macOS and
+/// a bare binary has no bundle icon, so it goes on NSApplication. Must run
+/// on the main thread once the window exists; elsewhere it does nothing.
+/// The one AppKit setter has no safe binding.
+#[allow(unsafe_code)]
+pub(crate) fn show_dock_icon() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::{AnyThread, MainThreadMarker};
+        use objc2_app_kit::{NSApplication, NSImage};
+        use objc2_foundation::NSData;
+
+        let Some(main_thread) = MainThreadMarker::new() else {
+            return;
+        };
+        let data = NSData::with_bytes(APP_ICON);
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(main_thread);
+        // SAFETY: on the main thread, with an image that is not nil.
+        unsafe { app.setApplicationIconImage(Some(&image)) };
     }
 }
 
