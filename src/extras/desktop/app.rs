@@ -108,6 +108,8 @@ pub(crate) struct App {
     pub expanded: HashSet<usize>,
     /// Activity groups that are open, by their first row.
     pub open_groups: HashSet<usize>,
+    /// The row whose text was just copied: its button shows a check.
+    pub copied: Option<usize>,
     // ── inputs ──
     pub composer: text_editor::Content,
     pub composer_focused: bool,
@@ -188,6 +190,10 @@ pub(crate) enum Message {
     // transcript
     Toggle(usize),
     ToggleGroup(usize),
+    /// Copy a prompt's or an answer's text, by row.
+    Copy(usize),
+    /// The copied check has shown long enough.
+    CopyFaded(usize),
     // permission card
     Note(Action),
     AskMove(isize),
@@ -226,6 +232,7 @@ impl App {
             replies: Vec::new(),
             expanded: HashSet::new(),
             open_groups: HashSet::new(),
+            copied: None,
             composer: text_editor::Content::new(),
             composer_focused: true,
             note: text_editor::Content::new(),
@@ -446,6 +453,25 @@ impl App {
                     self.open_groups.insert(first);
                 }
             }
+            Message::Copy(at) => {
+                let Some(text) = self.transcript.rows.get(at).and_then(copy_text) else {
+                    return Task::none();
+                };
+                let text = text.to_string();
+                self.copied = Some(at);
+                return Task::batch([
+                    iced::clipboard::write(text),
+                    // The timer starts when polled, on the runtime.
+                    Task::perform(async { tokio::time::sleep(COPIED_FOR).await }, move |()| {
+                        Message::CopyFaded(at)
+                    }),
+                ]);
+            }
+            Message::CopyFaded(at) => {
+                if self.copied == Some(at) {
+                    self.copied = None;
+                }
+            }
             Message::Note(action) => self.note.perform(action),
             Message::AskMove(step) => {
                 if let Some(card) = &mut self.ask {
@@ -529,6 +555,7 @@ impl App {
                 self.replies.clear();
                 self.expanded.clear();
                 self.open_groups.clear();
+                self.copied = None;
                 task = latest();
             }
             Update::Started(prompt) => {
@@ -729,6 +756,9 @@ fn latest<T>() -> Task<T> {
     operation::snap_to(TRANSCRIPT, RelativeOffset::START)
 }
 
+/// How long a copy button shows its check.
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Allow once, Always allow, Reject.
 pub(crate) const ASK_OPTIONS: usize = 3;
 const REJECT: usize = 2;
@@ -837,6 +867,15 @@ pub(crate) fn mode_about(mode: SecurityMode) -> &'static str {
         SecurityMode::ReadOnly => "Reads only, everything else is denied",
         SecurityMode::PlanWrite => "Reads, and writes only to plan files",
         SecurityMode::Yolo => "Everything but destructive commands runs",
+    }
+}
+
+/// What a row's copy button copies: a prompt as sent, a reply as its
+/// markdown source. Other rows have no button.
+pub(crate) fn copy_text(row: &Row) -> Option<&str> {
+    match row {
+        Row::User(text) | Row::Reply(text) => Some(text),
+        _ => None,
     }
 }
 

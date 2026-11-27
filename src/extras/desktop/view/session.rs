@@ -210,15 +210,16 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         Lead::Collapsed
     };
     match entry {
-        Row::User(prompt) => container(
+        Row::User(prompt) => side(
+            app,
+            at,
             container(label(prompt.as_str(), text::BODY, color::INK))
                 .padding([10, 16])
                 .max_width(BUBBLE_WIDTH)
-                .style(style::bubble),
-        )
-        .width(Length::Fill)
-        .align_x(Alignment::End)
-        .into(),
+                .style(style::bubble)
+                .into(),
+            Alignment::End,
+        ),
         Row::Reply(reply) => match app.replies.get(at).and_then(Option::as_ref) {
             Some(parsed) => container(
                 markdown::view(parsed.content.items(), markdown_settings()).map(Message::Link),
@@ -315,18 +316,40 @@ fn answer_view<'a>(app: &'a App, at: usize, reply: &'a str) -> Element<'a, Messa
         }
         None => label(reply, text::BODY, color::INK).into(),
     };
-    container(
+    side(
+        app,
+        at,
         container(body)
             .padding([10, 16])
             .max_width(BUBBLE_WIDTH)
             .style(|theme| container::Style {
                 text_color: Some(color::INK),
                 ..style::bubble(theme)
-            }),
+            })
+            .into(),
+        Alignment::Start,
     )
-    .width(Length::Fill)
-    .align_x(Alignment::Start)
-    .into()
+}
+
+/// One side of the conversation: the bubble for row `at` against `edge`,
+/// with its copy button under it. The button shows a check for a moment
+/// after it copies.
+fn side<'a>(
+    app: &App,
+    at: usize,
+    bubble: Element<'a, Message>,
+    edge: Alignment,
+) -> Element<'a, Message> {
+    let glyph = if app.copied == Some(at) {
+        Icon::Check
+    } else {
+        Icon::DocumentDuplicate
+    };
+    column![bubble, icon_button(glyph, 14.0, 24.0, Message::Copy(at))]
+        .spacing(2)
+        .width(Length::Fill)
+        .align_x(edge)
+        .into()
 }
 
 /// A tool call's line: its verb, then what it ran on.

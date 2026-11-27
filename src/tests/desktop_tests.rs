@@ -1145,12 +1145,38 @@ mod app {
         let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
         assert!(app.open_groups.is_empty());
     }
+
+    #[test]
+    fn copy_marks_the_row_until_its_check_fades() {
+        use crate::extras::desktop::controller::Snapshot;
+        use crate::extras::desktop::transcript::Transcript;
+
+        let (mut app, _rx) = app();
+        let _ = app.update(Message::Controller(Update::Started("go".into())));
+        let _ = app.update(Message::Copy(0));
+        assert_eq!(app.copied, Some(0));
+        // A row with nothing to copy leaves the mark alone.
+        let _ = app.update(Message::Copy(7));
+        assert_eq!(app.copied, Some(0));
+        let _ = app.update(Message::CopyFaded(3));
+        assert_eq!(app.copied, Some(0));
+        let _ = app.update(Message::CopyFaded(0));
+        assert_eq!(app.copied, None);
+
+        let _ = app.update(Message::Copy(0));
+        let snapshot = Snapshot {
+            info: app.info.clone(),
+            transcript: Transcript::default(),
+        };
+        let _ = app.update(Message::Controller(Update::Loaded(snapshot)));
+        assert_eq!(app.copied, None);
+    }
 }
 
 mod layout {
     use std::time::{Duration, Instant};
 
-    use crate::extras::desktop::app::activity_summary;
+    use crate::extras::desktop::app::{activity_summary, copy_text};
     use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
 
     fn tool(name: &str) -> Row {
@@ -1327,5 +1353,17 @@ mod layout {
             "Delegated 1 task"
         );
         assert_eq!(activity_summary(&[subagent(), subagent()]), "Used 2 tools");
+    }
+
+    #[test]
+    fn prompts_and_replies_copy_as_written() {
+        assert_eq!(copy_text(&Row::User("fix it".into())), Some("fix it"));
+        assert_eq!(
+            copy_text(&Row::Reply("Use `cargo test`.".into())),
+            Some("Use `cargo test`.")
+        );
+        assert_eq!(copy_text(&tool("bash")), None);
+        assert_eq!(copy_text(&thought(2)), None);
+        assert_eq!(copy_text(&Row::Notice("renamed".into())), None);
     }
 }

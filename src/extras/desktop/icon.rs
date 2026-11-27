@@ -29,6 +29,7 @@ macro_rules! icons {
 icons! {
     ArrowPath => "outline/arrow-path.svg",
     ArrowUp => "outline/arrow-up.svg",
+    Check => "outline/check.svg",
     CheckCircle => "outline/check-circle.svg",
     ChevronDoubleLeft => "outline/chevron-double-left.svg",
     ChevronDown => "outline/chevron-down.svg",
@@ -37,6 +38,7 @@ icons! {
     Clock => "outline/clock.svg",
     Cog6Tooth => "outline/cog-6-tooth.svg",
     CommandLine => "outline/command-line.svg",
+    DocumentDuplicate => "outline/document-duplicate.svg",
     EllipsisHorizontal => "outline/ellipsis-horizontal.svg",
     ExclamationCircle => "outline/exclamation-circle.svg",
     Folder => "outline/folder.svg",
