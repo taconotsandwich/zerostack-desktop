@@ -16,6 +16,7 @@ Minimal coding agent written in Rust, inspired by [pi](https://pi.dev/docs/lates
 - **Permission system**: five configurable modes with per-tool patterns, session allowlists, and configurable mode-to-rule application policies
 - **Session management**: save/load/resume sessions, auto-compaction to stay within context windows
 - **Terminal UI**: crossterm-based, markdown rendering, mouse selection/copy, scrollback, reasoning visibility toggle
+- **Desktop app** (gated): a native window (`zerostack --desktop`) on the same engine, sessions and config as the TUI, one window per folder ([docs/DESKTOP.md](docs/DESKTOP.md))
 - **Prompts system**: switch between system prompt modes at runtime (`code`, `plan`, `review`, `debug`, etc.) to tailor the agent's behavior to the task without having to manage Skills.
 - **MCP support**: connect MCP servers for extended tooling (exposed as an optional compile-time feature)
 - **Integrated Exa search**: allows for WebFetch and WebSearch tools
@@ -530,6 +531,25 @@ never pushed — run `git push` yourself afterwards.
 | `--parallel`        | Create a timestamped worktree (`wt-<ts>-<pid>`) with auto-merge on exit. |
 | `--wt-force`        | Force worktree remove and branch delete (`-D`) even if dirty. |
 | `--wt-base-dir <dir>` | Base directory for worktrees (default: parent of repo; created if missing). |
+
+## Desktop app
+
+**NOTE:** the desktop app is gated behind the `desktop` feature and is not
+included in the default build.
+
+```bash
+cargo install zerostack --features desktop
+
+# Open a window for the current folder
+zerostack --desktop
+```
+
+The window runs the same agent, tools, permission checks and sessions as the
+TUI, in the same process. Each window serves one folder; opening another folder
+starts a new window. It has a sessions sidebar, streamed transcript, permission
+card and a settings page for provider keys and defaults. See
+[docs/DESKTOP.md](docs/DESKTOP.md) for the screens, keyboard shortcuts and what
+is not supported yet.
 
 ## ACP (Agent Communication Protocol) support
 
