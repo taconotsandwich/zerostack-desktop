@@ -511,6 +511,41 @@ mod controller {
         )));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn switching_sessions_loads_the_saved_transcript() {
+        let _guard = run_print_guard::acquire();
+        let mut link = start(vec![vec!["one"], vec!["two"]]);
+        link.commands.send(Command::Send("first".into())).unwrap();
+        let Some(Update::Finished(first)) = until_finished(&mut link).await.pop() else {
+            unreachable!()
+        };
+        link.commands.send(Command::New).unwrap();
+        let fresh = until(&mut link, |u| match u {
+            Update::Loaded(s) => Some(s.info.id.clone()),
+            _ => None,
+        })
+        .await;
+        assert_ne!(fresh, first.id);
+        link.commands.send(Command::Send("second".into())).unwrap();
+        until_finished(&mut link).await;
+
+        link.commands.send(Command::Open(first.id.clone())).unwrap();
+        let snapshot = until(&mut link, |u| match u {
+            Update::Loaded(s) => Some(s.clone()),
+            Update::Failed(text) => panic!("switch failed: {text}"),
+            _ => None,
+        })
+        .await;
+        assert_eq!(snapshot.info.id, first.id);
+        assert!(
+            snapshot
+                .transcript
+                .rows
+                .iter()
+                .any(|r| matches!(r, Row::User(text) if text == "first"))
+        );
+    }
+
     #[test]
     fn command_output_drops_the_echo() {
         assert_eq!(without_echo("/help", "> /help\n\nCommands:"), "Commands:");
