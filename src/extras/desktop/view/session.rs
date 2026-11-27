@@ -3,12 +3,11 @@
 
 use std::ops::Range;
 
-use iced::alignment::Horizontal;
 use iced::widget::text::{LineHeight, Wrapping};
 use iced::widget::{
     Column, button, checkbox, column, container, markdown, row, rule, scrollable, space, stack,
 };
-use iced::{Alignment, Element, Length, Padding, Theme, border};
+use iced::{Alignment, Element, Length, Padding, border};
 
 use super::{composer, main_bar, permission};
 use crate::extras::desktop::app::{
@@ -540,11 +539,20 @@ impl Prose {
         LineHeight::Absolute(self.text.1.into())
     }
 
-    /// List rows, each marker on its item's first line.
+    /// Width of a list's marker column: room for a number of `digits` and
+    /// its dot, a bullet's too.
+    fn marker(&self, digits: usize) -> f32 {
+        self.text.0 * 0.6 * (digits + 1) as f32
+    }
+
+    /// List rows, each marker on its item's first line. Markers sit right
+    /// aligned in a column `width` wide, so bulleted and numbered items start
+    /// at the same place.
     fn list<'a>(
         &self,
         settings: markdown::Settings,
         bullets: &'a [markdown::Bullet],
+        width: f32,
         marker: impl Fn(usize, &'a markdown::Bullet) -> Element<'a, Message>,
     ) -> Element<'a, Message> {
         let nested = markdown::Settings {
@@ -553,9 +561,12 @@ impl Prose {
         };
         Column::with_children(bullets.iter().enumerate().map(|(at, bullet)| {
             let (markdown::Bullet::Point { items } | markdown::Bullet::Task { items, .. }) = bullet;
-            row![marker(at, bullet), markdown::view_with(items, nested, self)]
-                .spacing(8)
-                .into()
+            row![
+                container(marker(at, bullet)).align_right(width),
+                markdown::view_with(items, nested, self)
+            ]
+            .spacing(8)
+            .into()
         }))
         .spacing(settings.spacing * 0.5)
         .into()
@@ -617,8 +628,9 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
             .into()
     }
 
-    /// iced's code block, with selectable lines. `iced_selection`'s own
-    /// ignores the settings' code font.
+    /// Mono lines in a well, selectable and scrolling sideways. Without a
+    /// highlighter iced gives every code span the body font, so the lines
+    /// are spanned with the code font as the body font.
     fn code_block(
         &self,
         settings: markdown::Settings,
@@ -626,25 +638,29 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         _code: &'a str,
         lines: &'a [markdown::Text],
     ) -> Element<'a, Message> {
+        let mono = markdown::Style {
+            font: settings.style.code_block_font,
+            ..settings.style
+        };
         let lines = lines.iter().map(|line| {
-            iced_selection::rich_text(line.spans(settings.style))
+            iced_selection::rich_text(line.spans(mono))
                 .on_link_click(Message::Link)
-                .font(settings.style.code_block_font)
                 .size(settings.code_size)
                 .line_height(LineHeight::Absolute(text::CODE.1.into()))
                 .into()
         });
         container(
-            scrollable(container(Column::with_children(lines)).padding(settings.code_size))
+            scrollable(container(Column::with_children(lines)).padding([10, 14]))
                 .direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default()
-                        .width(settings.code_size / 2)
-                        .scroller_width(settings.code_size / 2),
-                )),
+                    scrollable::Scrollbar::default().width(4).scroller_width(4),
+                ))
+                .style(style::scroller),
         )
         .width(Length::Fill)
-        .padding(settings.code_size / 4)
-        .class(<Theme as markdown::Catalog>::code_block())
+        .style(|theme| container::Style {
+            text_color: Some(color::INK),
+            ..style::well(theme)
+        })
         .into()
     }
 
@@ -653,18 +669,22 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         settings: markdown::Settings,
         bullets: &'a [markdown::Bullet],
     ) -> Element<'a, Message> {
-        let list = self.list(settings, bullets, |_, bullet| match bullet {
-            markdown::Bullet::Point { .. } => iced::widget::text("•")
-                .size(settings.text_size)
-                .line_height(self.line())
-                .into(),
-            markdown::Bullet::Task { done, .. } => {
-                container(checkbox(*done).size(settings.text_size))
-                    .center_y(self.text.1)
-                    .into()
-            }
-        });
-        container(list).padding(Padding::ZERO.left(4)).into()
+        self.list(
+            settings,
+            bullets,
+            self.marker(1),
+            |_, bullet| match bullet {
+                markdown::Bullet::Point { .. } => iced::widget::text("•")
+                    .size(settings.text_size)
+                    .line_height(self.line())
+                    .into(),
+                markdown::Bullet::Task { done, .. } => {
+                    container(checkbox(*done).size(settings.text_size))
+                        .center_y(self.text.1)
+                        .into()
+                }
+            },
+        )
     }
 
     fn ordered_list(
@@ -673,18 +693,18 @@ impl<'a> markdown::Viewer<'a, Message> for Prose {
         start: u64,
         bullets: &'a [markdown::Bullet],
     ) -> Element<'a, Message> {
-        let digits = ((start + bullets.len() as u64).max(1) as f32)
-            .log10()
-            .ceil();
-        let width = settings.text_size * ((digits / 2.0).ceil() + 1.0);
-        self.list(settings, bullets, |at, _| {
-            iced::widget::text!("{}.", start + at as u64)
-                .size(settings.text_size)
-                .line_height(self.line())
-                .align_x(Horizontal::Right)
-                .width(width)
-                .into()
-        })
+        let last = start + bullets.len().saturating_sub(1) as u64;
+        self.list(
+            settings,
+            bullets,
+            self.marker(last.to_string().len()),
+            |at, _| {
+                iced::widget::text!("{}.", start + at as u64)
+                    .size(settings.text_size)
+                    .line_height(self.line())
+                    .into()
+            },
+        )
     }
 
     /// A bar and muted, smaller text: the look of a quoted selection.
@@ -725,7 +745,15 @@ fn markdown_settings() -> markdown::Settings {
                 background: color::CODE_FILL.into(),
                 border: border::rounded(5),
             },
-            inline_code_padding: Padding::from([1, 5]),
+            // The highlight is drawn over the line, not laid out, so it
+            // stays inside the spaces around the code and under the line
+            // height.
+            inline_code_padding: Padding {
+                top: -2.0,
+                bottom: -2.0,
+                left: 2.0,
+                right: 2.0,
+            },
             inline_code_color: color::GOLD,
             inline_code_font: theme::MONO,
             code_block_font: theme::MONO,
