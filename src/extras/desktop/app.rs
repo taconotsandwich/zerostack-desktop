@@ -879,6 +879,66 @@ pub(crate) fn copy_text(row: &Row) -> Option<&str> {
     }
 }
 
+/// The line Claude desktop starts a quoted selection with; the quote's
+/// `>` lines follow it.
+const REPLY_MARKER: &str = "<!-- reply -->";
+
+/// A piece of a prompt as its bubble draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PromptPart {
+    Text(String),
+    /// A quoted selection, without its marker and `>` prefixes.
+    Quote(String),
+}
+
+/// `prompt` cut into its text and its reply blocks: a `<!-- reply -->`
+/// line and the `>` lines right after it. A marker with no `>` lines after
+/// it is plain text.
+pub(crate) fn prompt_parts(prompt: &str) -> Vec<PromptPart> {
+    let lines: Vec<&str> = prompt.lines().collect();
+    let mut parts = Vec::new();
+    let mut text = Vec::new();
+    let mut at = 0;
+    while at < lines.len() {
+        let quoted = if lines[at].trim() == REPLY_MARKER {
+            lines[at + 1..]
+                .iter()
+                .take_while(|line| line.starts_with('>'))
+                .count()
+        } else {
+            0
+        };
+        if quoted == 0 {
+            text.push(lines[at]);
+            at += 1;
+            continue;
+        }
+        push_text(&mut parts, &text);
+        text.clear();
+        let quote: Vec<&str> = lines[at + 1..=at + quoted]
+            .iter()
+            .map(|line| line[1..].strip_prefix(' ').unwrap_or(&line[1..]))
+            .collect();
+        let quote = quote.join("\n");
+        let quote = quote.trim_matches('\n');
+        if !quote.is_empty() {
+            parts.push(PromptPart::Quote(quote.to_string()));
+        }
+        at += 1 + quoted;
+    }
+    push_text(&mut parts, &text);
+    parts
+}
+
+/// `lines` as one text part, unless they are blank.
+fn push_text(parts: &mut Vec<PromptPart>, lines: &[&str]) {
+    let text = lines.join("\n");
+    let text = text.trim();
+    if !text.is_empty() {
+        parts.push(PromptPart::Text(text.to_string()));
+    }
+}
+
 /// The verb an activity row leads with for a finished tool call.
 pub(crate) fn tool_verb(name: &str) -> &str {
     match name {

@@ -39,7 +39,10 @@ the others.
   switches it, so the branch is plain text.
 - **Session**: the transcript, read as a conversation: your prompts in
   bubbles on the right, and zerostack's answer, the reply that ends a turn,
-  in a bubble on the left once the turn finishes. Replies stream as plain
+  in a bubble on the left once the turn finishes. A prompt's reply blocks
+  (a `<!-- reply -->` line and the `>` lines under it, the format Claude
+  desktop quotes a selection in) show as quotes with a bar beside them,
+  the marker hidden. Replies stream as plain
   markdown, and text between tool calls stays plain. Back-to-back tool calls
   and thinking fold into one line, such as "Ran 3 commands, read 2 files";
   click it to list each call, and click a call to see its output or the

@@ -1176,7 +1176,7 @@ mod app {
 mod layout {
     use std::time::{Duration, Instant};
 
-    use crate::extras::desktop::app::{activity_summary, copy_text};
+    use crate::extras::desktop::app::{PromptPart, activity_summary, copy_text, prompt_parts};
     use crate::extras::desktop::transcript::{Block, Call, Row, Thought, Tool, ToolState, blocks};
 
     fn tool(name: &str) -> Row {
@@ -1365,5 +1365,70 @@ mod layout {
         assert_eq!(copy_text(&tool("bash")), None);
         assert_eq!(copy_text(&thought(2)), None);
         assert_eq!(copy_text(&Row::Notice("renamed".into())), None);
+    }
+
+    fn text(body: &str) -> PromptPart {
+        PromptPart::Text(body.into())
+    }
+
+    fn quote(body: &str) -> PromptPart {
+        PromptPart::Quote(body.into())
+    }
+
+    #[test]
+    fn a_plain_prompt_is_one_text() {
+        assert_eq!(
+            prompt_parts("fix it\n\nplease\n"),
+            vec![text("fix it\n\nplease")]
+        );
+        // Markdown quotes without the marker are the user's own text.
+        assert_eq!(prompt_parts("> as said\nok"), vec![text("> as said\nok")]);
+    }
+
+    #[test]
+    fn a_reply_block_is_a_quote_before_the_text() {
+        let prompt = "<!-- reply -->\n> Ran 3 commands\n> \n> All green.\n\nwhy three?";
+        assert_eq!(
+            prompt_parts(prompt),
+            vec![quote("Ran 3 commands\n\nAll green."), text("why three?")]
+        );
+        // `>` with no space after it, and no text under the quote.
+        assert_eq!(
+            prompt_parts("<!-- reply -->\n>tight\n>  indented"),
+            vec![quote("tight\n indented")]
+        );
+    }
+
+    #[test]
+    fn reply_blocks_interleave_with_text() {
+        let prompt =
+            "start\n\n<!-- reply -->\n> one\n\nabout one\n\n<!-- reply -->\n> two\n\nabout two";
+        assert_eq!(
+            prompt_parts(prompt),
+            vec![
+                text("start"),
+                quote("one"),
+                text("about one"),
+                quote("two"),
+                text("about two"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_marker_without_quote_lines_is_text() {
+        assert_eq!(
+            prompt_parts("<!-- reply -->\nhello"),
+            vec![text("<!-- reply -->\nhello")]
+        );
+        assert_eq!(
+            prompt_parts("hi\n<!-- reply -->"),
+            vec![text("hi\n<!-- reply -->")]
+        );
+        // A quote of blank lines draws nothing.
+        assert_eq!(
+            prompt_parts("<!-- reply -->\n>\n> \n\nok"),
+            vec![text("ok")]
+        );
     }
 }

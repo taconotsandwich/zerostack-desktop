@@ -280,6 +280,16 @@ pub fn line(_: &Theme) -> rule::Style {
     }
 }
 
+/// The bar beside a quote in a prompt bubble.
+pub fn quote_bar(_: &Theme) -> rule::Style {
+    rule::Style {
+        color: color::EDGE,
+        radius: 1.0.into(),
+        fill_mode: rule::FillMode::Full,
+        snap: true,
+    }
+}
+
 /// Thin scroller with no rail.
 pub fn scroller(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     let mut style = scrollable::default(theme, status);

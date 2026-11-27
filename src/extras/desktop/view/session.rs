@@ -11,8 +11,8 @@ use iced::{Alignment, Element, Length, Padding, Theme, border};
 
 use super::{composer, main_bar, permission};
 use crate::extras::desktop::app::{
-    App, Menu, Message, Parsed, TRANSCRIPT, activity_summary, clip, folder_name, tool_detail,
-    tool_verb, tool_verb_running,
+    App, Menu, Message, Parsed, PromptPart, TRANSCRIPT, activity_summary, clip, folder_name,
+    prompt_parts, tool_detail, tool_verb, tool_verb_running,
 };
 use crate::extras::desktop::icon::{self, Icon};
 use crate::extras::desktop::select::selectable;
@@ -215,7 +215,7 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
             app,
             at,
             selectable(
-                container(prose(prompt.as_str(), text::BODY, color::INK))
+                container(prompt_view(prompt))
                     .padding([10, 16])
                     .max_width(BUBBLE_WIDTH)
                     .style(style::bubble),
@@ -308,6 +308,21 @@ fn row_view<'a>(app: &'a App, at: usize, entry: &'a Row) -> Element<'a, Message>
         .spacing(6)
         .into(),
     }
+}
+
+/// A prompt's text, with its reply blocks drawn as quotes: a bar and muted
+/// text, the `<!-- reply -->` marker hidden.
+fn prompt_view(prompt: &str) -> Element<'_, Message> {
+    let parts = prompt_parts(prompt).into_iter().map(|part| match part {
+        PromptPart::Text(body) => prose(body, text::BODY, color::INK).into(),
+        PromptPart::Quote(quote) => row![
+            rule::vertical(2).style(style::quote_bar),
+            prose(quote, text::SMALL, color::MUTED),
+        ]
+        .spacing(10)
+        .into(),
+    });
+    Column::with_children(parts).spacing(8).into()
 }
 
 /// zerostack's answer: the reply that ends a turn, in a bubble on the left,
